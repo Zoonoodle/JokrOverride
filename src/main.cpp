@@ -1,94 +1,92 @@
 #include "main.h"
 
-/**
- * A callback function for LLEMU's center button.
- *
- * When this callback is fired, it will toggle line 2 of the LCD text between
- * "I was pressed!" and nothing.
- */
-void on_center_button() {
-	static bool pressed = false;
-	pressed = !pressed;
-	if (pressed) {
-		pros::lcd::set_text(2, "I was pressed!");
-	} else {
-		pros::lcd::clear_line(2);
-	}
-}
+#include "config.hpp"
+#include "robot.hpp"
+
+using namespace robot;
+namespace preset = config::lift_preset;
 
 /**
- * Runs initialization code. This occurs as soon as the program is started.
- *
- * All other competition modes are blocked by initialize; it is recommended
- * to keep execution time for this mode under a few seconds.
+ * Button map (driver):
+ *   Left stick Y / Right stick X  arcade drive
+ *   R1          score HIGH  (only works while holding a pin)
+ *   R2          score LOW
+ *   L1          drop the pin (only once the lift has settled at the goal)
+ *   L2          claw manual override: clamp / release
+ *   A           cancel -> back to intaking
+ *   Up / Down   lift manual override (hold)
+ *   B           intake reverse (hold)
+ *   Y           autoclamp on / off
  */
+
 void initialize() {
-	pros::lcd::initialize();
-	pros::lcd::set_text(1, "Hello PROS User!");
+    pros::lcd::initialize();
+    chassis.calibrate();  // IMU + odometry. Keep the robot still.
+    lift.zero();          // the lift must start fully down
+    lift.startTask();
 
-	pros::lcd::register_btn1_cb(on_center_button);
+    // Brain screen: live debug values for tuning and for notebook screenshots.
+    pros::Task screen([] {
+        while (true) {
+            const lemlib::Pose pose = chassis.getPose();
+            pros::lcd::print(0, "X %.1f  Y %.1f  H %.1f", pose.x, pose.y, pose.theta);
+            pros::lcd::print(1, "Lift %.1f / %.1f deg %s", lift.getPosition(), lift.getTarget(),
+                             lift.isSettled() ? "SETTLED" : "");
+            pros::lcd::print(2, "Claw %s", claw.stateName());
+            pros::lcd::print(3, "Scoring %s", scoring.stateName());
+            pros::delay(50);
+        }
+    });
 }
 
-/**
- * Runs while the robot is in the disabled state of Field Management System or
- * the VEX Competition Switch, following either autonomous or opcontrol. When
- * the robot is enabled, this task will exit.
- */
 void disabled() {}
 
-/**
- * Runs after initialize(), and before autonomous when connected to the Field
- * Management System or the VEX Competition Switch. This is intended for
- * competition-specific initialization routines, such as an autonomous selector
- * on the LCD.
- *
- * This task will exit when the robot is enabled and autonomous or opcontrol
- * starts.
- */
 void competition_initialize() {}
 
-/**
- * Runs the user autonomous code. This function will be started in its own task
- * with the default priority and stack size whenever the robot is enabled via
- * the Field Management System or the VEX Competition Switch in the autonomous
- * mode. Alternatively, this function may be called in initialize or opcontrol
- * for non-competition testing purposes.
- *
- * If the robot is disabled or communications is lost, the autonomous task
- * will be stopped. Re-enabling the robot will restart the task, not re-start it
- * from where it left off.
- */
-void autonomous() {}
+void autonomous() {
+    // TODO(team): autonomous routines. Example of a LemLib move:
+    // chassis.setPose(0, 0, 0);
+    // chassis.moveToPoint(0, 24, 2000);
+    scoring.begin();
+}
 
-/**
- * Runs the operator control code. This function will be started in its own task
- * with the default priority and stack size whenever the robot is enabled via
- * the Field Management System or the VEX Competition Switch in the operator
- * control mode.
- *
- * If no competition control is connected, this function will run immediately
- * following initialize().
- *
- * If the robot is disabled or communications is lost, the
- * operator control task will be stopped. Re-enabling the robot will restart the
- * task, not resume it from where it left off.
- */
 void opcontrol() {
-	pros::Controller master(pros::E_CONTROLLER_MASTER);
-	pros::MotorGroup left_mg({1, -2, 3});    // Creates a motor group with forwards ports 1 & 3 and reversed port 2
-	pros::MotorGroup right_mg({-4, 5, -6});  // Creates a motor group with forwards port 5 and reversed ports 4 & 6
+    scoring.begin();
+    bool autoclampOn = true;
 
+    while (true) {
+        // --- Drive ---
+        chassis.arcade(master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y),
+                       master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X));
 
-	while (true) {
-		pros::lcd::print(0, "%d %d %d", (pros::lcd::read_buttons() & LCD_BTN_LEFT) >> 2,
-		                 (pros::lcd::read_buttons() & LCD_BTN_CENTER) >> 1,
-		                 (pros::lcd::read_buttons() & LCD_BTN_RIGHT) >> 0);  // Prints status of the emulated screen LCDs
+        // --- Pivot / scoring sequence ---
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R1)) scoring.requestScore(preset::SCORE_HIGH);
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R2)) scoring.requestScore(preset::SCORE_LOW);
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L1)) scoring.release();
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A)) scoring.cancel();
 
-		// Arcade control scheme
-		int dir = master.get_analog(ANALOG_LEFT_Y);    // Gets amount forward/backward from left joystick
-		int turn = master.get_analog(ANALOG_RIGHT_X);  // Gets the turn left/right from right joystick
-		left_mg.move(dir - turn);                      // Sets left motor voltage
-		right_mg.move(dir + turn);                     // Sets right motor voltage
-		pros::delay(20);                               // Run for 20 ms then update
-	}
+        // --- Claw: manual override + autoclamp switch ---
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L2)) claw.toggle();
+        if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_Y)) {
+            autoclampOn = !autoclampOn;
+            if (autoclampOn) claw.arm();
+            else claw.disarm();
+        }
+
+        // --- Lift manual override (PID holds wherever you let go) ---
+        double liftInput = 0.0;
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_UP)) liftInput = 1.0;
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_DOWN)) liftInput = -1.0;
+        lift.manual(liftInput);
+
+        // --- Intake reverse (unjam) ---
+        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_B)) intake.set(subsystems::Intake::Mode::OUT);
+        else if (intake.getMode() == subsystems::Intake::Mode::OUT)
+            intake.set(scoring.getState() == subsystems::Scoring::State::INTAKING ? subsystems::Intake::Mode::IN
+                                                                                  : subsystems::Intake::Mode::STOP);
+
+        claw.update();
+        scoring.update();
+        pros::delay(10);
+    }
 }

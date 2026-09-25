@@ -1,0 +1,6 @@
+# clangd setup for PROS. Generate the database first with:  pros build-compile-commands
+# (compile_commands.json has machine-specific paths, so it is gitignored.)
+CompileFlags:
+  CompilationDatabase: .
+  Remove: [--std=*, -std=*, -fdiagnostics-color, -Wno-psabi]
+  Add: [-std=gnu++20, -iquote./include, -Wno-unknown-warning-option]

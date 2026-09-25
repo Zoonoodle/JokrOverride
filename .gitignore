@@ -1,0 +1,10 @@
+# PROS build output
+bin/
+*.d
+*.o
+compile_commands.json
+.cache/
+.vscode/
+.DS_Store
+# diagram render scratch
+docs/notebook/.render/

@@ -92,7 +92,8 @@ inline constexpr float LIFT_KG = 1200.0f;                    // TUNE: mV that ho
 inline constexpr float LIFT_MAX_MV = 12000.0f;               // output limit
 inline constexpr float LIFT_SETTLE_DEG = 1.5f;               // "at target" band
 inline constexpr int LIFT_SETTLE_MS = 150;                   // must stay in band this long
-inline constexpr float LIFT_MANUAL_MV = 9000.0f;             // manual override power
+inline constexpr float LIFT_MANUAL_UP_MV = 12000.0f;         // Up arrow: 100% power (12000 mV is the V5 max)
+inline constexpr float LIFT_MANUAL_DOWN_MV = 9000.0f;        // Down arrow power (gravity adds to it)
 // Heading to the bottom (target 0): within this many degrees of 0 counts as "resting", motors just hold.
 // Above it the lift is eased down with at least LIFT_DOWN_MV (never pushed up).
 inline constexpr double LIFT_REST_BAND_DEG = 3.0;

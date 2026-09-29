@@ -8,7 +8,7 @@
 namespace subsystems {
 
 Lift::Lift()
-    : motors_(config::LIFT_PORTS, pros::v5::MotorGears::green),  // TODO(team): confirm cartridge
+    : motors_(config::LIFT_PORTS, pros::v5::MotorGears::red),  // both lift motors are red (100 RPM) cartridges
       pid_(config::LIFT_KP, config::LIFT_KI, config::LIFT_KD, config::LIFT_WINDUP_RANGE, true),
       settle_(config::LIFT_SETTLE_DEG, config::LIFT_SETTLE_MS) {
     motors_.set_encoder_units_all(pros::v5::MotorEncoderUnits::degrees);
@@ -75,10 +75,12 @@ void Lift::update() {
     // 1) Driver override: raw power, but never past the top stop or below the bottom.
     //    Also the way out of a fault: manual doesn't trust the PID.
     if (std::fabs(manualInput_) > 0.05) {
-        double mv = manualInput_ * config::LIFT_MANUAL_MV;
-        if (position >= config::lift_preset::MAX && mv > 0) mv = 0;
-        if (position <= config::lift_preset::DOWN && mv < 0) mv = 0;
-        motors_.move_voltage(static_cast<int>(mv + config::LIFT_KG));
+        double mv;
+        if (manualInput_ > 0) mv = manualInput_ * config::LIFT_MANUAL_UP_MV;                     // Up: full power
+        else mv = manualInput_ * config::LIFT_MANUAL_DOWN_MV + config::LIFT_KG;                  // Down: gravity helps
+        if (position >= config::lift_preset::MAX && manualInput_ > 0) mv = config::LIFT_KG;     // at the top: just hold
+        if (position <= config::lift_preset::DOWN && manualInput_ < 0) mv = 0;                  // at the bottom: stop
+        motors_.move_voltage(static_cast<int>(std::clamp(mv, -12000.0, 12000.0)));
         wasManual_ = true;
         settled_ = false;
         pushStart_ = 0;

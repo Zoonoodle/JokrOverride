@@ -13,8 +13,8 @@
  *                                         └──> INTAKE_POS (after a score, lowered slowly)
  *
  *   IDLE          power-on state. Nothing moves until the driver presses something.
- *   INTAKE_POS    lift at INTAKE, claw open (autoclamp armed if it's on)
- *   MATCHLOAD_POS lift at MATCHLOAD, claw open (autoclamp armed if it's on)
+ *   INTAKE_POS    lift at INTAKE, claw open (autoclamp armed if it's on), pivot ON (PIVOT_ON_AT_INTAKE)
+ *   MATCHLOAD_POS lift at MATCHLOAD, claw open (autoclamp armed if it's on), pivot per PIVOT_ON_AT_MATCHLOAD
  *   CLAMPING      jaws closing; waits CLAW_CLOSE_TIME_MS so the lift doesn't pull out of an open claw
  *   STACKING      holding a cup, lift at STACK_LEVELS[level-1]; pivot flips out once above PIVOT_CLEAR
  *   RELEASING     jaws opening; waits CLAW_OPEN_TIME_MS before the arm moves

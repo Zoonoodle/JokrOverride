@@ -44,7 +44,7 @@ Nothing moves when the match starts. The intake only spins while you're holding 
 | Button | What it does |
 |---|---|
 | Left stick Y / Right stick X | arcade drive |
-| **R1** (hold) | intake **in**. The first press also sends the claw to the **INTAKE** position with the jaws open. If you're holding a cup, R1 only runs the intake and the arm doesn't move. |
+| **R1** (hold) | intake **in**. The first press also sends the claw to the **INTAKE** position with the jaws open, and turns the **pivot on** once it's there. If you're holding a cup, R1 only runs the intake and the arm doesn't move. |
 | **L1** (tap) | **Tap 1**: clamp, then lift to **stack level 1**. **Each extra tap** goes up one level, to a max of **level 7**. |
 | **L2** (tap) | **Holding a cup: SCORE.** The claw opens, then the arm lowers **slowly** back to INTAKE. **No cup:** the claw goes to the **MATCHLOAD** position with the jaws open. |
 | **R2** | **Holding a cup:** tap to drop **back to level 1** (for when you overshoot). **No cup:** hold for intake **out** (extake). |

@@ -67,6 +67,7 @@ void Scoring::enter(State next) {
         case State::MATCHLOAD_POS:
             command(heightOf(next));
             openClawForPickup();
+            setPivot(next == State::INTAKE_POS ? config::PIVOT_ON_AT_INTAKE : config::PIVOT_ON_AT_MATCHLOAD);
             break;
         case State::CLAMPING: claw_.clamp(); break;
         case State::STACKING: break;       // update() drives the lift + pivot

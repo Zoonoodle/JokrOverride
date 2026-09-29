@@ -125,6 +125,10 @@ inline constexpr float INTAKE_MV = 12000.0f;
 // ---------------------------------------------------------------------------
 // If the claw/wrist flips with its own cylinder, set the port. ' ' = no pivot actuator.
 inline constexpr char PIVOT_PISTON_PORT = 'D';
+// Pivot on/off at each pickup spot. It flips once the lift has arrived there
+// (it always comes back in before the lift moves, so it never swings while travelling).
+inline constexpr bool PIVOT_ON_AT_INTAKE = true;             // R1: pivot ON while intaking
+inline constexpr bool PIVOT_ON_AT_MATCHLOAD = false;         // TODO(team): L2 matchload spot, on or off?
 inline constexpr int PIVOT_TIME_MS = 250;                    // TUNE: time for the pivot to finish moving
 inline constexpr int CLAW_CLOSE_TIME_MS = 150;               // TUNE: jaws shut before the lift starts rising (L1)
 inline constexpr int CLAW_OPEN_TIME_MS = 200;                // TUNE: jaws open before the arm lowers (L2)

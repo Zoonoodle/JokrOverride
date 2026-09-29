@@ -93,6 +93,15 @@ inline constexpr float LIFT_MAX_MV = 12000.0f;               // output limit
 inline constexpr float LIFT_SETTLE_DEG = 1.5f;               // "at target" band
 inline constexpr int LIFT_SETTLE_MS = 150;                   // must stay in band this long
 inline constexpr float LIFT_MANUAL_MV = 9000.0f;             // manual override power
+// Heading to the bottom (target 0): within this many degrees of 0 counts as "resting", motors just hold.
+// Above it the lift is eased down with at least LIFT_DOWN_MV (never pushed up).
+inline constexpr double LIFT_REST_BAND_DEG = 3.0;
+// Stall guard: output over STALL_MV but moved less than STALL_DEG in STALL_MS = can't get there
+// (target above the real top, or jammed). The lift holds where it is and the brain shows BLOCKED.
+inline constexpr float LIFT_STALL_MV = 8000.0f;
+inline constexpr double LIFT_STALL_DEG = 0.5;
+inline constexpr int LIFT_STALL_MS = 700;
+inline constexpr float LIFT_DOWN_MV = 2000.0f;
 // After L2 scores, the arm lowers back to INTAKE at this speed (lift degrees per second). Lower = gentler.
 inline constexpr double LIFT_LOWER_SPEED_DEG_PER_S = 40.0;   // TUNE
 // Runaway guard: output over FAULT_MV for FAULT_MS while the lift moves FAULT_DEG the WRONG way

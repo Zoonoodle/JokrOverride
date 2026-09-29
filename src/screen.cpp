@@ -51,15 +51,17 @@ void draw() {
 
     // 3: lift position / target / status
     pros::lcd::print(3, "LIFT  %.1f -> %.1f deg  %s", lift.getPosition(), lift.getTarget(),
-                     lift.isFaulted() ? "LIFT FAULT" : lift.isSettled() ? "SETTLED" : "");
+                     lift.isFaulted() ? "LIFT FAULT" : lift.isBlocked() ? "BLOCKED" : lift.isSettled() ? "SETTLED" : "");
 
     // 4: lift rotation sensor vs motor encoders (direction check: both must go + when the lift goes up)
     if (const char* p = portProblem(config::LIFT_ROTATION_PORT, pros::DeviceType::rotation))
         pros::lcd::print(4, "ROT   %s (port %d)  mot %.1f", p, std::abs(config::LIFT_ROTATION_PORT),
                          lift.getMotorPosition());
     else
-        pros::lcd::print(4, "ROT   rot %.1f  mot %.1f  (same sign!)", lift.getSensorPosition(),
-                         lift.getMotorPosition());
+        // lift degrees, with the raw sensor/motor degrees in brackets (raw = before any gear ratio)
+        pros::lcd::print(4, "ROT %.1f [%.0f]  MOT %.1f [%.0f]", lift.getSensorPosition(),
+                         lift.getSensorPosition() * config::LIFT_ROTATION_RATIO, lift.getMotorPosition(),
+                         lift.getMotorPosition() * config::LIFT_GEAR_RATIO);
 
     // 5: claw distance sensor
     if (const char* p = portProblem(config::CLAW_DISTANCE_PORT, pros::DeviceType::distance)) {

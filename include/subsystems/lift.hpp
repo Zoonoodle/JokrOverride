@@ -61,6 +61,9 @@ class Lift {
     /** Hottest lift motor, deg C. */
     double getTemperature() const;
 
+    /** True if the last target couldn't be reached (stalled) and the lift is holding where it stopped. */
+    bool isBlocked() const { return blocked_; }
+
     /** True if the runaway guard tripped. */
     bool isFaulted() const { return faulted_; }
 
@@ -90,6 +93,11 @@ class Lift {
     bool wasManual_ = false;
     bool settled_ = false;
     std::uint32_t lastUpdate_ = 0;
+
+    // stall guard
+    bool blocked_ = false;
+    std::uint32_t stallStart_ = 0;
+    double stallStartPos_ = 0.0;
 
     // runaway guard
     bool faulted_ = false;

@@ -91,7 +91,8 @@ void opcontrol() {
         if (now - lastScreenAt >= 100) {
             char buf[20];
             if (lift.isFaulted()) std::snprintf(buf, sizeof(buf), "LIFT FAULT       ");
-            else if (scoring.getLevel() > 0) std::snprintf(buf, sizeof(buf), "LVL %d  %-10s", scoring.getLevel(), scoring.stateName());
+            else if (scoring.getLevel() > 0) std::snprintf(buf, sizeof(buf), "LVL %d  %-10s", scoring.getLevel(),
+                                                            lift.isBlocked() ? "BLOCKED" : scoring.stateName());
             else std::snprintf(buf, sizeof(buf), "%-16s", scoring.stateName());
             if (buf != lastScreen) {
                 master.print(0, 0, "%s", buf);

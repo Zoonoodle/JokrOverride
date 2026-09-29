@@ -84,6 +84,7 @@ All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.h
    - `PIVOT_CLEAR`: lowest height where the pivot can flip out without hitting anything
    - `STACK_LEVELS[0..6]`: the height to drop the 1st through 7th cup on a stack
    - `MAX`: just under the hard stop
+   - **Measure the top first.** Hold Up until the arm is at the top and read `Lift`. Every preset has to be below that number. If the lift shows `BLOCKED` (brain + controller), it was asked to go somewhere it can't physically reach, so it stopped pushing and is holding where it is. Lower that preset.
 4. Timing: `CLAW_CLOSE_TIME_MS` (grip before lifting), `CLAW_OPEN_TIME_MS` (release before lowering), `PIVOT_TIME_MS`, and `LIFT_LOWER_SPEED_DEG_PER_S` (how slowly the arm comes down after a score).
 
 **Lift PID** (`LIFT_KG`, `LIFT_KP`, `LIFT_KD`), in this order:

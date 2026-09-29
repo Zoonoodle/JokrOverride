@@ -53,6 +53,8 @@ double Lift::getPosition() const { return rotation_ ? getSensorPosition() : getM
 void Lift::setTarget(double degrees, double speedDegPerSec) {
     const double clamped = std::clamp(degrees, config::lift_preset::DOWN, config::lift_preset::MAX);
     if (clamped == goal_ && speedDegPerSec == speed_) return;
+    blocked_ = false;
+    stallStart_ = 0;
     goal_ = clamped;
     speed_ = speedDegPerSec;
     // A slow move starts from where the lift actually is, not from the old setpoint.
@@ -106,8 +108,18 @@ void Lift::update() {
     const float error = static_cast<float>(target_ - position);
     float output = pid_.update(error) + config::LIFT_KG;
 
-    // Resting on the hard stop at the bottom: don't fight the frame, let it sit.
-    if (goal_ <= config::lift_preset::DOWN && position <= config::lift_preset::DOWN + 1.0) output = 0;
+    // Going to the bottom: never let the gravity feedforward push UP (that's what made the lift bounce
+    // at startup). Always ease down, and once it's resting near the hard stop, hold still.
+    if (goal_ <= config::lift_preset::DOWN) {
+        if (position <= config::lift_preset::DOWN + config::LIFT_REST_BAND_DEG) {
+            motors_.brake();
+            settled_ = true;
+            pushStart_ = 0;
+            pid_.reset();
+            return;
+        }
+        output = std::min(output, -config::LIFT_DOWN_MV);
+    }
 
     // 4) Output limit (motors only accept -12000..12000 mV).
     output = std::clamp(output, -config::LIFT_MAX_MV, config::LIFT_MAX_MV);
@@ -128,9 +140,28 @@ void Lift::update() {
         pushStartPos_ = position;
     }
 
+    // 6) Stall guard: pushing hard toward a target it can't reach (past the real top, or jammed).
+    //    Instead of grinding the motors, give up on that target and hold where it is.
+    if (std::fabs(error) > 2 * config::LIFT_SETTLE_DEG && std::fabs(output) >= config::LIFT_STALL_MV) {
+        if (stallStart_ == 0) {
+            stallStart_ = now;
+            stallStartPos_ = position;
+        } else if (std::fabs(position - stallStartPos_) >= config::LIFT_STALL_DEG) {
+            stallStart_ = now;  // still making progress
+            stallStartPos_ = position;
+        } else if (now - stallStart_ >= static_cast<std::uint32_t>(config::LIFT_STALL_MS)) {
+            setTarget(position);
+            blocked_ = true;  // cleared by the next new target
+            stallStart_ = 0;
+            return;
+        }
+    } else {
+        stallStart_ = 0;
+    }
+
     motors_.move_voltage(static_cast<int>(output));
 
-    // 6) Settle check: at the final goal and within the band for long enough.
+    // 7) Settle check: at the final goal and within the band for long enough.
     if (target_ != goal_) {
         settle_.reset();  // still walking toward the goal
         settled_ = false;

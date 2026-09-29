@@ -58,6 +58,9 @@ class Lift {
 
     /** True once the lift has reached its final target and stayed in band for LIFT_SETTLE_MS. */
     bool isSettled() const { return settled_; }
+    /** Hottest lift motor, deg C. */
+    double getTemperature() const;
+
     /** True if the runaway guard tripped. */
     bool isFaulted() const { return faulted_; }
 

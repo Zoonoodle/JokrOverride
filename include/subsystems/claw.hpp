@@ -52,6 +52,9 @@ class Claw {
     bool isClamped() const { return state_ == State::CLAMPED; }
     /** True if the sensor currently sees something between the jaws. */
     bool seesPin();
+    /** Raw distance sensor reading in mm (large value / error when nothing is in range or it's unplugged). */
+    int getDistanceMm() { return sensor_.get_distance(); }
+    int getDistanceConfidence() { return sensor_.get_confidence(); }
     const char* stateName() const;
 
   private:

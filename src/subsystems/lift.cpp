@@ -42,6 +42,12 @@ double Lift::getSensorPosition() const {
     return rotation_->get_position() / 100.0 / config::LIFT_ROTATION_RATIO;
 }
 
+double Lift::getTemperature() const {
+    double hottest = 0.0;
+    for (double t : motors_.get_temperature_all()) hottest = std::max(hottest, t);
+    return hottest;
+}
+
 double Lift::getPosition() const { return rotation_ ? getSensorPosition() : getMotorPosition(); }
 
 void Lift::setTarget(double degrees, double speedDegPerSec) {

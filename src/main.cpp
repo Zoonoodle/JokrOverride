@@ -2,6 +2,7 @@
 
 #include "config.hpp"
 #include "robot.hpp"
+#include "screen.hpp"
 
 #include <cstdio>
 #include <string>
@@ -26,25 +27,10 @@ using subsystems::Scoring;
  */
 
 void initialize() {
-    pros::lcd::initialize();
+    screen::start();      // live sensor readout on the brain (see src/screen.cpp)
     chassis.calibrate();  // IMU + odometry. Keep the robot still.
     lift.zero();          // the lift must start fully down
     lift.startTask();
-
-    // Brain screen: live debug values for tuning and for notebook screenshots.
-    pros::Task screen([] {
-        while (true) {
-            const lemlib::Pose pose = chassis.getPose();
-            pros::lcd::print(0, "X %.1f  Y %.1f  H %.1f", pose.x, pose.y, pose.theta);
-            pros::lcd::print(1, "Lift %.1f / %.1f deg %s", lift.getPosition(), lift.getTarget(),
-                             lift.isFaulted() ? "LIFT FAULT" : lift.isSettled() ? "SETTLED" : "");
-            pros::lcd::print(2, "  rot %.1f  mot %.1f  (must match sign)", lift.getSensorPosition(),
-                             lift.getMotorPosition());
-            pros::lcd::print(3, "Claw %s  autoclamp %s", claw.stateName(), scoring.autoclampOn() ? "ON" : "off");
-            pros::lcd::print(4, "Scoring %s  level %d", scoring.stateName(), scoring.getLevel());
-            pros::delay(50);
-        }
-    });
 }
 
 void disabled() {}

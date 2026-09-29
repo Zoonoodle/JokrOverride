@@ -17,6 +17,7 @@ include/subsystems/ src/subsystems/
   claw.*      pneumatic claw + autoclamp state machine
   intake.*    one-motor roller intake (driver-controlled only)
   scoring.*   intake / matchload / 7-level stacking state machine with interlocks
+src/screen.cpp                brain screen sensor readout
 src/main.cpp                  initialize / autonomous stub / opcontrol + button map
 docs/notebook/                notebook-ready write-ups, flowcharts and blank test tables
 ```
@@ -92,4 +93,15 @@ All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.h
 4. **kI:** only if the arm settles consistently short of a preset while holding a cup.
 
 ## Brain screen
-The brain screen shows the robot's X/Y/heading, the lift angle vs its target and whether it's SETTLED, the rotation-sensor vs motor-encoder lift reading, the claw state, and the scoring state + stack level. Take photos of it for the notebook and use it while tuning.
+Shows live readings the whole time the program runs (disabled, auton and driver). A sensor that isn't plugged in shows `not connected (port N)`, and the wrong device on a port shows `WRONG DEVICE on port`, instead of junk numbers.
+
+| Line | Shows |
+|---|---|
+| POSE | odometry X / Y (in) and theta (deg), from the tracking wheel + IMU |
+| IMU | heading and total rotation, or `calibrating... keep still` |
+| ODOM | tracking wheel rotation sensor, in degrees |
+| LIFT | lift position → target (lift deg), `SETTLED` or `LIFT FAULT` |
+| ROT | lift rotation sensor vs motor encoders. Both must go + when the lift goes up |
+| DIST | claw distance sensor mm, confidence, and `PIN` when inside `CLAW_DETECT_MM` |
+| CLAW | claw state, autoclamp on/off, scoring state and stack level |
+| TEMP | hottest left drive / right drive / lift motor and the intake motor (C). Motors lose power around 55 C. |

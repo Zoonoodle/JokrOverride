@@ -7,17 +7,17 @@ namespace robot {
 pros::Controller master(pros::E_CONTROLLER_MASTER);
 
 // ---- Drivetrain (notebook: 55W, 2.75" omnis, 450 RPM, traction wheels) ----
-static pros::MotorGroup leftDrive(config::LEFT_DRIVE_PORTS, pros::v5::MotorGears::blue);    // TODO(team): confirm cartridge
-static pros::MotorGroup rightDrive(config::RIGHT_DRIVE_PORTS, pros::v5::MotorGears::blue);  // TODO(team): confirm cartridge
+pros::MotorGroup leftDrive(config::LEFT_DRIVE_PORTS, pros::v5::MotorGears::blue);    // TODO(team): confirm cartridge
+pros::MotorGroup rightDrive(config::RIGHT_DRIVE_PORTS, pros::v5::MotorGears::blue);  // TODO(team): confirm cartridge
 
 static lemlib::Drivetrain drivetrain(&leftDrive, &rightDrive, config::TRACK_WIDTH_IN, config::DRIVE_WHEEL_DIAMETER_IN,
                                      config::DRIVE_RPM, config::HORIZONTAL_DRIFT);
 
 // ---- Odometry (notebook: ONE odometry pod + IMU) ----
-static pros::Rotation verticalEncoder(config::ODOM_VERTICAL_ROTATION_PORT);
+pros::Rotation verticalEncoder(config::ODOM_VERTICAL_ROTATION_PORT);
 static lemlib::TrackingWheel verticalWheel(&verticalEncoder, config::ODOM_WHEEL_DIAMETER_IN,
                                            config::ODOM_VERTICAL_OFFSET_IN);
-static pros::Imu imu(config::IMU_PORT);
+pros::Imu imu(config::IMU_PORT);
 static lemlib::OdomSensors sensors(&verticalWheel, nullptr, nullptr, nullptr, &imu);
 
 // ---- Chassis PID (TUNE) ----

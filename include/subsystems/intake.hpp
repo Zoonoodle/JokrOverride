@@ -14,6 +14,7 @@ class Intake {
     Intake();
     void set(Mode mode);
     Mode getMode() const { return mode_; }
+    double getTemperature() const { return motor_.get_temperature(); }
 
   private:
     pros::Motor motor_;

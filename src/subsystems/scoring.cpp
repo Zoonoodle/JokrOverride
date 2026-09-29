@@ -3,112 +3,213 @@
 #include "config.hpp"
 #include "pros/rtos.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 namespace subsystems {
 
 namespace preset = config::lift_preset;
 
-Scoring::Scoring(Lift& lift, Claw& claw, Intake& intake) : lift_(lift), claw_(claw), intake_(intake) {
+Scoring::Scoring(Lift& lift, Claw& claw) : lift_(lift), claw_(claw), autoclamp_(config::CLAW_AUTOCLAMP_AT_START) {
     if (config::PIVOT_PISTON_PORT != ' ') {
         pivot_ = std::make_unique<pros::adi::Pneumatics>(config::PIVOT_PISTON_PORT, false);
     }
 }
 
-void Scoring::setPivot(bool scoring) {
-    if (!pivot_ || pivotOut_ == scoring) return;
-    if (scoring) pivot_->extend();
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+void Scoring::setPivot(bool out) {
+    if (!pivot_ || pivotOut_ == out) return;
+    if (out) pivot_->extend();
     else pivot_->retract();
-    pivotOut_ = scoring;
+    pivotOut_ = out;
     pivotMovedAt_ = pros::millis();
+}
+
+bool Scoring::pivotDone() const {
+    return !pivot_ || pros::millis() - pivotMovedAt_ >= static_cast<std::uint32_t>(config::PIVOT_TIME_MS);
+}
+
+void Scoring::command(double degrees, double speedDegPerSec) {
+    // Only send a target when it changes, so the driver's Up/Down fine-tune isn't overwritten every loop.
+    if (degrees == commanded_) return;
+    commanded_ = degrees;
+    lift_.setTarget(degrees, speedDegPerSec);
+}
+
+bool Scoring::liftArrived(double degrees) const {
+    return lift_.isSettled() && std::fabs(lift_.getPosition() - degrees) <= 2 * config::LIFT_SETTLE_DEG;
+}
+
+double Scoring::levelHeight() const { return preset::STACK_LEVELS[static_cast<std::size_t>(level_ - 1)]; }
+
+double Scoring::heightOf(State s) const { return s == State::MATCHLOAD_POS ? preset::MATCHLOAD : preset::INTAKE; }
+
+void Scoring::openClawForPickup() {
+    claw_.disarm();
+    if (autoclamp_) claw_.arm();
+}
+
+void Scoring::moveTo(State destination, double speedDegPerSec) {
+    moveDest_ = destination;
+    moveSpeed_ = speedDegPerSec;
+    enter(State::MOVING);
 }
 
 void Scoring::enter(State next) {
     state_ = next;
     stateStart_ = pros::millis();
+    commanded_ = -1.0;
     switch (next) {
-        case State::INTAKING:
-            setPivot(false);
-            lift_.setTarget(preset::INTAKE);
+        case State::IDLE: break;
+        case State::INTAKE_POS:
+        case State::MATCHLOAD_POS:
+            command(heightOf(next));
+            openClawForPickup();
+            break;
+        case State::CLAMPING: claw_.clamp(); break;
+        case State::STACKING: break;       // update() drives the lift + pivot
+        case State::RELEASING: claw_.disarm(); break;  // jaws open, autoclamp off so it can't re-grab the stack
+        case State::MOVING:
             claw_.disarm();
-            claw_.arm();                         // autoclamp watches for the next pin
-            intake_.set(Intake::Mode::IN);
-            break;
-        case State::HOLDING:
-            intake_.set(Intake::Mode::STOP);
-            lift_.setTarget(preset::CARRY);      // lift the pin clear of the field
-            break;
-        case State::PIVOTING:
-            lift_.setTarget(scoreTarget_);       // pivot flips in update() once the lift clears CARRY
-            break;
-        case State::SCORING:
-            break;                               // wait for the driver
-        case State::RETURNING:
-            claw_.release();                     // drop the pin
+            setPivot(false);  // interlock 2: pivot in before the lift moves
             break;
     }
 }
 
-void Scoring::begin() { enter(State::INTAKING); }
-
-void Scoring::requestScore(double liftDegrees) {
-    if (state_ != State::HOLDING && state_ != State::SCORING) return;  // interlock 1: must hold a pin
-    if (!claw_.isClamped()) return;
-    scoreTarget_ = liftDegrees;
-    enter(State::PIVOTING);                                             // also lets the driver switch goal height
+// ---------------------------------------------------------------------------
+// driver actions
+// ---------------------------------------------------------------------------
+void Scoring::reset() {
+    state_ = State::IDLE;
+    commanded_ = -1.0;
+    level_ = 1;
 }
 
-void Scoring::release() {
-    if (state_ == State::SCORING && lift_.isSettled()) enter(State::RETURNING);  // interlock 3
+void Scoring::goToIntake() {
+    // Interlock 4: never drag a held cup back down.
+    if (claw_.isClamped()) return;
+    if (state_ == State::CLAMPING || state_ == State::STACKING || state_ == State::RELEASING) return;
+    if (state_ == State::INTAKE_POS) {
+        commanded_ = -1.0;  // re-tap snaps it back to INTAKE after a manual nudge
+        command(preset::INTAKE);
+        return;
+    }
+    if (state_ == State::MOVING && moveDest_ == State::INTAKE_POS) {
+        commanded_ = -1.0;  // already heading there: keep the speed (slow after a score), just re-send it
+        return;
+    }
+    moveTo(State::INTAKE_POS, 0.0);
 }
 
-void Scoring::cancel() {
-    if (claw_.isClamped()) claw_.release();
-    enter(State::RETURNING);
-}
-
-void Scoring::update() {
-    const std::uint32_t now = pros::millis();
+void Scoring::stepUp() {
     switch (state_) {
-        case State::INTAKING:
-            // The autoclamp closed on a pin: carry it.
-            if (claw_.isClamped()) enter(State::HOLDING);
+        case State::CLAMPING:
+        case State::STACKING: level_ = std::min(level_ + 1, preset::STACK_LEVEL_COUNT); break;
+        case State::RELEASING: break;  // mid-score, ignore
+        default:
+            level_ = 1;
+            enter(State::CLAMPING);
+            break;
+    }
+}
+
+void Scoring::scoreOrMatchload() {
+    if (claw_.isClamped() || state_ == State::CLAMPING || state_ == State::STACKING) {
+        enter(State::RELEASING);
+        return;
+    }
+    if (state_ == State::RELEASING) return;
+    if (state_ == State::MATCHLOAD_POS) {
+        commanded_ = -1.0;  // re-tap snaps it back to MATCHLOAD after a manual nudge
+        command(preset::MATCHLOAD);
+        return;
+    }
+    if (state_ == State::MOVING && moveDest_ == State::MATCHLOAD_POS) {
+        commanded_ = -1.0;
+        return;
+    }
+    moveTo(State::MATCHLOAD_POS, 0.0);
+}
+
+void Scoring::resetLevel() {
+    if (state_ == State::CLAMPING || state_ == State::STACKING) level_ = 1;
+}
+
+void Scoring::toggleClaw() {
+    const bool pickup = state_ == State::INTAKE_POS || state_ == State::MATCHLOAD_POS;
+    if (!claw_.isClamped()) claw_.clamp();
+    else if (pickup && autoclamp_) claw_.release();  // lockout, then autoclamp watches again
+    else claw_.disarm();
+}
+
+void Scoring::setAutoclamp(bool on) {
+    autoclamp_ = on;
+    const bool pickup = state_ == State::INTAKE_POS || state_ == State::MATCHLOAD_POS;
+    if (pickup && !claw_.isClamped()) openClawForPickup();
+}
+
+// ---------------------------------------------------------------------------
+// state machine
+// ---------------------------------------------------------------------------
+void Scoring::update() {
+    const std::uint32_t elapsed = pros::millis() - stateStart_;
+    switch (state_) {
+        case State::IDLE:
+        case State::INTAKE_POS:
+        case State::MATCHLOAD_POS:
+            break;  // waiting for the driver (autoclamp, if on, runs in claw.update())
+
+        case State::CLAMPING:
+            // Let the jaws shut before the lift pulls away.
+            if (elapsed >= static_cast<std::uint32_t>(config::CLAW_CLOSE_TIME_MS)) enter(State::STACKING);
             break;
 
-        case State::HOLDING:
-            // If the driver manually opened the claw, go back to intaking.
-            if (!claw_.isClamped()) enter(State::INTAKING);
-            break;
-
-        case State::PIVOTING: {
-            // Interlock 2: flip only once the lift is above CARRY.
-            if (lift_.getPosition() >= preset::CARRY) setPivot(true);
-            const bool pivotDone =
-                !pivot_ || (pivotOut_ && now - pivotMovedAt_ >= static_cast<std::uint32_t>(config::PIVOT_TIME_MS));
-            if (lift_.isSettled() && pivotDone) enter(State::SCORING);
+        case State::STACKING: {
+            // Driver opened the claw by hand up here: treat it as a score.
+            if (!claw_.isClamped()) {
+                moveTo(State::INTAKE_POS, config::LIFT_LOWER_SPEED_DEG_PER_S);
+                break;
+            }
+            const double h = levelHeight();
+            if (h >= preset::PIVOT_CLEAR) {
+                command(h);
+                // Interlock 1: flip out only once the lift clears the intake/drivetrain.
+                if (lift_.getPosition() >= preset::PIVOT_CLEAR) setPivot(true);
+            } else {
+                // Level below the pivot clearance (e.g. R2 back to level 1): pivot in first, then lower.
+                setPivot(false);
+                if (pivotDone()) command(h);
+            }
             break;
         }
 
-        case State::SCORING:
-            break;  // release() moves us on
-
-        case State::RETURNING:
-            // Give the jaws time to open before moving away from the goal.
-            if (now - stateStart_ < static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS)) break;
-            // Interlock 4: pivot back before the lift drops below CARRY.
-            setPivot(false);
-            if (pivot_ && now - pivotMovedAt_ < static_cast<std::uint32_t>(config::PIVOT_TIME_MS)) break;
-            lift_.setTarget(preset::INTAKE);
-            if (lift_.isSettled()) enter(State::INTAKING);
+        case State::RELEASING:
+            // Interlock 3: the arm doesn't move until the jaws are open.
+            if (elapsed >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS))
+                moveTo(State::INTAKE_POS, config::LIFT_LOWER_SPEED_DEG_PER_S);
             break;
+
+        case State::MOVING: {
+            if (!pivotDone()) break;  // interlock 2
+            const double h = heightOf(moveDest_);
+            command(h, moveSpeed_);
+            if (liftArrived(h)) enter(moveDest_);
+            break;
+        }
     }
 }
 
 const char* Scoring::stateName() const {
     switch (state_) {
-        case State::INTAKING: return "INTAKING";
-        case State::HOLDING: return "HOLDING";
-        case State::PIVOTING: return "PIVOTING";
-        case State::SCORING: return "SCORING";
-        case State::RETURNING: return "RETURNING";
+        case State::IDLE: return "IDLE";
+        case State::INTAKE_POS: return "INTAKE";
+        case State::MATCHLOAD_POS: return "MATCHLOAD";
+        case State::CLAMPING: return "CLAMPING";
+        case State::STACKING: return "STACKING";
+        case State::RELEASING: return "RELEASING";
+        case State::MOVING: return "MOVING";
     }
     return "?";
 }

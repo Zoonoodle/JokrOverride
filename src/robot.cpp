@@ -46,6 +46,6 @@ lemlib::Chassis chassis(drivetrain, lateral, angular, sensors, &throttleCurve, &
 subsystems::Lift lift;
 subsystems::Claw claw;
 subsystems::Intake intake;
-subsystems::Scoring scoring(lift, claw, intake);
+subsystems::Scoring scoring(lift, claw);
 
 }  // namespace robot

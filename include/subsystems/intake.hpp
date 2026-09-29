@@ -1,10 +1,10 @@
 #pragma once
 /**
- * Intake — three-stage roller intake with a bottom counter roller.
- * All rollers run from the same motor group (TODO(team): confirm motor count).
+ * Intake — three-stage roller intake with a bottom counter roller, driven by ONE motor.
+ * The driver runs it directly (R1 in, R2/B out); nothing else turns it on.
  */
 
-#include "pros/motor_group.hpp"
+#include "pros/motors.hpp"
 
 namespace subsystems {
 
@@ -16,7 +16,7 @@ class Intake {
     Mode getMode() const { return mode_; }
 
   private:
-    pros::MotorGroup motors_;
+    pros::Motor motor_;
     Mode mode_ = Mode::STOP;
 };
 

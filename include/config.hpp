@@ -25,8 +25,8 @@ namespace config {
 // ---------------------------------------------------------------------------
 // Negative port = reversed motor.
 // TODO(team): confirm ports, direction, and whether the 55W is 5x 11W or 4x 11W + 2x 5.5W.
-inline const std::vector<std::int8_t> LEFT_DRIVE_PORTS = {-1, -2, -3};   // TODO(team): confirm
-inline const std::vector<std::int8_t> RIGHT_DRIVE_PORTS = {4, 5, 6};     // TODO(team): confirm
+inline const std::vector<std::int8_t> LEFT_DRIVE_PORTS = {-2, -3, -1};   // TODO(team): confirm
+inline const std::vector<std::int8_t> RIGHT_DRIVE_PORTS = {8, 9, 10};     // TODO(team): confirm
 
 inline constexpr float DRIVE_WHEEL_DIAMETER_IN = 2.75f;      // notebook: 2.75" omni wheels
 inline constexpr float DRIVE_RPM = 450.0f;                   // notebook: 450 RPM
@@ -47,10 +47,10 @@ inline constexpr float ANGULAR_KP = 2.0f, ANGULAR_KI = 0.0f, ANGULAR_KD = 10.0f;
 // Lift (DR6-4B)
 // ---------------------------------------------------------------------------
 // Two motors on the high-strength drive axle. 12T motor gear -> 36T lift gear.
-inline const std::vector<std::int8_t> LIFT_PORTS = {9, -10};             // TODO(team): confirm ports + which side is reversed
+inline const std::vector<std::int8_t> LIFT_PORTS = {20, -13};             // TODO(team): confirm ports + which side is reversed
 inline constexpr double LIFT_GEAR_RATIO = 36.0 / 12.0;       // notebook: 12T -> 36T = 3:1 torque
 // Rotation sensor on the lift pivot. 0 = none fitted, use the motor encoders instead.
-inline constexpr int8_t LIFT_ROTATION_PORT = 0;              // TODO(team): add a rotation sensor? (none in notebook)
+inline constexpr int8_t LIFT_ROTATION_PORT = 16;              // TODO(team): add a rotation sensor? (none in notebook)
 
 // Preset heights, in DEGREES OF THE LIFT ARM (motor degrees / gear ratio). 0 = fully down.
 // TODO(team): measure every preset on the robot (lower the lift, zero, raise to each spot, read the brain screen).
@@ -77,7 +77,7 @@ inline constexpr float LIFT_MANUAL_MV = 9000.0f;             // manual override 
 // ---------------------------------------------------------------------------
 // Claw (pneumatic) + autoclamp sensor
 // ---------------------------------------------------------------------------
-inline constexpr char CLAW_PISTON_PORT = 'A';                // TODO(team): confirm ADI port
+inline constexpr char CLAW_PISTON_PORT = 'C';                // TODO(team): confirm ADI port
 inline constexpr bool CLAW_EXTENDED_IS_CLOSED = true;        // TODO(team): does extending the cylinder close the jaws?
 // Autoclamp: a distance sensor looking between the jaws. None is in the notebook yet.
 inline constexpr int8_t CLAW_DISTANCE_PORT = 11;             // TODO(team): mount + confirm port
@@ -88,7 +88,7 @@ inline constexpr int CLAW_RELEASE_LOCKOUT_MS = 750;          // after a release,
 // ---------------------------------------------------------------------------
 // Intake (three-stage rollers + bottom counter roller)
 // ---------------------------------------------------------------------------
-inline const std::vector<std::int8_t> INTAKE_PORTS = {12, -13};          // TODO(team): confirm motor count, ports and directions
+inline const std::vector<std::int8_t> INTAKE_PORTS = {12};          // TODO(team): confirm motor count, ports and directions
 inline constexpr float INTAKE_MV = 12000.0f;
 
 // ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ inline constexpr float INTAKE_MV = 12000.0f;
 // ---------------------------------------------------------------------------
 // If the claw/wrist flips with its own cylinder, set the port. ' ' = no pivot actuator,
 // the lift alone moves the claw from the intake handoff to the scoring height.
-inline constexpr char PIVOT_PISTON_PORT = ' ';               // TODO(team): is there a separate pivot? which port?
+inline constexpr char PIVOT_PISTON_PORT = 'D';               // TODO(team): is there a separate pivot? which port?
 inline constexpr int PIVOT_TIME_MS = 250;                    // TODO(team): time for the pivot to finish moving
 inline constexpr int CLAW_OPEN_TIME_MS = 200;                // time for the jaws to open before lowering
 

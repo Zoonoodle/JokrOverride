@@ -37,8 +37,8 @@ static lemlib::ControllerSettings angular(config::ANGULAR_KP, config::ANGULAR_KI
                                           0);    // slew
 
 // Driver curves: small stick movements stay gentle, full stick is full speed.
-static lemlib::ExpoDriveCurve throttleCurve(3, 10, 1.019);
-static lemlib::ExpoDriveCurve steerCurve(3, 10, 1.019);
+static lemlib::ExpoDriveCurve throttleCurve(3, 10, 1.009);
+static lemlib::ExpoDriveCurve steerCurve(5, 15, 1.021);
 
 lemlib::Chassis chassis(drivetrain, lateral, angular, sensors, &throttleCurve, &steerCurve);
 

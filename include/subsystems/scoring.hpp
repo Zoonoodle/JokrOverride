@@ -55,6 +55,8 @@ class Scoring {
     void scoreOrMatchload();
     /** R2: holding a cup -> back to stack level 1. */
     void resetLevel();
+    /** Driver: flip the pivot in/out. */
+    void togglePivot() { setPivot(!pivotOut_); }
     /** Manual claw override (clamp / open). */
     void toggleClaw();
 

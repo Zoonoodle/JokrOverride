@@ -74,6 +74,14 @@ class Lift {
      */
     void manual(double input);
 
+    /**
+     * Direct mode (driver control): the PID task, guards and presets stop touching the motors.
+     * Only move() drives the lift. Turning it off makes the PID hold wherever the lift is.
+     */
+    void setDirect(bool on);
+    /** Direct mode only: raw power -127..127 to both lift motors (0 = HOLD brake). */
+    void move(int power);
+
     /** Run one control step. Called every 10 ms by the lift task. */
     void update();
 
@@ -91,6 +99,7 @@ class Lift {
     double speed_ = 0.0;    // deg/s, 0 = jump
     double manualInput_ = 0.0;
     bool wasManual_ = false;
+    bool direct_ = false;
     bool settled_ = false;
     std::uint32_t lastUpdate_ = 0;
 

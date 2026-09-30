@@ -64,9 +64,24 @@ void Lift::setTarget(double degrees, double speedDegPerSec) {
     settled_ = false;
 }
 
+void Lift::setDirect(bool on) {
+    if (on == direct_) return;
+    if (!on) {
+        faulted_ = false;
+        setTarget(getPosition());  // PID picks up holding wherever the driver left it
+        pid_.reset();
+    }
+    direct_ = on;
+}
+
+void Lift::move(int power) {
+    if (direct_) motors_.move(power);
+}
+
 void Lift::manual(double input) { manualInput_ = std::clamp(input, -1.0, 1.0); }
 
 void Lift::update() {
+    if (direct_) return;  // driver control: move() owns the motors, nothing else touches them
     const std::uint32_t now = pros::millis();
     const double dt = lastUpdate_ == 0 ? 0.01 : (now - lastUpdate_) / 1000.0;
     lastUpdate_ = now;

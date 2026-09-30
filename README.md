@@ -39,29 +39,20 @@ All ports live in `include/config.hpp`. Current values:
 | Pivot cylinder | ADI D |
 
 ## Driver guide
-Nothing moves when the match starts. The intake only spins while you're holding a button, and the lift stays down until you press something.
+During driver control the lift is **plain motor power**. The PID, presets, stall/runaway guards and scoring macros are all off, so nothing else touches the lift.
 
 | Button | What it does |
 |---|---|
 | Left stick Y / Right stick X | arcade drive |
-| **R1** (hold) | intake **in**. The first press also sends the claw to the **INTAKE** position with the jaws open, and turns the **pivot on** once it's there. If you're holding a cup, R1 only runs the intake and the arm doesn't move. |
-| **L1** (tap) | **Tap 1**: clamp, then lift to **stack level 1**. **Each extra tap** goes up one level, to a max of **level 7**. |
-| **L2** (tap) | **Holding a cup: SCORE.** The claw opens, then the arm lowers **slowly** back to INTAKE. **No cup:** the claw goes to the **MATCHLOAD** position with the jaws open. |
-| **R2** | **Holding a cup:** tap to drop **back to level 1** (for when you overshoot). **No cup:** hold for intake **out** (extake). |
-| B (hold) | intake out, always (unjam) |
-| Up / Down (hold) | lift fine-tune; the lift holds where you let go |
-| A | manual claw clamp / open |
-| Y | autoclamp on / off (off at start) |
+| **L1** (hold) | lift **up**, full power (both motors) |
+| **L2** (hold) | lift **down**, full power |
+| let go of L1/L2 | lift motors HOLD where they are |
+| **R1** (hold) | intake in |
+| **R2** (hold) | intake out |
+| **A** | claw clamp / open |
+| **X** | pivot in / out |
 
-The controller screen shows `LVL n` while you're holding a cup, so you always know which tap you're on. It shows `LIFT FAULT` and rumbles if the lift guard trips.
-
-**A normal cycle:**
-1. Hold **R1**. The claw drops to INTAKE and opens, and the intake pulls a cup into the claw.
-2. Tap **L1** once per stack height: 1 tap for an empty goal, 3 taps for the 3rd cup, and so on. The claw clamps, the lift rises, and the pivot flips out once it's above `PIVOT_CLEAR`.
-3. Overshot? Tap **R2** to go back to level 1, then L1 up again.
-4. Tap **L2** to score. The claw opens, waits `CLAW_OPEN_TIME_MS`, the pivot comes back in, and the arm lowers slowly to INTAKE, ready for step 1.
-
-**Matchload cycle:** with an empty claw, tap **L2**. The claw moves to MATCHLOAD and opens. Load the cup, then tap **L1** to clamp and go to level 1, same as above.
+The stack-level / matchload macros (`subsystems/scoring.*`) and the lift PID are still in the code for autonomous; `autonomous()` turns the PID back on with `lift.setDirect(false)`.
 
 ## Lift direction check (do this first)
 The lift runs off the **rotation sensor** on port 16, not the motor encoders. If the sensor and the motors disagree on which way is up, the PID pushes the wrong way, the error grows, and the lift drives itself down. That's the "randomly spinning down" problem. To check:

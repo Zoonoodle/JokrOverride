@@ -4,33 +4,38 @@
 #include "robot.hpp"
 #include "screen.hpp"
 
-#include <cstdio>
-#include <string>
 
 using namespace robot;
 using subsystems::Intake;
 using subsystems::Scoring;
 
+// Driver-control lift: plain motor group, driven only by L1/L2 in opcontrol.
+pros::MotorGroup liftMotors({-13, 20}, pros::v5::MotorGears::red);  // keep in sync with config::LIFT_PORTS
+
 /**
  * Button map (driver):
  *   Left stick Y / Right stick X  arcade drive
  *   L1 (hold)   lift up, full power
- *   L2 (hold)   lift down, full power
- *               let go of both = lift motors HOLD where they are
+ *   L2 (hold)   lift down, full power     (neither = lift motors stop and HOLD)
  *   R1 (hold)   intake in
  *   R2 (hold)   intake out
  *   A           claw clamp / open
  *   X           pivot in / out
  *
- * During driver control nothing else touches the lift: the PID task, presets, stall/runaway
- * guards and the scoring macros are all off (lift.setDirect(true)).
+ * During driver control nothing else touches the lift: the lift PID task is off
+ * (lift.setDirect(true)) and the scoring macros aren't called.
  */
 
 void initialize() {
-    screen::start();      // live sensor readout on the brain (see src/screen.cpp)
-    chassis.calibrate();  // IMU + odometry. Keep the robot still.
-    lift.zero();          // the lift must start fully down
-    lift.startTask();
+    screen::start();  // brain readout, incl. "DRV" line showing the driver loop is alive
+    liftMotors.set_brake_mode_all(pros::v5::MotorBrake::hold);
+
+    // Calibrate in the background so nothing here can delay driver control.
+    // (IMU_PORT 8 is also a drive motor port; a bad IMU makes LemLib retry calibration.)
+    static pros::Task calibrate([] {
+        chassis.calibrate();
+        screen::calibrated = true;
+    });
 }
 
 void disabled() {}
@@ -38,30 +43,35 @@ void disabled() {}
 void competition_initialize() {}
 
 void autonomous() {
+    while (!screen::calibrated) pros::delay(10);  // odometry must be ready before moving
+    lift.zero();          // lift must start fully down
+    lift.startTask();     // PID only runs in autonomous
+    lift.setDirect(false);
+    scoring.reset();
     // TODO(team): autonomous routines. Example of a LemLib move:
     // chassis.setPose(0, 0, 0);
     // chassis.moveToPoint(0, 24, 2000);
-    lift.setDirect(false);  // autonomous may use the lift PID / presets
-    scoring.reset();
 }
 
 void opcontrol() {
-    // Driver control: the lift is plain motor power. No PID, no presets, no guards, no macros.
-    lift.setDirect(true);
-    intake.set(Intake::Mode::STOP);
+    lift.setDirect(true);  // if autonomous started the lift PID, it stops touching the motors now
+    master.print(0, 0, "DRIVER ON       ");
 
     while (true) {
         // --- Drive ---
-        chassis.arcade(master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y),
-                       master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X));
+        const int forward = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
+        const int turn = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
+        chassis.arcade(forward, turn);
 
-        // --- Lift: L1 up, L2 down, full power. Let go = motors HOLD in place. ---
-        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)) {
-            lift.move(127);
-        } else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2)) {
-            lift.move(-127);
+        // --- Lift: L1 up, L2 down, full power. Nothing else touches the lift. ---
+        const bool l1 = master.get_digital(pros::E_CONTROLLER_DIGITAL_L1);
+        const bool l2 = master.get_digital(pros::E_CONTROLLER_DIGITAL_L2);
+        if (l1) {
+            liftMotors.move(127);
+        } else if (l2) {
+            liftMotors.move(-127);
         } else {
-            lift.move(0);
+            liftMotors.move(0);
         }
 
         // --- Intake: R1 in, R2 out (hold) ---
@@ -75,6 +85,9 @@ void opcontrol() {
             else claw.clamp();
         }
         if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_X)) scoring.togglePivot();
+
+        // --- Brain "DRV" line: proves this loop is running and what it reads ---
+        screen::driverDebug = {screen::driverDebug.loops + 1, forward, turn, l1, l2};
 
         pros::delay(10);
     }

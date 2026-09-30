@@ -11,6 +11,9 @@
 
 namespace screen {
 
+DriverDebug driverDebug;
+bool calibrated = false;
+
 using namespace robot;
 
 namespace {
@@ -74,9 +77,12 @@ void draw() {
                              mm <= config::CLAW_DETECT_MM ? "PIN" : "");
     }
 
-    // 6: mechanism states
-    pros::lcd::print(6, "CLAW  %s  auto %s | %s lvl %d", claw.stateName(), scoring.autoclampOn() ? "ON" : "off",
-                     scoring.stateName(), scoring.getLevel());
+    // 6: driver loop heartbeat. "not started" = opcontrol never ran (not enabled / stuck before it).
+    if (driverDebug.loops == 0)
+        pros::lcd::print(6, "DRV   not started %s", calibrated ? "" : "(calibrating)");
+    else
+        pros::lcd::print(6, "DRV #%u fwd %d trn %d L1 %d L2 %d", static_cast<unsigned>(driverDebug.loops),
+                         driverDebug.forward, driverDebug.turn, driverDebug.l1, driverDebug.l2);
 
     // 7: motor temps (C). Motors start losing power around 55 C.
     pros::lcd::print(7, "TEMP  L %.0f  R %.0f  lift %.0f  intake %.0f", hottest(leftDrive), hottest(rightDrive),

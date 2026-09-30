@@ -52,7 +52,9 @@ During driver control the lift is **plain motor power**. The PID, presets, stall
 | **A** | claw clamp / open |
 | **X** | pivot in / out |
 
-The stack-level / matchload macros (`subsystems/scoring.*`) and the lift PID are still in the code for autonomous; `autonomous()` turns the PID back on with `lift.setDirect(false)`.
+The stack-level / matchload macros (`subsystems/scoring.*`) and the lift PID are still in the code for autonomous. `autonomous()` starts the PID; `opcontrol()` turns it off again.
+
+**Brain `DRV` line:** `not started` means driver control never ran (not enabled, or the program crashed; look for a red error on the brain). Otherwise it shows a loop counter going up plus the stick values and L1/L2 it reads. If the counter climbs and `L1 1` shows but the lift doesn't move, the problem is wiring or motor direction, not code.
 
 ## Lift direction check (do this first)
 The lift runs off the **rotation sensor** on port 16, not the motor encoders. If the sensor and the motors disagree on which way is up, the PID pushes the wrong way, the error grows, and the lift drives itself down. That's the "randomly spinning down" problem. To check:

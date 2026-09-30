@@ -25,10 +25,11 @@ Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
 
 - **Drivetrain**: 6 wheels, 2.75" omnis, 450 RPM, gear-driven. Left `-2,-3,-1`, right `8,9,10`.
 - **Intake**: front-mounted paddle/roller intake, ONE motor on port `12`, chain-driven. Sweeps cups in at floor level to a handoff in the middle of the robot.
-- **Lift**: DR6-4B six-bar, 2 motors (`20, -13`), 12T→36T, chain-levelled end effector. Rotation sensor port `16` is what the PID reads. Down = folded over the chassis = 0 deg; up = swung up and back.
+- **Lift**: DR6-4B six-bar, 2 motors (`20, -13`), **12T→48T (4:1)** — motors on the 12T axle, arm on the 48T. Chain-levelled end effector. Down = folded over the chassis = 0 deg; up = swung up and back.
+- **Lift sensing**: rotation sensor port `16` is what the PID reads, and it sits on the **motored 12T axle**, so **arm degrees = sensor degrees ÷ 4**.
 - **Claw + pivot**: two pneumatic cylinders, ADI `C` (claw) and ADI `D` (pivot). Pivot only flips out above `PIVOT_CLEAR` and always comes back in before the lift lowers.
-- **Game element**: a tapered translucent cup with a coloured cap, stacked up to 7 high.
-- **Known bad**: `IMU_PORT = 8` collides with right-drive port 8. Still unfixed.
+- **Game elements — two separate things**: a **pin** (solid yellow: hex head, fluted tapered body, flared base skirt) and a **cup** (ribbed tapered vessel, clear or red). The pin drops into the cup. **The claw grips the pin; the intake handles cups.** Stacks go 7 levels.
+- **Known bad in `config.hpp`**: **there is no IMU on the robot** — `IMU_PORT = 8` is wrong (and collides with right-drive port 8); the other helper is fixing it. `LIFT_GEAR_RATIO` still says `36.0/12.0` (should be `48.0/12.0`) and `LIFT_ROTATION_RATIO` still says `1.0` (should be `4.0`).
 
 ## Workflow — every change
 
@@ -58,8 +59,9 @@ Standing permission: build, upload and commit every time without asking. Do not 
 3. **Manual lift always wins.** Holding L1/L2 feeds voltage into that same loop ahead of the
    PID and cancels any active target immediately. Letting go brakes and holds; it must never
    snap back to an old preset.
-4. Nothing may block driver control from starting — IMU calibration runs in a background task
-   precisely because port 8 is contested. (`495bb66`)
+4. Nothing may block driver control from starting — there is no IMU fitted, so calibration
+   runs in a background task and is skipped when no IMU answers. Never make startup wait on
+   a sensor that may not be there. (`495bb66`, `1de3225`)
 
 ## Tunables
 

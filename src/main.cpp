@@ -9,9 +9,6 @@ using namespace robot;
 using subsystems::Intake;
 using subsystems::Scoring;
 
-// Driver-control lift: plain motor group, driven only by L1/L2 in opcontrol.
-pros::MotorGroup liftMotors({-13, 20}, pros::v5::MotorGears::red);  // keep in sync with config::LIFT_PORTS
-
 /**
  * Button map (driver):
  *   Left stick Y / Right stick X  arcade drive
@@ -27,13 +24,12 @@ pros::MotorGroup liftMotors({-13, 20}, pros::v5::MotorGears::red);  // keep in s
  */
 
 void initialize() {
+    screen::start();  // brain readout first: if you only see the program name, initialize() never ran
+
     // Startup signal: if the controller doesn't buzz once and show "PROGRAM ON" at power-up,
     // the controller isn't linked to the brain, or this program isn't the one running.
     master.rumble(".");
     master.print(0, 0, "PROGRAM ON      ");
-
-    screen::start();  // brain readout, incl. "DRV" line showing the driver loop is alive
-    liftMotors.set_brake_mode_all(pros::v5::MotorBrake::hold);
 
     // Calibrate in the background so nothing here can delay driver control.
     // Only calibrate the IMU if an IMU is really on IMU_PORT (port 8 is also a drive motor).
@@ -60,7 +56,7 @@ void autonomous() {
 }
 
 void opcontrol() {
-    lift.setDirect(true);  // if autonomous started the lift PID, it stops touching the motors now
+    lift.setDirect(true);  // lift PID off: only lift.move() below drives the lift motors
     master.print(0, 0, "DRIVER ON       ");
 
     while (true) {
@@ -73,11 +69,11 @@ void opcontrol() {
         const bool l1 = master.get_digital(pros::E_CONTROLLER_DIGITAL_L1);
         const bool l2 = master.get_digital(pros::E_CONTROLLER_DIGITAL_L2);
         if (l1) {
-            liftMotors.move(127);
+            lift.move(127);
         } else if (l2) {
-            liftMotors.move(-127);
+            lift.move(-127);
         } else {
-            liftMotors.move(0);
+            lift.move(0);
         }
 
         // --- Intake: R1 in, R2 out (hold) ---

@@ -27,13 +27,19 @@ pros::MotorGroup liftMotors({-13, 20}, pros::v5::MotorGears::red);  // keep in s
  */
 
 void initialize() {
+    // Startup signal: if the controller doesn't buzz once and show "PROGRAM ON" at power-up,
+    // the controller isn't linked to the brain, or this program isn't the one running.
+    master.rumble(".");
+    master.print(0, 0, "PROGRAM ON      ");
+
     screen::start();  // brain readout, incl. "DRV" line showing the driver loop is alive
     liftMotors.set_brake_mode_all(pros::v5::MotorBrake::hold);
 
     // Calibrate in the background so nothing here can delay driver control.
-    // (IMU_PORT 8 is also a drive motor port; a bad IMU makes LemLib retry calibration.)
+    // Only calibrate the IMU if an IMU is really on IMU_PORT (port 8 is also a drive motor).
     static pros::Task calibrate([] {
-        chassis.calibrate();
+        const bool imuPresent = pros::Device::get_plugged_type(config::IMU_PORT) == pros::DeviceType::imu;
+        chassis.calibrate(imuPresent);
         screen::calibrated = true;
     });
 }

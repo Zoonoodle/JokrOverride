@@ -1,16 +1,25 @@
 #include "subsystems/lift.hpp"
 
 #include "config.hpp"
+#include "pros/error.h"
 
 #include <algorithm>
 #include <cmath>
 
 namespace subsystems {
 
+namespace {
+/** Fold a sensor angle in centidegrees (0..35999) into the signed range closest to zero,
+ *  (-18000, 18000]. A lift resting a hair low reads ~35990 and folds to ~-10, not +35990. */
+std::int32_t foldCentideg(std::int32_t centideg) {
+    if (centideg > 18000) centideg -= 36000;
+    return centideg;
+}
+}  // namespace
+
 Lift::Lift()
     : motors_(config::LIFT_PORTS, pros::v5::MotorGears::red),  // both lift motors are red (100 RPM) cartridges
-      pid_(config::LIFT_KP, config::LIFT_KI, config::LIFT_KD, config::LIFT_WINDUP_RANGE, true),
-      settle_(config::LIFT_SETTLE_DEG, config::LIFT_SETTLE_MS) {
+      pid_(config::LIFT_KP, config::LIFT_KI, config::LIFT_KD, config::LIFT_WINDUP_RANGE, true) {
     motors_.set_encoder_units_all(pros::v5::MotorEncoderUnits::degrees);
     // HOLD keeps the arm from dropping under its own weight whenever update() brakes (idle, or the
     // driver just let go of L1/L2).
@@ -32,42 +41,47 @@ void Lift::zero() {
     // the brain's diagnostic ROT/MOT cross-check, so taring them here is harmless.
     motors_.tare_position_all();
 
-    // Absolute zero, NOT a startup reset: the rotation sensor's own persistent zero point has been
-    // calibrated (on the brain's device screen, outside this code) to the physical bottom of the
-    // lift, so get_angle() is already a true absolute 0..360 sensor-degree reading from that zero
-    // and survives power cycles on its own -- it does NOT need, and must NOT get, a software reset
-    // here. Resetting it (the old rotation_->reset_position()/set_position(0)) would throw that
-    // calibration away and make every height relative to wherever the arm happened to be sitting at
-    // THIS particular boot instead (e.g. a little high from band tension with the motors unpowered) --
-    // exactly the bug this avoids.
+    // Absolute-angle SEED, not a startup reset: the rotation sensor's own persistent zero point has
+    // been calibrated (on the brain's device screen, outside this code) to the physical bottom of the
+    // lift, so get_angle() is already a true absolute 0..360 sensor-degree reading from that zero and
+    // survives power cycles on its own -- it does NOT need, and must NOT get, a software reset HERE.
+    // Resetting it here would throw that calibration away and make every height relative to wherever
+    // the arm happened to be sitting at THIS particular boot instead (e.g. a little high from band
+    // tension with the motors unpowered) -- exactly the bug this avoids. zero() also commands no
+    // motion of any kind, which is what keeps "nothing moves at startup" true of initialize().
     //
     // What we do instead: seed the multi-turn position counter (what get_position() tracks) from the
-    // current absolute angle, folded to the signed sensor-degree range closest to 0, (-180, 180]: a
-    // lift resting a hair low (angle ~359.9 deg) seeds as ~-0.1 deg, not +359.9. From then on
-    // get_position() keeps counting turns correctly from that seed as the arm moves, through
-    // getSensorPosition()'s /LIFT_ROTATION_RATIO conversion to arm degrees.
+    // current absolute angle, folded to the signed sensor-degree range closest to 0, (-180, 180].
     //
-    // This is only unambiguous if the lift powers on within +-45 ARM degrees (+-180 sensor degrees --
-    // one quarter of the 4:1-geared sensor's single revolution) of the true bottom: true by design
-    // (DOWN/0 is the documented power-on position, see config::lift_preset) but NOT verified here --
-    // a lift powered on further from the bottom than that would seed to the wrong turn count. set_reversed()
-    // was already applied in the constructor (it runs long before this, see Lift::Lift()), so it
-    // affects get_angle() here and every later get_position() read the same consistent way.
+    // LIMIT, and why homing exists: this is only unambiguous if the lift powers on within +-45 ARM
+    // degrees (+-180 sensor degrees -- one quarter of the 4:1-geared sensor's single revolution) of
+    // the true bottom. An arm that powered on further up than that seeds to the wrong turn count and
+    // every preset is then off by a whole sensor revolution. That is the real failure the user sees as
+    // "our arm always starts up too much". requestHome() fixes it properly by driving the arm down to
+    // its hard stop at the start of the first ENABLED mode and set_position(0)-ing THERE -- which is a
+    // different thing from resetting the sensor here, and is the only place in this class allowed to
+    // do it (see updateHoming()). set_reversed() was already applied in the constructor, so it affects
+    // get_angle() here and every later get_position() read the same consistent way.
     if (rotation_) {
-        std::int32_t angleCentideg = rotation_->get_angle();  // 0..35999 centidegrees, absolute, persists
-        if (angleCentideg > 18000) angleCentideg -= 36000;    // fold into (-18000, 18000] centidegrees
-        startupAngleDeg_ = angleCentideg / 100.0;             // kept for the brain screen only
-        rotation_->set_position(angleCentideg);               // seed the counter -- NOT reset_position()
+        const std::int32_t angleCentideg = foldCentideg(rotation_->get_angle());
+        startupAngleDeg_ = angleCentideg / 100.0;  // kept for the brain screen only
+        rotation_->set_position(angleCentideg);    // seed the counter -- NOT reset_position()
     }
     active_ = false;
     goal_ = target_ = 0.0;
-    speed_ = 0.0;
+    profVel_ = 0.0;
+    precise_ = false;
     faulted_ = false;
     blocked_ = false;
+    holding_ = false;
+    settled_ = false;
+    inBandSince_ = 0;
     pushStart_ = 0;
     stallStart_ = 0;
+    home_ = Home::IDLE;
+    homeRequested_ = false;
+    queuedTarget_ = false;
     resetPid();
-    settle_.reset();
 }
 
 double Lift::getMotorPosition() const {
@@ -97,43 +111,186 @@ double Lift::getCurrentDraw() const {
 
 double Lift::getPosition() const { return rotation_ ? getSensorPosition() : getMotorPosition(); }
 
-void Lift::setTarget(double degrees, double speedDegPerSec) {
+// ---------------------------------------------------------------------------
+// Homing
+// ---------------------------------------------------------------------------
+void Lift::requestHome() {
+    // Only ever from IDLE: a second request after a run has homed, failed or been cancelled is a
+    // no-op, which is what makes "auton then opcontrol" home exactly once per program run.
+    if (home_ != Home::IDLE) return;
+    if (!rotation_) {
+        home_ = Home::SKIPPED;  // nothing to home against; do NOT move the arm blind
+        return;
+    }
+    homeRequested_ = true;
+    home_ = Home::RUNNING;
+    homeStart_ = pros::millis();
+    homeStillSince_ = 0;
+    homeStopAngleDeg_ = 0.0;
+    // Homing owns the motors while it runs, so no PID target may be active underneath it.
+    active_ = false;
+    holding_ = false;
+    settled_ = false;
+    inBandSince_ = 0;
+    resetPid();
+}
+
+void Lift::updateHoming(const std::uint32_t now) {
+    // A sensor that stopped answering mid-home: stop pushing rather than drive down blind.
+    if (!rotation_) {
+        home_ = Home::SKIPPED;
+        motors_.brake();
+        startQueuedTarget();
+        return;
+    }
+    const std::int32_t rawCentideg = rotation_->get_position();
+    if (rawCentideg == PROS_ERR) {
+        home_ = Home::FAILED;
+        motors_.brake();
+        startQueuedTarget();
+        return;
+    }
+    const double rawSensorDeg = rawCentideg / 100.0;  // SENSOR degrees, the unit LIFT_HOME_STILL_DEG is in
+    const std::uint32_t elapsed = now - homeStart_;
+
+    // Timeout: stop pushing, keep zero()'s seed, say so on the brain.
+    if (elapsed >= static_cast<std::uint32_t>(config::LIFT_HOME_TIMEOUT_MS)) {
+        homeStopAngleDeg_ = foldCentideg(rotation_->get_angle()) / 100.0;
+        home_ = Home::FAILED;
+        motors_.brake();
+        startQueuedTarget();
+        return;
+    }
+
+    // "Stopped" = the raw sensor moved less than LIFT_HOME_STILL_DEG across a whole
+    // LIFT_HOME_STILL_MS window. Any movement bigger than that re-opens the window, so small wobble
+    // at the stop still counts as stopped (which is what the user described: 358-359-0-1 and settling).
+    // Only start looking after LIFT_HOME_MIN_DRIVE_MS, so a sticky start isn't read as the bottom.
+    bool stopped = false;
+    if (elapsed >= static_cast<std::uint32_t>(config::LIFT_HOME_MIN_DRIVE_MS)) {
+        if (homeStillSince_ == 0 || std::fabs(rawSensorDeg - homeStillRef_) > config::LIFT_HOME_STILL_DEG) {
+            homeStillSince_ = now;
+            homeStillRef_ = rawSensorDeg;
+        } else if (now - homeStillSince_ >= static_cast<std::uint32_t>(config::LIFT_HOME_STILL_MS)) {
+            stopped = true;
+        }
+    }
+
+    if (!stopped) {
+        // Steady, moderate downward drive. NOT full speed: it ends against the frame.
+        motors_.move_voltage(static_cast<int>(config::LIFT_HOME_MV));
+        lastError_ = 0.0;
+        lastOutput_ = config::LIFT_HOME_MV;
+        lastP_ = lastI_ = lastD_ = 0.0;
+        return;
+    }
+
+    // Stopped. Stop pushing first -- whatever we decide next, the motors must not stay stalled
+    // against the frame.
+    motors_.brake();
+    lastOutput_ = 0.0;
+    const std::int32_t angleCentideg = foldCentideg(rotation_->get_angle());
+    homeStopAngleDeg_ = angleCentideg / 100.0;
+
+    // Plausibility: the sensor's own calibrated absolute zero IS the bottom of the lift, so if we
+    // really are at the hard stop the folded absolute angle must be near 0. If it isn't, the arm is
+    // jammed on something partway down -- do NOT zero there, that would bake the jam into every
+    // preset. Keep zero()'s seed and report it instead.
+    if (std::fabs(homeStopAngleDeg_) <= config::LIFT_HOME_ZERO_WINDOW_DEG) {
+        rotation_->set_position(0);  // the ONE place in this class that may zero the sensor -- see zero()
+        home_ = Home::DONE;
+    } else {
+        home_ = Home::FAILED;
+    }
+    if (home_ == Home::DONE) {
+        // Hold at the bottom exactly like a normal arrival at DOWN, so the loop has an owner and the
+        // motors are not left stalled against the frame. The rest-band branch in update() (position is
+        // 0 now, we just zeroed it) turns this straight into a plain brake-hold.
+        active_ = true;
+        goal_ = 0.0;
+        target_ = getPosition();
+        profVel_ = 0.0;
+        precise_ = false;
+        descentFloor_ = 0.0;
+        holding_ = false;
+        inBandSince_ = 0;
+        resetPid();
+    } else {
+        // FAILED: the arm stopped somewhere that is not the bottom, so it is jammed on something.
+        // Leave NO target active -- update()'s "nothing commanded" branch just brake-holds where it
+        // is. Commanding DOWN here instead would push straight back into whatever it is caught on
+        // (and, with the seed un-zeroed, from a position the code doesn't really know).
+        active_ = false;
+    }
+    startQueuedTarget();  // a button pressed during homing still does what the driver asked
+}
+
+void Lift::startQueuedTarget() {
+    if (!queuedTarget_) return;
+    queuedTarget_ = false;
+    setTarget(queuedGoal_, queuedPrecise_);
+}
+
+const char* Lift::homeStateName() const {
+    switch (home_) {
+        case Home::IDLE: return "";
+        case Home::RUNNING: return "HOMING";
+        case Home::DONE: return "HOMED";
+        case Home::FAILED: return "HOME FAIL";
+        case Home::CANCELLED: return "HOME CANCELLED";
+        case Home::SKIPPED: return "HOME SKIPPED";
+    }
+    return "";
+}
+
+// ---------------------------------------------------------------------------
+// Targets
+// ---------------------------------------------------------------------------
+void Lift::setTarget(double degrees, bool precise) {
     const double clamped = std::clamp(degrees, config::lift_preset::DOWN, config::lift_preset::MAX);
-    // A trip to the bottom is ALWAYS profiled, even when the caller asked for a jump (speed 0, e.g.
-    // the B stow button, R1's goToIntake(), or a bare auton moveTo(DOWN)). A setpoint that jumps
-    // straight to the bottom means the arm drops at whatever voltage the PID will give it (12000 mV,
-    // ~150 arm deg/s wide open) and only starts being slowed once it is already inside the last
-    // LIFT_SLOW_ZONE_DEG -- far too late to stop in. Filling in the cruise here instead means the
-    // setpoint, and therefore the arm, is walking down at a known speed for the whole trip. The
-    // resolved speed (not the raw argument) is what the "same move, ignore it" check below compares,
-    // so a repeated moveTo(DOWN) mid-descent really is a no-op and can't restart the profile from
-    // wherever the arm has got to.
-    //   The test is LIFT_BOTTOM_GOAL_DEG, not DOWN exactly: INTAKE (1.1 deg) is mechanically the
-    //   bottom too, and R1 from the top stack level used to be the one unprofiled free-fall left in
-    //   the code because 1.1 > 0 slipped past a `<= DOWN` test.
-    const double resolved = clamped <= config::LIFT_BOTTOM_GOAL_DEG && speedDegPerSec <= 0.0
-                                ? config::LIFT_LOWER_SPEED_DEG_PER_S
-                                : speedDegPerSec;
-    if (active_ && clamped == goal_ && resolved == speed_) return;
+    // INTAKE is always precise, wherever it is commanded from, so no call site can forget: it is the
+    // one height that has to physically line up with the intake handoff (see LIFT_PRECISE_* in
+    // config.hpp). Everything else trades a few degrees of accuracy for a stop that doesn't hunt.
+    const bool wantPrecise = precise || std::fabs(clamped - config::lift_preset::INTAKE) < 0.5;
+
+    // Homing owns the motors until it finishes. Queue the target rather than dropping it (so a button
+    // pressed during homing still does what the driver asked) and rather than letting it abort homing
+    // (so the arm still gets a trustworthy zero).
+    if (home_ == Home::RUNNING) {
+        queuedTarget_ = true;
+        queuedGoal_ = clamped;
+        queuedPrecise_ = wantPrecise;
+        return;
+    }
+
+    if (active_ && clamped == goal_ && wantPrecise == precise_) return;  // same move, already running
     active_ = true;
     blocked_ = false;
+    // A deliberate new command clears a latched runaway fault: the guard's job is to stop the motion
+    // that was happening, not to brick every button until someone wiggles the D-pad. A real wiring
+    // fault re-faults within LIFT_FAULT_MS, so nothing is lost.
+    faulted_ = false;
     stallStart_ = 0;
+    pushStart_ = 0;
     goal_ = clamped;
-    speed_ = resolved;
-    // A speed-limited move starts from where the lift actually is, not from the old setpoint.
-    target_ = speed_ > 0 ? getPosition() : goal_;
-    descentStart_ = target_;  // anchor for the ramp-up in update(), see LIFT_LOWER_RAMP_DEG
-    descentFloor_ = 0.0;      // a brand-new move never inherits a stale pivot floor, see setDescentFloor()
-    resetPid();       // old integral/derivative belong to the old target
-    settle_.reset();  // a new target is not settled yet
+    precise_ = wantPrecise;
+    // The profile always starts from where the arm actually is, never from a stale setpoint.
+    target_ = getPosition();
+    profVel_ = 0.0;
+    descentFloor_ = 0.0;  // a brand-new move never inherits a stale pivot floor, see setDescentFloor()
+    holding_ = false;
     settled_ = false;
+    inBandSince_ = 0;
+    resetPid();  // old integral/derivative belong to the old target
 }
 
 void Lift::moveTo(double degrees, int timeoutMs, bool waitUntilSettled) {
     setTarget(degrees);
     if (!waitUntilSettled) return;
     const std::uint32_t start = pros::millis();
-    while (!isSettled() && !isBlocked() && !isFaulted()) {
+    // isHoming() is part of the wait on purpose: a blocking auton move asked for during homing is
+    // queued, so "not settled yet" is the truth until homing ends and the queued move finishes.
+    while (isHoming() || (!isSettled() && !isBlocked() && !isFaulted())) {
         if (timeoutMs > 0 && pros::millis() - start >= static_cast<std::uint32_t>(timeoutMs)) break;
         pros::delay(10);
     }
@@ -141,12 +298,14 @@ void Lift::moveTo(double degrees, int timeoutMs, bool waitUntilSettled) {
 
 void Lift::cancel() {
     active_ = false;
-    speed_ = 0.0;
     blocked_ = false;
     stallStart_ = 0;
     settled_ = false;
+    holding_ = false;
+    inBandSince_ = 0;
+    profVel_ = 0.0;
+    queuedTarget_ = false;
     resetPid();
-    settle_.reset();
 }
 
 const char* Lift::activePresetName() const {
@@ -166,6 +325,9 @@ const char* Lift::activePresetName() const {
 
 void Lift::driverPower(double input) { manualPower_ = std::clamp(input, -1.0, 1.0); }
 
+// ---------------------------------------------------------------------------
+// The one control loop
+// ---------------------------------------------------------------------------
 void Lift::update() {
     const std::uint32_t now = pros::millis();
     const double dt = lastUpdate_ == 0 ? 0.01 : (now - lastUpdate_) / 1000.0;
@@ -173,15 +335,22 @@ void Lift::update() {
     const double position = getPosition();
 
     // 1) Driver manual override (D-pad Up/Down): full send, no feedforward -- same feel as plain
-    //    motor power. This is the ONLY thing allowed to preempt the PID, and it always wins: cancel
-    //    whatever target was active so nothing "fights" the driver, and so release doesn't jump
-    //    back to it either (see class comment).
+    //    motor power. This is the ONLY thing allowed to preempt everything else, and it always wins:
+    //    cancel whatever target was active so nothing "fights" the driver, cancel homing (and don't
+    //    retry it this run -- the arm is wherever the driver put it, and zero()'s seed stands), and
+    //    make sure release doesn't jump back to an old target either (see class comment).
     if (std::fabs(manualPower_) > 0.02) {
         if (active_) cancel();
+        if (home_ == Home::RUNNING) {
+            home_ = Home::CANCELLED;
+            queuedTarget_ = false;
+        }
         wasManual_ = true;
         const double mv = std::clamp(manualPower_, -1.0, 1.0) * config::LIFT_MAX_MV;
         motors_.move_voltage(static_cast<int>(mv));
         settled_ = false;
+        holding_ = false;
+        inBandSince_ = 0;
         pushStart_ = 0;
         lastError_ = 0.0;
         lastOutput_ = mv;
@@ -193,12 +362,24 @@ void Lift::update() {
         faulted_ = false;  // driver took manual control; give the PID a clean slate next time
     }
 
-    // 2) No commanded height: brake and hold right here. This is the state at power-on (nothing
+    // 2) Homing: find the hard stop and zero there. Runs as a mode in this same task, so it is still
+    //    this one function writing the motors, and nothing anywhere blocks on it. The stall and
+    //    runaway guards are not reached while homing -- deliberately: homing's whole job is to drive
+    //    the arm into a hard stop and notice that it stopped, which is exactly what those guards
+    //    exist to prevent in normal operation. updateHoming() has its own timeout instead.
+    if (home_ == Home::RUNNING) {
+        updateHoming(now);
+        return;
+    }
+
+    // 3) No commanded height: brake and hold right here. This is the state at power-on (nothing
     //    moves until something explicitly calls setTarget()/moveTo()) and right after the driver
     //    lets go of the manual override (no old target resumes).
     if (!active_) {
         motors_.brake();
         settled_ = false;
+        holding_ = false;
+        inBandSince_ = 0;
         lastError_ = 0.0;
         lastOutput_ = 0.0;
         lastP_ = lastI_ = lastD_ = 0.0;
@@ -214,99 +395,127 @@ void Lift::update() {
         return;
     }
 
-    // 3) How fast the setpoint is allowed to move this tick. Normally that is just the commanded
-    //    speed_ (setTarget() already guarantees a nonzero one for any trip to the bottom, so the
-    //    whole descent is profiled from wherever the arm was when the move started). The final
-    //    stretch is slower: once the SETPOINT -- not the arm -- is within LIFT_SLOW_ZONE_DEG of the goal,
-    //    it creeps the rest of the way at LIFT_SLOW_SPEED_DPS. Testing the setpoint is the point:
-    //    the arm is tracking it, so it has already been decelerating since before it entered the
-    //    zone, instead of showing up at the zone boundary at full speed with 20 deg left to stop in.
-    //    Only this speed changes at the handover -- target_ is never snapped back to the live
-    //    position mid-descent, because that would throw away exactly the lag the PID is correcting.
-    double walkSpeed = speed_;
-    if (headingToBottom()) {
-        // Ramp-up: don't start a descent at full cruise -- climb linearly from
-        // LIFT_LOWER_START_SPEED_DEG_PER_S up to cruise (speed_) over the first LIFT_LOWER_RAMP_DEG of
-        // travel from wherever this move began (descentStart_, set once in setTarget()). Measured on
-        // the SETPOINT, same reasoning as the slow zone below: the arm is tracking it, so it leaves
-        // the top smoothly instead of snapping to cruise speed the instant the move is commanded.
-        if (config::LIFT_LOWER_RAMP_DEG > 0.0) {
-            const double traveled = std::fabs(descentStart_ - target_);
-            if (traveled < config::LIFT_LOWER_RAMP_DEG) {
-                const double t = traveled / config::LIFT_LOWER_RAMP_DEG;
-                walkSpeed = config::LIFT_LOWER_START_SPEED_DEG_PER_S +
-                            t * (speed_ - config::LIFT_LOWER_START_SPEED_DEG_PER_S);
-            }
-        }
-        // Slow zone, measured from the GOAL (not from 0): a trip to INTAKE gets the same gentle last
-        // stretch as a trip to DOWN, which is the point of LIFT_BOTTOM_GOAL_DEG.
-        if (target_ <= goal_ + config::LIFT_SLOW_ZONE_DEG) walkSpeed = std::min(walkSpeed, config::LIFT_SLOW_SPEED_DPS);
+    // 4) Going to DOWN: inside the rest band, stop controlling altogether and just brake-hold. That
+    //    is the one place the gravity feedforward must not be allowed to push UP -- an arm already
+    //    sitting on (or held a hair above, by the rubber bands) the hard stop with kG under it is what
+    //    made the lift bounce at startup (17ab865), and there is nothing left to control down there.
+    if (goal_ <= config::lift_preset::DOWN && position <= config::lift_preset::DOWN + config::LIFT_REST_BAND_DEG) {
+        motors_.brake();
+        target_ = goal_;
+        profVel_ = 0.0;
+        holding_ = true;
+        settled_ = true;
+        pushStart_ = 0;
+        stallStart_ = 0;
+        resetPid();
+        lastError_ = goal_ - position;
+        lastOutput_ = 0.0;
+        lastP_ = lastI_ = lastD_ = 0.0;
+        return;
     }
 
-    // 4) Walk the setpoint toward the goal for speed-limited moves (including the ramp-up and slow
-    //    walk above), then hold it at descentFloor_ if a caller has raised one (Scoring does, while
-    //    the pivot it owns is still retracting -- see setDescentFloor()). This only ever pauses the
-    //    LAST bit of an already-moving profile: the floor starts at 0 (no effect) and callers raise
-    //    it only once they need it, so it can delay arrival but can never turn into a stop-then-hop.
-    const double prevTarget = target_;
-    if (walkSpeed > 0 && target_ != goal_) {
-        const double step = walkSpeed * dt;
-        if (std::fabs(goal_ - target_) <= step) target_ = goal_;
-        else target_ += goal_ > target_ ? step : -step;
+    // 5) Arrival band, with hysteresis. Inside tolerance (for LIFT_HOLD_MS) the loop stops chasing the
+    //    target and holds; it only goes back to chasing once the arm has drifted LIFT_HOLD_RELEASE_DEG
+    //    FURTHER than the tolerance. This -- not a gain -- is what stops the hunting the old
+    //    high-gain-chase-forever loop did. The band is only considered once the profile has actually
+    //    finished, so flying through it at speed mid-move can never be mistaken for arriving.
+    const double gap = goal_ - position;
+    if (target_ == goal_) {
+        if (std::fabs(gap) <= tolerance() + (holding_ ? config::LIFT_HOLD_RELEASE_DEG : 0.0)) {
+            if (inBandSince_ == 0) inBandSince_ = now;
+            if (now - inBandSince_ >= static_cast<std::uint32_t>(config::LIFT_HOLD_MS)) holding_ = true;
+        } else {
+            inBandSince_ = 0;
+            holding_ = false;
+        }
+    } else {
+        inBandSince_ = 0;
+        holding_ = false;
     }
+
+    if (holding_) {
+        // Gentle hold: gravity feedforward plus a low-gain, low-authority P term. A precise goal keeps
+        // the full loop gain instead, because its band is only LIFT_PRECISE_TOLERANCE_DEG wide and it
+        // really does have to close that last degree. Capped under LIFT_FAULT_MV and LIFT_STALL_MV, so
+        // a hold can never look like a runaway or a stall to the guards below.
+        const float holdKp = precise_ ? config::LIFT_KP : config::LIFT_HOLD_KP;
+        const float holdMax = precise_ ? config::LIFT_MAX_MV : config::LIFT_HOLD_MAX_MV;
+        float output = config::LIFT_KG + holdKp * static_cast<float>(gap);
+        output = std::clamp(output, -holdMax, holdMax);
+        motors_.move_voltage(static_cast<int>(output));
+        settled_ = true;
+        pushStart_ = 0;
+        stallStart_ = 0;
+        resetPid();
+        lastError_ = gap;
+        lastOutput_ = output;
+        lastP_ = holdKp * static_cast<float>(gap);
+        lastI_ = lastD_ = 0.0;
+        return;
+    }
+    settled_ = false;
+
+    // 6) Trapezoidal profile on the setpoint. vStop is the fastest the profile may be going and still
+    //    stop in the distance that is left (v = sqrt(2*a*d)) -- that is the whole deceleration, known
+    //    in advance instead of discovered by overshooting. The start-speed floor is itself capped by
+    //    vStop, so it can make a move begin instantly without ever stopping it ending cleanly.
+    const double dir = goal_ >= target_ ? 1.0 : -1.0;
+    const double remaining = std::fabs(goal_ - target_);
+    double vMax = config::LIFT_MAX_SPEED_DEG_PER_S;
+    if (precise_ && remaining <= config::LIFT_PRECISE_ZONE_DEG)
+        vMax = std::min(vMax, config::LIFT_PRECISE_SPEED_DEG_PER_S);
+    const double vStop = std::sqrt(2.0 * config::LIFT_DECEL_DEG_PER_S2 * remaining);
+    double v = std::min(profVel_ + config::LIFT_ACCEL_DEG_PER_S2 * dt, vMax);
+    v = std::min(v, vStop);
+    // The start floor is capped by BOTH limits, so it can make a move begin instantly without ever
+    // overriding the deceleration (vStop) or a precise goal's slow final approach (vMax).
+    v = std::max(v, std::min({config::LIFT_START_SPEED_DEG_PER_S, vStop, vMax}));
+
+    const double prevTarget = target_;
+    const double step = v * dt;
+    if (step >= remaining) target_ = goal_;
+    else target_ += dir * step;
+
+    // 6b) THE LEASH: never let the setpoint get more than LIFT_MAX_LEAD_DEG ahead of the arm. If the
+    //     arm can't keep up, the setpoint waits for it. This is what bounds the tracking error -- and
+    //     therefore the PID's whole contribution -- no matter how far the goal is, so there is never
+    //     any stored error for the arm to overshoot with. It is also why the runaway guard below
+    //     watches the distance to the GOAL rather than this error.
+    if (dir > 0) target_ = std::min(target_, std::min(goal_, position + config::LIFT_MAX_LEAD_DEG));
+    else target_ = std::max(target_, std::max(goal_, position - config::LIFT_MAX_LEAD_DEG));
+    // Scoring's pivot-retract floor, for a descent only (see setDescentFloor()). It can delay arrival
+    // but never turns the profile into a stop-then-hop.
     if (headingToBottom()) target_ = std::max(target_, descentFloor_);
 
-    // 4b) Velocity feedforward for profiled moves. How fast the setpoint ACTUALLY moved this tick
-    //     (after the slow zone, the ramp, arrival at the goal and the pivot floor have all had their
-    //     say) times LIFT_KV, the motors' mV per arm deg/s. This is what lets the descent cruise at
-    //     ~87% of free speed and still be a tracked profile: the feedforward supplies the voltage the
-    //     speed needs, so the PID only has to correct the small leftover error instead of generating
-    //     the whole ~9000 mV out of a 15-20 deg tracking lag. Without it the arm reached the slow
-    //     zone late and fast (the lag), and the growing error during spin-up looked like a runaway.
-    //     Clamped to the walk speed so a floor change or an arrival can never turn into a voltage
-    //     spike, and 0 for a jump move (target_ == goal_ from the first tick, so prevTarget == target_).
-    const double setpointVel =
-        dt > 0.0 ? std::clamp((target_ - prevTarget) / dt, -walkSpeed, walkSpeed) : 0.0;
-    const float vff = static_cast<float>(config::LIFT_KV * setpointVel);
+    // 6c) The profile's speed is read back from how far the setpoint ACTUALLY moved, so the leash, the
+    //     floor and arrival at the goal all feed back into it automatically: when the leash is binding
+    //     the profile paces the arm instead of running away from it.
+    //     Only movement in the DIRECTION OF TRAVEL counts. The leash and the floor are both clamps, so
+    //     they can also drag the setpoint BACKWARDS in one tick -- if the arm sags while the profile is
+    //     heading up, the leash follows it down. Feeding that backwards jump into the feedforward would
+    //     command a big DOWNWARD voltage on the exact tick we are trying to go up, which is the
+    //     opposite of what the leash is for. So a backwards tick contributes zero: the feedforward goes
+    //     quiet, the PID (which sees the error) deals with it, and the profile restarts from
+    //     LIFT_START_SPEED_DEG_PER_S next tick. Clamped to v so a floor change can't spike either.
+    const double applied = dt > 0.0 ? (target_ - prevTarget) / dt : 0.0;
+    const double advance = std::clamp(dir > 0 ? std::max(applied, 0.0) : std::min(applied, 0.0), -v, v);
+    profVel_ = std::fabs(advance);
+    const float vff = static_cast<float>(config::LIFT_KV * advance);
 
-    // 5) PID + gravity feedforward. The P and D terms below are computed the same way lemlib::PID
-    //    computes them internally (see include/lemlib/pid.hpp: update() takes no dt, so it can't be
-    //    doing any time-based scaling -- kP*error and kD*(error-prevError), one call per tick, same
-    //    as here). The I term is the exact residual against the real output, so P+I+D+kG always
-    //    equals the actual output regardless, even if that assumption is ever slightly off. This is
-    //    for the tuning screen only; it never feeds back into control.
+    // 7) PID + gravity feedforward + velocity feedforward. The P and D terms below are computed the
+    //    same way lemlib::PID computes them internally (see include/lemlib/pid.hpp: update() takes no
+    //    dt, so it can't be doing any time-based scaling -- kP*error and kD*(error-prevError), one
+    //    call per tick, same as here). The I term is the exact residual against the real PID output,
+    //    so the telemetry always adds up. This is for the tuning screen only; it never feeds back.
     const float error = static_cast<float>(target_ - position);
     const float pTerm = config::LIFT_KP * error;
     const float dTerm = config::LIFT_KD * (error - static_cast<float>(shadowPrevError_));
     shadowPrevError_ = error;
     const float pidOut = pid_.update(error);
     const float iTerm = pidOut - pTerm - dTerm;
-    float output = pidOut + config::LIFT_KG + vff;  // vff = velocity feedforward, step 4b above
+    float output = pidOut + config::LIFT_KG + vff;
 
-    // Going to DOWN specifically (not just headingToBottom() -- a goal of INTAKE is above the hard
-    // stop, so there is still something to hold there and the PID finishes that move normally):
-    // inside the rest band, stop controlling altogether and just brake-hold.
-    // That is the one place the gravity feedforward must not be allowed to push UP -- an arm already
-    // sitting on (or held a hair above, by the rubber bands) the hard stop with kG under it is what
-    // made the lift bounce at startup (17ab865), and there is nothing left to control down there
-    // anyway. ABOVE the rest band the output is deliberately NOT clamped downward: pushing up is how
-    // the loop brakes an arm that is falling faster than the setpoint is walking, and the old
-    // `output = std::min(output, 0)` here made that impossible, so the whole descent could only ever
-    // coast -- it arrived at the frame at whatever speed gravity had given it. Which way the bands
-    // and gravity net out at a given height is not known, so the loop is simply allowed to push
-    // either way and let the error decide.
-    if (goal_ <= config::lift_preset::DOWN && position <= config::lift_preset::DOWN + config::LIFT_REST_BAND_DEG) {
-        motors_.brake();
-        settled_ = true;
-        pushStart_ = 0;
-        resetPid();
-        lastError_ = error;
-        lastOutput_ = 0.0;
-        lastP_ = lastI_ = lastD_ = 0.0;
-        return;
-    }
-
-    // 6) Output limit (motors only accept -12000..12000 mV).
+    // 8) Output limit (motors only accept -12000..12000 mV).
     output = std::clamp(output, -config::LIFT_MAX_MV, config::LIFT_MAX_MV);
 
     lastError_ = error;
@@ -315,32 +524,48 @@ void Lift::update() {
     lastI_ = iTerm;
     lastD_ = dTerm;
 
-    // 7) Runaway guard: the failure it exists for is a direction mismatch -- rotation sensor or
-    //    LIFT_PORTS reversed, so the loop pushes the wrong way, the error grows, and it pushes
-    //    harder until the lift drives itself into a hard stop. The tell is the ERROR, not the
-    //    motion: push hard in the direction that should shrink the error, and watch whether the
-    //    error shrinks. It must not be "pushing one way while the arm moves the other", which is
-    //    what this used to test -- braking a descending arm is exactly that pattern (output up,
-    //    arm still travelling down) and it is the correct thing to be doing, so a controlled
-    //    descent kept tripping a guard meant for a wiring fault.
-    const int dir = std::fabs(output) >= config::LIFT_FAULT_MV && output * error > 0.0f ? (output > 0 ? 1 : -1) : 0;
-    if (dir == 0 || dir != pushDir_) {
-        pushDir_ = dir;
-        pushStart_ = dir == 0 ? 0 : now;
-        pushStartErr_ = std::fabs(error);
+    // 9) Runaway guard: the failure it exists for is a direction mismatch -- rotation sensor or
+    //    LIFT_PORTS reversed, so the loop pushes the wrong way, the arm goes further from the goal,
+    //    and it pushes harder until the lift drives itself into a hard stop. The tell is the DISTANCE
+    //    TO THE GOAL, not the motion and not the tracking error: push hard in the direction that
+    //    should close that distance, and watch whether it closes. It must not be "pushing one way
+    //    while the arm moves the other", which is what this used to test -- braking a descending arm
+    //    is exactly that pattern and is the correct thing to be doing. And it must not be the
+    //    tracking error either, because the leash in 6b deliberately keeps that small by dragging the
+    //    setpoint along with the arm, which a reversed sensor would hide behind.
+    const int dir9 = std::fabs(output) >= config::LIFT_FAULT_MV && output * static_cast<float>(gap) > 0.0f
+                         ? (output > 0 ? 1 : -1)
+                         : 0;
+    if (dir9 == 0 || dir9 != pushDir_) {
+        pushDir_ = dir9;
+        pushStart_ = dir9 == 0 ? 0 : now;
+        pushStartGap_ = std::fabs(gap);
     } else if (now - pushStart_ >= static_cast<std::uint32_t>(config::LIFT_FAULT_MS)) {
-        if (std::fabs(error) - pushStartErr_ > config::LIFT_FAULT_DEG) {
+        if (std::fabs(gap) - pushStartGap_ > config::LIFT_FAULT_DEG) {
             faulted_ = true;
             motors_.brake();
             return;
         }
-        pushStart_ = now;  // error shrinking or holding: start a new window
-        pushStartErr_ = std::fabs(error);
+        pushStart_ = now;  // gap shrinking or holding: start a new window
+        pushStartGap_ = std::fabs(gap);
     }
 
-    // 8) Stall guard: pushing hard toward a target it can't reach (past the real top, or jammed).
-    //    Instead of grinding the motors, give up on that target and hold where it is.
-    if (std::fabs(error) > 2 * config::LIFT_SETTLE_DEG && std::fabs(output) >= config::LIFT_STALL_MV) {
+    // 10) Stall guard: the profile still has somewhere to go but the arm isn't going there (preset
+    //     above the real top, or jammed). Instead of grinding, give up on that target and hold.
+    //     The test is "profile unfinished AND not moving", NOT the old "output high AND not moving",
+    //     because the leash in 6b makes a high output impossible during a jam: the setpoint stops
+    //     dead against the arm, so the feedforward goes to zero and the error is pinned at
+    //     LIFT_MAX_LEAD_DEG -- which is only ~3000 mV going up, and a few hundred going down, where
+    //     gravity feedforward and the error nearly cancel. A voltage threshold would simply never
+    //     fire, and the lift would push quietly at a jam forever. "The profile wants to move and the
+    //     arm doesn't" is the real condition, works in both directions, and cannot false-trip: the
+    //     slowest the profile ever walks is LIFT_PRECISE_SPEED_DEG_PER_S, which still covers 17 deg
+    //     in a LIFT_STALL_MS window, and a full-speed move covers ~1.4 deg per single tick.
+    //     The one exception is Scoring's pivot floor deliberately holding the setpoint still: that is
+    //     "not moving" on purpose and only lasts PIVOT_TIME_MS, so it is excluded outright.
+    const bool floorHolding =
+        descentFloor_ > 0.0 && headingToBottom() && target_ <= descentFloor_ + 1e-9;
+    if (target_ != goal_ && !floorHolding) {
         if (stallStart_ == 0) {
             stallStart_ = now;
             stallStartPos_ = position;
@@ -358,14 +583,6 @@ void Lift::update() {
     }
 
     motors_.move_voltage(static_cast<int>(output));
-
-    // 9) Settle check: at the final goal and within the band for long enough.
-    if (target_ != goal_) {
-        settle_.reset();  // still walking toward the goal
-        settled_ = false;
-    } else {
-        settled_ = settle_.update(error);
-    }
 }
 
 void Lift::startTask() {

@@ -77,18 +77,39 @@ void draw() {
     // this code -- see Lift::zero()). ANGLE is the LIVE raw get_angle(), in sensor degrees, so the
     // calibrated zero can be checked by eye any time (should read ~0 with the arm at the true
     // bottom). SEED is the one-time signed angle zero() seeded the position counter from at startup.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 4, "ANGLE raw %.1f  seed %.1f", lift.getRawAngle(),
-                        lift.getStartupAngle());
+    // HOME is appended: HOMING while it is driving down to the hard stop, HOMED once it zeroed the
+    // sensor there, HOME FAIL if it stopped somewhere implausible or timed out (the seed is kept and
+    // nothing was zeroed), HOME CANCELLED if the driver took manual control, HOME SKIPPED if no
+    // rotation sensor answered. "@ N" is the absolute angle it saw at the stop -- that is the number
+    // the plausibility window (LIFT_HOME_ZERO_WINDOW_DEG) was checked against, so a FAIL can be
+    // diagnosed by eye.
+    {
+        char home[28] = "";
+        if (lift.getHomeState() == subsystems::Lift::Home::RUNNING)
+            std::snprintf(home, sizeof(home), "  %s", lift.homeStateName());
+        else if (lift.getHomeState() != subsystems::Lift::Home::IDLE)
+            std::snprintf(home, sizeof(home), "  %s @ %.1f", lift.homeStateName(), lift.getHomeAngle());
+        pros::screen::print(pros::E_TEXT_MEDIUM, 4, "ANGLE raw %.1f  seed %.1f%s", lift.getRawAngle(),
+                            lift.getStartupAngle(), home);
+    }
 
-    // 5: claw distance sensor
-    if (const char* p = portProblem(config::CLAW_DISTANCE_PORT, pros::DeviceType::distance)) {
-        pros::screen::print(pros::E_TEXT_MEDIUM, 5, "DIST  %s (port %d)", p, config::CLAW_DISTANCE_PORT);
-    } else {
-        const int mm = claw.getDistanceMm();
-        if (mm <= 0 || mm >= 9999) pros::screen::print(pros::E_TEXT_MEDIUM, 5, "DIST  nothing in range");
-        else
-            pros::screen::print(pros::E_TEXT_MEDIUM, 5, "DIST  %d mm  conf %d  %s", mm, claw.getDistanceConfidence(),
-                                mm <= config::CLAW_DETECT_MM ? "PIN" : "");
+    // 5: CLAW is the claw's own state (OPEN/ARMED/CLAMPED/RELEASED) and the intake macro's state and
+    // stack level, then the distance sensor. Without this line there was no way to see that the jaws
+    // were still CLAMPED, or that the macro was parked in STACKING -- and both of those silently
+    // change what R1 and L2 do (interlock 4 makes R1 a no-op while a pin is held, and a claw left
+    // clamped by B or the manual override is what made L2 fire the jaws at the bottom). If a button
+    // seems to do nothing, read this line first.
+    {
+        char dist[26] = "";
+        if (const char* p = portProblem(config::CLAW_DISTANCE_PORT, pros::DeviceType::distance)) {
+            std::snprintf(dist, sizeof(dist), "%s p%d", p, config::CLAW_DISTANCE_PORT);
+        } else {
+            const int mm = claw.getDistanceMm();
+            if (mm <= 0 || mm >= 9999) std::snprintf(dist, sizeof(dist), "--");
+            else std::snprintf(dist, sizeof(dist), "%dmm%s", mm, mm <= config::CLAW_DETECT_MM ? " PIN" : "");
+        }
+        pros::screen::print(pros::E_TEXT_MEDIUM, 5, "CLAW %s  MACRO %s L%d  DIST %s", claw.stateName(),
+                            scoring.stateName(), scoring.getLevel(), dist);
     }
 
     // --- Lift tuning section (lines 6-10): everything needed to tune the PID at a glance. ---

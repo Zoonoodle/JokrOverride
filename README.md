@@ -91,12 +91,13 @@ lift.cancel();                                                    // stop chasin
 
 `moveTo(height, timeoutMs, waitUntilSettled)` blocks the calling task only (autonomous or driver
 code) -- the lift's own background task keeps running the PID at a fixed 10 ms regardless.
-`setTarget(height, speedDegPerSec)` is the lower-level, non-blocking version (used internally, and
-by `scoring.cpp` for the post-score lower). Speed 0 means "jump the setpoint, let the PID go as fast
-as it can" -- that is what every upward move and every mid-height move uses, and it runs the full
-12000 mV until it is close in. The one exception is a goal at or below `LIFT_BOTTOM_GOAL_DEG`
-(`DOWN` and `INTAKE`): those are always profiled, whatever speed the caller asked for, so nothing
-arrives at the frame at full speed. See "Lift speed" below.
+`setTarget(height, precise)` is the lower-level, non-blocking version (used internally, and by
+`scoring.cpp`). Every move is profiled -- there is no "jump straight there" mode, because that is what
+oscillated. `precise = true` gets the tight tolerance and slow final approach that `INTAKE` needs; any
+goal within half a degree of `INTAKE` is promoted automatically. See "Lift speed and motion" below.
+
+A blocking `moveTo(..., true)` at the top of a routine also waits out lift homing (see "Lift homing"),
+so give it time for homing plus the move.
 
 ## Lift direction check (do this first)
 The lift runs off the **rotation sensor** on port 16, mounted on the 12T motor axle (confirmed, geared 4:1 into the 48T lift-arm axle -- `LIFT_GEAR_RATIO` / `LIFT_ROTATION_RATIO` are both `4.0`). Everything in the code -- presets, PID target/error, the brain's `LIFT` lines -- works in **lift-arm degrees**; that 4:1 is what converts the sensor/motor side down to that one shared unit. If the sensor and the motors disagree on which way is up, the PID pushes the wrong way, the error grows, and the lift drives itself down. That's the "randomly spinning down" problem. To check:
@@ -112,45 +113,103 @@ Because of the 4:1, the sensor turns more than a full revolution (~420° at the 
 
 A runaway guard catches this if it happens anyway: when the lift pushes hard one way but moves the other, it cuts power and shows `LIFT FAULT` on the brain's `LIFT` line. The manual override (D-pad Up/Down) still works and clears the fault.
 
-## Lift speed
+## Lift speed and motion
 **The arm's free speed is 150 deg/s.** Both lift motors are red (100 RPM) cartridges; through the
 12T -> 48T (4:1) reduction that is 100 / 4 = 25 arm RPM = 150 arm deg/s. `LIFT_FREE_SPEED_DEG_PER_S`
-in `config.hpp` records it, and nothing should be tuned above it -- the motors cannot turn faster, so
-a setpoint asking for more just runs away from the arm. Everything below lives in `include/config.hpp`.
+in `config.hpp` records it, and nothing should be tuned above it. Everything below lives in
+`include/config.hpp`.
 
-| Move | How it is driven | Speed |
-|---|---|---|
-| Up to any preset (L1 stack levels, `MATCHLOAD`) | setpoint jumps, PID drives it | full 12000 mV until within `LIFT_MAX_MV / LIFT_KP` (20 deg) of the target, then closes in |
-| Down to a mid-height preset (e.g. `resetLevel()` back to level 1) | same -- setpoint jumps | full voltage, PID brakes it; nothing to hit at that height |
-| Down to `DOWN` (L2 score, `B` stow, auton) or `INTAKE` (R1) | **profiled**: the setpoint walks down, with a velocity feedforward | `LIFT_LOWER_START_SPEED_DEG_PER_S` (80) ramping over `LIFT_LOWER_RAMP_DEG` (5 deg) to `LIFT_LOWER_SPEED_DEG_PER_S` (130, ~87% of free speed), then `LIFT_SLOW_SPEED_DPS` (35) for the last `LIFT_SLOW_ZONE_DEG` (25 deg), then brake-hold inside `LIFT_REST_BAND_DEG` (3) |
-| D-pad Up/Down manual | `lift.driverPower(+-1.0)` -> `+-LIFT_MAX_MV` | full 12000 mV, both directions |
+**Every move, up or down, is a trapezoidal profile on the setpoint.** It accelerates at
+`LIFT_ACCEL_DEG_PER_S2` (starting from `LIFT_START_SPEED_DEG_PER_S`, so the first 10 ms tick already
+puts real voltage down and the button feels instant), cruises at `LIFT_MAX_SPEED_DEG_PER_S`, and
+decelerates at `LIFT_DECEL_DEG_PER_S2` so the setpoint lands on the goal with zero speed. Three
+things make that fast *and* impossible to ring:
 
-A full descent from the top stack level (128.3 deg) takes about **1.5 s**.
+- **Velocity feedforward.** `LIFT_KV` = 80 mV per arm deg/s (= 12000 / 150) supplies the voltage the
+  speed needs, so the PID is left correcting a small error rather than generating the whole drive out
+  of a large one.
+- **The leash.** `LIFT_MAX_LEAD_DEG` caps how far ahead of the arm the setpoint may get. If the arm
+  can't keep up, the setpoint waits. The tracking error is therefore bounded however far away the
+  goal is, so the loop can never wind up or store the error an overshoot is made of.
+- **Low gains.** `LIFT_KP` only has to pull in that bounded error.
 
-`LIFT_KV` (80 mV per arm deg/s = 12000 / 150) is what makes the fast descent a *tracked* profile
-rather than a lag. A 130 deg/s descent needs roughly -9000 mV; with kP alone the PID could only
-produce that by letting the arm sit 15-20 deg below the setpoint the whole way down, which makes the
-slow zone near the bottom useless (the arm gets there late and still moving) and looks like a runaway
-to the fault guard. The feedforward supplies that voltage from the setpoint's own speed, so the arm
-tracks it within a couple of degrees at any speed.
+**Arrival: tolerance, then hold.** Once the arm is inside the goal's tolerance for `LIFT_HOLD_MS` the
+loop *stops chasing* and holds with gravity feedforward plus a low-gain, low-authority P term
+(`LIFT_HOLD_KP` / `LIFT_HOLD_MAX_MV`). It only resumes chasing if the arm drifts
+`LIFT_HOLD_RELEASE_DEG` beyond the tolerance, so it can't flicker at the band edge.
+`LIFT_TOLERANCE_DEG` (5 deg) applies to the stack levels, `DOWN` and `MATCHLOAD` — a deliberate trade
+of a few degrees of accuracy for a stop with no hunting. `INTAKE` is the exception: a **precise**
+goal (`LIFT_PRECISE_*`) crawls the last `LIFT_PRECISE_ZONE_DEG` at `LIFT_PRECISE_SPEED_DEG_PER_S` and
+keeps the full loop inside `LIFT_PRECISE_TOLERANCE_DEG`. Any goal within half a degree of `INTAKE` is
+promoted to precise automatically, so a call site can't forget.
 
-The slow zone is sized from the cruise speed: stopping from 130 deg/s with the full 12000 mV of
-upward authority plus the rubber bands takes ~0.2 s, so v^2/(2a) with a ~ 650 deg/s^2 is ~13 deg;
-plus ~10 deg of residual tracking lag, rounded up to 25.
+The last `LIFT_REST_BAND_DEG` into `DOWN` is a plain brake-hold — the one place the gravity
+feedforward must not be able to push up (`17ab865`). D-pad Up/Down is the full ±12000 mV.
 
-**If it...**
+> **Do not go back to jumping the setpoint at the goal and letting a high `LIFT_KP` do the work.**
+> That is what oscillated and then tripped a guard: a jumped setpoint means a huge instant error, full
+> voltage, and nothing in the loop that knows when to start slowing down. A profile knows the stopping
+> distance in advance.
+
+### If it...
 
 | Symptom | Change |
 |---|---|
-| Slams/bangs the frame at the bottom | lower `LIFT_SLOW_SPEED_DPS` (toward 20), then raise `LIFT_SLOW_ZONE_DEG`, then raise `LIFT_REST_BAND_DEG` |
-| Overshoots or bounces at a preset | raise `LIFT_KD` first (it damps without slowing the approach much), then back `LIFT_KP` off toward 450 |
-| Still sluggish arriving at a preset | raise `LIFT_KP` (700-800), keeping `LIFT_KD` about 2x it |
-| Still sluggish coming down | raise `LIFT_LOWER_SPEED_DEG_PER_S` toward 150, raise `LIFT_SLOW_SPEED_DPS`, lower `LIFT_SLOW_ZONE_DEG` |
-| Jerks at the start of a descent | raise `LIFT_LOWER_RAMP_DEG` or lower `LIFT_LOWER_START_SPEED_DEG_PER_S` |
-| `BLOCKED` on a normal move (stall guard) | the arm really isn't moving -- check for a jam or a preset above the real top before touching `LIFT_STALL_MV`/`_DEG`/`_MS` |
-| `LIFT FAULT` on a normal fast move (runaway guard) | raise `LIFT_FAULT_DEG`; also check `LIFT_KV` isn't too low (watch `err` on the brain during a descent, it should stay within ~2 deg) |
-| Arm lags the setpoint going down (`err` several deg negative at cruise) | raise `LIFT_KV` |
-| Arm dives ahead of the setpoint (`err` positive going down) | lower `LIFT_KV` |
+| Oscillates / rings at a preset | lower `LIFT_KP` (150), raise `LIFT_KD` a little, lower `LIFT_MAX_LEAD_DEG` (6) |
+| Overshoots the target | lower `LIFT_DECEL_DEG_PER_S2` (braking then starts sooner) |
+| Still sluggish | raise `LIFT_MAX_SPEED_DEG_PER_S` toward 150 and `LIFT_ACCEL_DEG_PER_S2` |
+| Noticeable lag between the button and the arm moving | raise `LIFT_START_SPEED_DEG_PER_S`. If it's L1's *first* tap, that's `CLAW_CLOSE_TIME_MS` — the jaws must shut before the arm pulls away |
+| Jerks/clunks starting a move | lower `LIFT_START_SPEED_DEG_PER_S`, or raise `LIFT_ACCEL_DEG_PER_S2` smoothness by lowering it |
+| Stutters/pulses on a long move | raise `LIFT_MAX_LEAD_DEG` (12-15) — the leash is binding |
+| Arm lags the profile the whole way (steady `err` at cruise) | raise `LIFT_KV` first, then `LIFT_KP` |
+| Sags out of the band after arriving | raise `LIFT_HOLD_KP`, or raise `LIFT_KG` |
+| Twitches/buzzes while holding | lower `LIFT_HOLD_KP` |
+| Slams the frame at the bottom | lower `LIFT_DECEL_DEG_PER_S2`, or raise `LIFT_REST_BAND_DEG` |
+| Stops short of a preset by a few degrees | that is `LIFT_TOLERANCE_DEG` working as designed. Lower it if you really need the accuracy, and expect more hunting |
+| `BLOCKED` on a normal move | the profile had distance left and the arm didn't move -- look for a real jam or a preset above the real top before raising `LIFT_STALL_MS` |
+| `LIFT FAULT` on a normal move | raise `LIFT_FAULT_DEG`; also run the direction check above |
+| A button seems to do nothing | read the brain's `CLAW` line first. `CLAMPED` makes R1 a no-op (interlock 4), and `MACRO STACKING` means the macro thinks it is holding a pin. `B` resets the macro; `A` opens the jaws |
+
+## Lift homing (automatic, every program run)
+The arm often powers on sitting well above the bottom. `Lift::zero()` can only seed the position
+counter from the rotation sensor's folded absolute angle, which is unambiguous **only within ±45 arm
+deg (±180 sensor deg)** of the true bottom — past that every preset is off by a whole sensor
+revolution. So the lift finds its own hard stop instead.
+
+**When:** at the start of the first *enabled* mode — `autonomous()`, or `opcontrol()` if auton didn't
+run. Never in `initialize()`, so power-on alone never moves the arm; it takes the field/competition
+switch. A match therefore homes exactly once, during auton.
+
+**What happens:** the arm drives down at `LIFT_HOME_MV` (a moderate steady voltage, not full speed —
+it ends against the frame) until the raw sensor **stops changing**: less than `LIFT_HOME_STILL_DEG` of
+*sensor* movement across a `LIFT_HOME_STILL_MS` window, only checked after `LIFT_HOME_MIN_DRIVE_MS` of
+driving so a sticky start isn't mistaken for the bottom. Small wobble at the stop is allowed. At the
+stop it reads the sensor's folded absolute angle, and **only if** that is within
+`LIFT_HOME_ZERO_WINDOW_DEG` of the calibrated zero does it `set_position(0)` and brake-hold at the
+bottom. `Lift::updateHoming()` is the only place in the codebase allowed to zero that sensor.
+
+**It never blocks.** Homing is a mode inside `Lift::update()`, so the 10 ms task is still the only
+thing writing the lift motors, driving starts immediately, and a lift target asked for during homing
+(L1/L2/R1/B, or an auton `moveTo`) is *queued* and runs the moment homing ends. A blocking
+`moveTo(..., true)` waits for homing and then the move.
+
+**Safety nets.** Holding D-pad Up/Down cancels homing instantly and it is not retried that run
+(`HOME CANCELLED`); the position stays as `zero()` seeded it. If the arm stops somewhere implausible
+it is jammed, so homing does **not** zero there — it stops pushing, leaves no target active, keeps the
+seed and shows `HOME FAIL`. A `LIFT_HOME_TIMEOUT_MS` timeout does the same. No rotation sensor
+answering gives `HOME SKIPPED` and no motion at all. The stall and runaway guards are not reached
+while homing, because driving into a hard stop is homing's whole job.
+
+**Watch the brain's `ANGLE` line:** `HOMING` -> `HOMED @ 0.4`, or `HOME FAIL @ 37.2`. The number is
+the absolute angle it saw at the stop — the one the plausibility window was checked against.
+
+| Symptom | Change |
+|---|---|
+| Stops partway down and says `HOME FAIL` with a large angle | it is catching on something — check the mechanism. If the stop is real but the sensor's calibrated zero is off, re-calibrate the zero on the brain's device screen |
+| `HOME FAIL` with a small angle (just outside the window) | raise `LIFT_HOME_ZERO_WINDOW_DEG` |
+| Stops early, before the bottom | raise `LIFT_HOME_MIN_DRIVE_MS`, raise `LIFT_HOME_STILL_MS`, or lower `LIFT_HOME_STILL_DEG` |
+| Grinds at the bottom before noticing | lower `LIFT_HOME_STILL_MS`, raise `LIFT_HOME_STILL_DEG`, or lower the drive with `LIFT_HOME_MV` |
+| Too slow / times out | raise `LIFT_HOME_MV` magnitude (more negative) or `LIFT_HOME_TIMEOUT_MS` |
 
 ## Tuning the claw positions
 All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.hpp`). 0 is where the lift sits when the program starts. `DOWN`, `INTAKE` and the 5 `STACK_LEVELS` are already measured from reference photos (see `docs/robot/ROBOT.md` "Lift levels") -- `MATCHLOAD` and `PIVOT_CLEAR` are still placeholders. To (re)measure any of them:
@@ -163,7 +222,7 @@ All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.h
    - `STACK_LEVELS[0..4]`: the height to drop the 1st through 5th pin on a stack
    - `MAX`: a few degrees above the top level, as a software hard stop -- never raise it just to let a bad preset through
    - **Measure the top first.** Hold Up until the arm is at the top and read the position. Every preset has to be below that number. If the lift shows `BLOCKED` (brain + controller), it was asked to go somewhere it can't physically reach, so it stopped pushing and is holding where it is. Lower that preset.
-4. Timing: `CLAW_CLOSE_TIME_MS` (grip before lifting), `CLAW_OPEN_TIME_MS` (release before lowering -- `scoreOrMatchload()`'s path only; L2's `score()` opens the claw and starts lowering in the same tick), `PIVOT_TIME_MS`, and the descent speed curve the lift itself profiles for every trip to the bottom -- see "Lift speed" above.
+4. Timing: `CLAW_CLOSE_TIME_MS` (grip before lifting), `CLAW_OPEN_TIME_MS` (release before lowering -- `scoreOrMatchload()`'s path only; L2's `score()` opens the claw and starts lowering in the same tick), `PIVOT_TIME_MS`, and the motion profile itself -- see "Lift speed and motion" above. `CLAW_CLOSE_TIME_MS` is specifically the gap between the first L1 tap and the arm moving: the jaws must shut before the arm pulls away.
 
 **Lift PID** (`LIFT_KG`, `LIFT_KP`, `LIFT_KD`, `LIFT_KI`), in this order, watching the brain's `LIFT P/I/D` line:
 1. **kG:** set kP = kD = 0. Raise kG until the arm stays put at mid-height without drifting down, and stop before it creeps up.

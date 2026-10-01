@@ -11,6 +11,10 @@ using subsystems::Scoring;
 
 /**
  * Button map (driver). Full walkthrough in README "Driver guide".
+ *   (At the start of the first enabled mode the lift homes itself: it drives down to its hard stop
+ *    and zeroes the rotation sensor there. Watch "HOMING"/"HOMED" on the brain's ANGLE line. Holding
+ *    D-pad Up or Down cancels it. Nothing waits for it -- you can drive straight away.)
+ *
  *   Left stick Y / Right stick X   arcade drive
  *   D-pad Up (hold)    lift up, full power, plain manual control (same feel as plain motor power)
  *   D-pad Down (hold)  lift down, full power, plain manual control
@@ -66,8 +70,17 @@ void disabled() {}
 void competition_initialize() {}
 
 void autonomous() {
-    while (!screen::calibrated) pros::delay(10);  // odometry must be ready before moving
+    // Home the lift FIRST, before the odometry wait: requestHome() returns immediately and the homing
+    // itself runs inside the lift's own 10 ms task, so the arm starts finding its hard stop while the
+    // tracking wheel is still coming up and the rest of this routine is free to drive. Nothing below
+    // has to wait for it -- lift.moveTo(..., true) queues behind homing on its own (see Lift). This is
+    // the first ENABLED mode of a match, so this is the one place homing happens; opcontrol()'s call
+    // below is only for a driver-skills run with no auton.
     scoring.reset();
+    scoring.stowPivot();  // never home with the pivot flipped out
+    lift.requestHome();
+
+    while (!screen::calibrated) pros::delay(10);  // odometry must be ready before moving
     // TODO(team): autonomous routines. Example of a LemLib move:
     // chassis.setPose(0, 0, 0);
     // chassis.moveToPoint(0, 24, 2000);
@@ -82,6 +95,13 @@ void autonomous() {
 
 void opcontrol() {
     master.print(0, 0, "DRIVER ON       ");
+
+    // Home the lift if autonomous() didn't already (driver skills, or a practice run straight into
+    // driver control). requestHome() is a no-op once a run has homed, failed or been cancelled, so a
+    // real match homes exactly once, during auton. It never blocks: the drive loop below starts
+    // immediately and the arm homes underneath it. Holding D-pad Up/Down cancels it.
+    scoring.stowPivot();
+    lift.requestHome();
 
     while (true) {
         // --- Drive ---

@@ -25,7 +25,7 @@
  *   STACKING      holding a pin, lift at STACK_LEVELS[level-1]; pivot flips out once above PIVOT_CLEAR
  *   RELEASING     L2/score(): claw opens, pivot starts retracting, and the lift's own profiled
  *                 descent to DOWN all start the instant this state is entered -- one continuous
- *                 motion (see Lift's class comment: mid -> high -> slow -> brake), not a
+ *                 motion (see Lift's class comment: one trapezoidal profile into a brake-hold), not a
  *                 wait-then-move sequence. Settles into IDLE once the arm actually arrives at 0.
  *                 scoreOrMatchload() (not on a button) still uses the older CLAW_OPEN_TIME_MS wait
  *                 then a move to INTAKE_POS, unchanged.
@@ -87,6 +87,10 @@ class Scoring {
     void resetLevel();
     /** Driver: flip the pivot in/out. */
     void togglePivot() { setPivot(!pivotOut_); }
+    /** Make sure the pivot is in. main.cpp calls this just before Lift::requestHome() so the arm can
+     *  never home with the pivot flipped out (it already should be in at power-on; this makes it
+     *  explicit and keeps it true if homing is ever re-run later in a session). */
+    void stowPivot() { setPivot(false); }
     /** Manual claw override (clamp / open). */
     void toggleClaw();
 
@@ -106,8 +110,8 @@ class Scoring {
     void enter(State next);
     void setPivot(bool out);
     void openClawForPickup();
-    void moveTo(State destination, double speedDegPerSec);
-    void command(double degrees, double speedDegPerSec = 0.0);
+    void moveTo(State destination);
+    void command(double degrees, bool precise = false);
     bool pivotDone() const;
     bool liftArrived(double degrees) const;
     double levelHeight() const;
@@ -121,7 +125,6 @@ class Scoring {
 
     State state_ = State::IDLE;
     State moveDest_ = State::INTAKE_POS;  // where MOVING ends up (IDLE means "go home to DOWN")
-    double moveSpeed_ = 0.0;
     double commanded_ = -1.0;             // last lift target this class sent (-1 = none yet)
     int level_ = 1;
     bool scoreToHome_ = false;            // true while RELEASING on its way to score() rather than

@@ -26,8 +26,8 @@ namespace config {
 // ---------------------------------------------------------------------------
 // Negative port = reversed motor.
 // TODO(team): confirm ports, direction, and whether the 55W is 5x 11W or 4x 11W + 2x 5.5W.
-inline const std::vector<std::int8_t> LEFT_DRIVE_PORTS = {-2, -3, -1};   // TODO(team): confirm
-inline const std::vector<std::int8_t> RIGHT_DRIVE_PORTS = {8, 9, 10};     // TODO(team): confirm
+inline const std::vector<std::int8_t> LEFT_DRIVE_PORTS = {-8, -2, -1};   // TODO(team): confirm
+inline const std::vector<std::int8_t> RIGHT_DRIVE_PORTS = {3, 9, 10};     // TODO(team): confirm
 
 inline constexpr float DRIVE_WHEEL_DIAMETER_IN = 2.75f;      // notebook: 2.75" omni wheels
 inline constexpr float DRIVE_RPM = 450.0f;                   // notebook: 450 RPM
@@ -35,7 +35,7 @@ inline constexpr float TRACK_WIDTH_IN = 11.5f;               // TODO(team): meas
 inline constexpr float HORIZONTAL_DRIFT = 2.0f;              // LemLib: 2 for a drive with traction wheels
 
 // Odometry: one vertical tracking wheel pod. No inertial sensor is on the robot yet.
-inline constexpr int8_t ODOM_VERTICAL_ROTATION_PORT = 7;     // TODO(team): confirm (negative to reverse)
+inline constexpr int8_t ODOM_VERTICAL_ROTATION_PORT = 17;     // TODO(team): confirm (negative to reverse)
 inline constexpr float ODOM_WHEEL_DIAMETER_IN = 2.0f;        // TODO(team): confirm pod wheel (2" / 2.75")
 inline constexpr float ODOM_VERTICAL_OFFSET_IN = 0.0f;       // TODO(team): measure left/right offset from center
 // Inertial sensor: the robot doesn't have one mounted yet (port 8, the old value here, is a right
@@ -43,7 +43,7 @@ inline constexpr float ODOM_VERTICAL_OFFSET_IN = 0.0f;       // TODO(team): meas
 // builds no pros::Imu at all, LemLib gets a null IMU pointer (its own documented way to run on the
 // tracking wheel alone), nothing calibrates it, and the brain shows "IMU  none" instead of junk.
 // To add one later: set this to the IMU's own port (not a drive port) -- nothing else changes.
-inline constexpr int8_t IMU_PORT = 0;                        // TODO(team): set once an IMU is mounted
+inline constexpr int8_t IMU_PORT = 18;                        // TODO(team): set once an IMU is mounted
 
 // Chassis PID — TUNE. Starting values from the LemLib tutorial, not tuned on JOKR.
 inline constexpr float LATERAL_KP = 10.0f, LATERAL_KI = 0.0f, LATERAL_KD = 3.0f;   // TUNE
@@ -88,7 +88,13 @@ inline constexpr double LIFT_ROTATION_RATIO = 4.0;           // confirmed: senso
 // off the absolute zero) if anything here looks off on the real robot.
 namespace lift_preset {
 inline constexpr double DOWN = 0.0;                          // resting / start position (IMG_6088 read 0.1, i.e. ~0)
-inline constexpr double INTAKE = 1.1;                        // measured from photo IMG_6089, 2026-09-30
+// TODO(team): RE-MEASURE. 1.1 arm deg is only 4.4 sensor deg -- about a millimetre of end-effector
+// travel on a six-bar, which is not a visible "lift to the handoff". It is almost certainly a
+// mis-read of IMG_6089 (or the photo was taken with the arm already resting at the bottom). It was
+// also smaller than the old LIFT_SETTLE_DEG (1.5), which is why R1 reported "arrived at INTAKE"
+// without the arm moving at all. To fix: run the program, D-pad Up until the claw lines up with the
+// intake handoff, read the brain's LIFT line, and put that number here.
+inline constexpr double INTAKE = 1.1;                        // TODO(team): re-measure, see above (photo IMG_6089)
 inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covered by the reference photos yet
 inline constexpr double PIVOT_CLEAR = 25.0;                  // TUNE: lowest height the pivot can flip out without hitting anything
 // L1 taps: tap 1 -> level 1, tap 2 -> level 2 ... tap 5 -> level 5 (stays at 5, the top). One entry
@@ -108,137 +114,181 @@ inline constexpr double MAX = 133.3;
 }  // namespace lift_preset
 
 // ---------------------------------------------------------------------------
-// Lift speed budget — what the hardware can actually do
+// Lift motion — what the hardware can do, and how a move is shaped
 // ---------------------------------------------------------------------------
 // Both lift motors are RED (100 RPM) cartridges (see the MotorGears::red in Lift::Lift()). Through
 // the 12T -> 48T (4:1) reduction the ARM's free speed is 100 / 4 = 25 arm RPM = 25 * 360 / 60 =
-// 150 arm deg/s. That number is the ceiling for every speed below; nothing in the code should ask
-// for more than it, and anything far under it is leaving the lift slow on purpose.
+// 150 arm deg/s. That number is the ceiling for every speed below; nothing should ask for more.
 inline constexpr double LIFT_FREE_SPEED_DEG_PER_S = 150.0;   // red 100 RPM / 4:1 = 25 arm RPM = 150 deg/s
-// Volts (mV) per arm deg/s at the motor, i.e. LIFT_MAX_MV / LIFT_FREE_SPEED_DEG_PER_S = 12000/150 = 80.
-// Used as a VELOCITY FEEDFORWARD on profiled (speed-limited) moves: while the setpoint is walking at
-// v deg/s, the loop adds LIFT_KV * v mV so the motors are already turning at roughly the right speed
-// instead of the PID having to build a big tracking error first to get there. Without it, a 130 deg/s
-// descent needs ~-9000 mV, which with kP alone means the arm has to sit ~15-20 deg BELOW the setpoint
-// the whole way down -- a lag that makes the slow zone near the bottom meaningless (the arm arrives
-// there late and fast) and that looks exactly like a runaway to the fault guard. With it, the arm
-// tracks the profile within a couple of degrees at any speed.
-//   Arm lags the setpoint on a fast descent (brain `err` stays several deg negative): raise it.
-//   Arm leads / dives ahead of the setpoint (`err` stays positive going down): lower it.
+//
+// HOW A MOVE IS SHAPED (Lift::update(), and read the "Motion" part of lift.hpp's class comment):
+// EVERY move, up or down, is a TRAPEZOIDAL PROFILE on the setpoint -- accelerate at
+// LIFT_ACCEL_DEG_PER_S2, cruise at LIFT_MAX_SPEED_DEG_PER_S, decelerate at LIFT_DECEL_DEG_PER_S2 so
+// the setpoint arrives at the goal with zero speed. The velocity feedforward (LIFT_KV) supplies the
+// voltage that speed needs, so the PID only ever corrects the small leftover tracking error, with
+// gains low enough that it cannot ring. Then, once the arm is inside the goal's tolerance, the loop
+// STOPS CHASING and switches to a gentle hold (LIFT_HOLD_KP) -- it does not keep a high-gain PID
+// hunting around the target.
+//
+// This replaced a setpoint that JUMPED to the goal with kP = 600 doing all the work. That version
+// oscillated and then tripped a guard, because a jumped setpoint means a huge instant error, full
+// 12000 mV, and nothing in the loop that knows when to start slowing down: the only thing stopping
+// the arm was the error shrinking, which happens after the arm is already there. A profile knows the
+// stopping distance in advance. Do not go back to jumping the setpoint.
+inline constexpr double LIFT_MAX_SPEED_DEG_PER_S = 140.0;    // TUNE: profile cruise, ~93% of free speed
+// Accel/decel, arm deg/s^2. At 600 the profile reaches cruise in 0.23 s over 16 deg of travel, so a
+// 0 -> top (128.3 deg) move is ~1.15 s. Decel is deliberately a little gentler than accel: an
+// under-estimated decel just means braking starts earlier, which is the safe direction.
+//   Overshoots the target / arrives still moving: LOWER LIFT_DECEL_DEG_PER_S2 (starts braking sooner).
+//   Feels lazy leaving a height: raise LIFT_ACCEL_DEG_PER_S2.
+inline constexpr double LIFT_ACCEL_DEG_PER_S2 = 600.0;       // TUNE
+inline constexpr double LIFT_DECEL_DEG_PER_S2 = 450.0;       // TUNE
+// The profile starts at this speed instead of 0 so the first 10 ms tick already puts real voltage on
+// the motors -- that is what makes a button press feel instant. It is floored UNDER the deceleration
+// limit, so it can never stop the profile braking properly near the goal.
+//   Noticeable lag between the button and the arm moving: raise it.
+//   Jerks/clunks at the start of a move: lower it.
+inline constexpr double LIFT_START_SPEED_DEG_PER_S = 40.0;   // TUNE
+// SETPOINT LEASH: the profiled setpoint is never allowed to get more than this far ahead of where the
+// arm actually is. This is the single most important number for "snappy but never oscillates". If the
+// arm cannot keep up (heavy pin, cold motors, a steep part of the six-bar's travel), the setpoint
+// WAITS for it instead of running away, so the tracking error -- and therefore the PID's contribution
+// -- is bounded at LIFT_MAX_LEAD_DEG * LIFT_KP no matter how far the goal is. No windup, no stored
+// error to overshoot with, and the stall guard still sees a real jam because the arm stops moving.
+//   Arm visibly stutters/pulses on a long move: raise it (the leash is binding; 12-15).
+//   Any overshoot at all: lower it (6).
+inline constexpr double LIFT_MAX_LEAD_DEG = 8.0;             // TUNE
+// Volts (mV) per arm deg/s, i.e. LIFT_MAX_MV / LIFT_FREE_SPEED_DEG_PER_S = 12000/150 = 80. The
+// VELOCITY FEEDFORWARD: while the profile's setpoint is moving at v deg/s, the loop adds LIFT_KV * v
+// mV, so the motors are already turning at about the right speed and the PID is left with only the
+// error. This is what lets the gains be low enough not to ring while the arm still moves fast.
+//   Arm lags the setpoint the whole way (brain `err` holds steady well away from 0 at cruise): raise it.
+//   Arm leads / runs ahead of the setpoint (`err` holds steady the other way): lower it.
 inline constexpr float LIFT_KV = 80.0f;                      // TUNE: mV per arm deg/s of setpoint speed
-// Any goal at or below this height counts as "a trip to the bottom": it gets the profiled descent
-// (ramp -> cruise -> slow zone) instead of a bare setpoint jump, so nothing can free-fall into the
-// frame. INTAKE (1.1) is inside it on purpose -- R1 from the top level is a trip to the bottom in
-// every way that matters mechanically. Keep it small; it is a "near the frame" test, not a preset.
-inline constexpr double LIFT_BOTTOM_GOAL_DEG = 5.0;          // TUNE
 
 // Lift PID — TUNE. Units: error in lift degrees, output in millivolts (-12000..12000).
-// kP sizing: an UP move jumps the setpoint straight to the preset, so the PID is what decides how
-// fast it gets there. Output saturates at 12000 mV while |error| > LIFT_MAX_MV/kP = 20 deg, so the
-// arm runs wide open for all but the last 20 deg and then closes in at roughly kP/(LIFT_KV + kD/100)
-// deg/s per deg of error = 600/92 ~ 6.5x error, i.e. ~65 deg/s with 10 deg to go, ~13 deg/s with 2.
-// At the old kP = 300 that approach was half as fast and was most of the time a preset move took.
-//   Overshoots / bounces at a preset: raise LIFT_KD first (it only resists fast error changes, it
-//   barely slows the approach), then back kP off toward 450.
-//   Still sluggish arriving at a preset: raise kP (700-800), keeping kD at about 2x kP.
-inline constexpr float LIFT_KP = 600.0f;                     // TUNE: was 300, doubled for snappier arrivals
+// These are deliberately LOW. With the profile and LIFT_KV doing the driving, kP only has to pull in
+// a few degrees of tracking error (bounded by LIFT_MAX_LEAD_DEG), so at the leash limit it adds
+// 8 * 220 = 1760 mV on top of the feedforward. kP = 600 with a jumped setpoint is what oscillated.
+//   Oscillates / rings at a preset: lower kP (150), raise kD a little.
+//   Arm consistently lags the profile (steady `err` at cruise, slow to close the last few degrees):
+//     raise LIFT_KV first -- that is the right knob for a lag. Only then raise kP (toward 320).
+inline constexpr float LIFT_KP = 220.0f;                     // TUNE: was 600 (which oscillated)
 inline constexpr float LIFT_KI = 0.0f;                       // TUNE (add last, only if it stalls short)
-inline constexpr float LIFT_KD = 1200.0f;                    // TUNE: was 800, raised with kP to damp the faster approach
+inline constexpr float LIFT_KD = 400.0f;                     // TUNE: light damping; the profile does the shaping
 inline constexpr float LIFT_WINDUP_RANGE = 5.0f;             // integral only builds within 5 deg of target
 inline constexpr float LIFT_KG = 1200.0f;                    // TUNE: mV that holds the lift still (gravity feedforward)
 inline constexpr float LIFT_MAX_MV = 12000.0f;               // output limit (also the manual override's full-send power)
-inline constexpr float LIFT_SETTLE_DEG = 1.5f;               // "at target" band
-inline constexpr int LIFT_SETTLE_MS = 150;                   // must stay in band this long
-// Heading to the bottom (target 0): within this many degrees of 0 counts as "resting", motors just
-// brake and hold -- see LIFT_SLOW_ZONE_DEG/LIFT_SLOW_SPEED_DPS below for the controlled approach
-// into this band (this is just the final "stop fighting the frame" cutoff, keep it small).
+
+// ---------------------------------------------------------------------------
+// Lift arrival: tolerance, then hold. Precision traded for clean stops, on purpose.
+// ---------------------------------------------------------------------------
+// How close counts as arrived. Once the arm is inside this band of the goal (and has stayed there for
+// LIFT_HOLD_MS) the loop stops chasing the target and holds: that is what makes the stop clean instead
+// of a hunt. 5 deg of final error at a stack level is fine -- the pin only has to land in the cup --
+// and trading that precision for a non-oscillating stop is a deliberate call.
+inline constexpr double LIFT_TOLERANCE_DEG = 5.0;            // TUNE: stack levels, DOWN, MATCHLOAD
+// INTAKE is the exception: the claw has to line up with the handoff, so a precise goal keeps the full
+// loop running inside a tight band and crawls the last LIFT_PRECISE_ZONE_DEG at LIFT_PRECISE_SPEED.
+// Lift::setTarget(h, true) marks a move precise, and any goal within half a degree of
+// lift_preset::INTAKE is promoted automatically so no call site can forget.
+inline constexpr double LIFT_PRECISE_TOLERANCE_DEG = 1.0;    // TUNE: INTAKE only
+inline constexpr double LIFT_PRECISE_SPEED_DEG_PER_S = 25.0; // TUNE: cruise for the last stretch of a precise move
+inline constexpr double LIFT_PRECISE_ZONE_DEG = 12.0;        // TUNE: how far out the precise crawl starts
+// Hysteresis: once holding, the loop only goes back to chasing if the arm drifts this much FURTHER
+// than the tolerance. Without it the lift flickers between "moving" and "holding" right at the band
+// edge, which is its own kind of oscillation.
+inline constexpr double LIFT_HOLD_RELEASE_DEG = 3.0;         // TUNE
+inline constexpr int LIFT_HOLD_MS = 60;                      // TUNE: must be in the band this long before holding
+// The hold itself: gravity feedforward plus a low-gain P, capped well below the guards' thresholds so
+// a hold can never look like a stall or a runaway. It is there to stop the arm sagging, not to close
+// the last degree -- that is what the tolerance is for.
+//   Arm sags out of the band after arriving: raise LIFT_HOLD_KP, or raise LIFT_KG.
+//   Arm twitches/buzzes while holding: lower LIFT_HOLD_KP.
+inline constexpr float LIFT_HOLD_KP = 120.0f;                // TUNE
+inline constexpr float LIFT_HOLD_MAX_MV = 4000.0f;           // TUNE: must stay under LIFT_FAULT_MV and LIFT_STALL_MV
+// Heading to DOWN (0): within this many degrees of 0 the motors just brake and hold. The one place the
+// gravity feedforward must not be allowed to push UP -- an arm sitting on the hard stop with kG under
+// it is what made the lift bounce at startup (17ab865).
 inline constexpr double LIFT_REST_BAND_DEG = 3.0;
-// Controlled descent into the bottom (Lift::update(), the headingToBottom() branch -- any goal at or
-// below LIFT_BOTTOM_GOAL_DEG, which is DOWN and INTAKE). The WHOLE trip to
-// 0 is profiled, not just the last stretch: the setpoint starts at wherever the arm is when the move
-// is commanded and walks down at LIFT_LOWER_SPEED_DEG_PER_S (the cruise, below), then at
-// LIFT_SLOW_SPEED_DPS for the last LIFT_SLOW_ZONE_DEG. The arm tracks the setpoint, so it is already
-// slow by the time it gets near the frame instead of arriving at full speed with 20 deg left to stop
-// in. A slow, actively-tracked setpoint is the only thing that controls fall speed -- gravity always
-// beats a plain voltage cap, but it can't beat a PID that pushes back (upward, if that is what it
-// takes) whenever the arm gets ahead of a setpoint that is only creeping down. Note the slow zone is
-// measured on the SETPOINT, not the arm, so the handover happens before the arm is in the zone.
-//   Rams into the bottom / still too fast: raise LIFT_SLOW_ZONE_DEG (hand over to the slow walk
-//   earlier), lower LIFT_SLOW_SPEED_DPS, and/or lower LIFT_LOWER_SPEED_DEG_PER_S.
-//   Takes too long to come down / looks like it's crawling: lower LIFT_SLOW_ZONE_DEG, raise
-//   LIFT_SLOW_SPEED_DPS, and/or raise LIFT_LOWER_SPEED_DEG_PER_S.
-// SIZING (why 25, not 20 or 5): the slow zone has to be at least the arm's stopping distance from
-// cruise, or the arm is still travelling fast when the setpoint runs out of room. Decelerating from
-// LIFT_LOWER_SPEED_DEG_PER_S = 130 deg/s with the full 12000 mV of upward authority plus the rubber
-// bands takes roughly 0.2 s, so v^2/(2a) with a ~ 650 deg/s^2 is ~13 deg of travel; add ~10 deg for
-// the couple of ticks of tracking lag the arm still carries at cruise even with LIFT_KV, and round
-// up: 25 deg. The last 25 deg then walks at LIFT_SLOW_SPEED_DPS = 35 deg/s (0.7 s) instead of the
-// old 15 (1.3 s), and the arm is down to ~20 deg/s by the time it reaches LIFT_REST_BAND_DEG and
-// brake-holds -- a tap, not a slam.
-//   Taps/bangs the frame at the bottom: lower LIFT_SLOW_SPEED_DPS (toward 20) first, then raise
-//   LIFT_SLOW_ZONE_DEG, then raise LIFT_REST_BAND_DEG (brake-hold starts higher).
-//   Crawls the last bit: raise LIFT_SLOW_SPEED_DPS, lower LIFT_SLOW_ZONE_DEG.
-inline constexpr double LIFT_SLOW_ZONE_DEG = 25.0;           // TUNE: start the slow walk this far above the goal
-inline constexpr double LIFT_SLOW_SPEED_DPS = 35.0;          // TUNE: arm degrees/sec during the slow walk
-// Stall guard: output over STALL_MV but moved less than STALL_DEG in STALL_MS = can't get there
-// (target above the real top, or jammed). The lift holds where it is and the brain shows BLOCKED.
-// UNCHANGED at the new speeds, on purpose: it only arms when the arm is barely moving (less than
-// LIFT_STALL_DEG = 0.5 deg of travel in a whole LIFT_STALL_MS window), and a normal full-speed move
-// covers 1.3 deg per 10 ms tick, so it re-arms every single tick and can never time out. Making the
-// lift faster makes this guard harder to false-trip, not easier.
-inline constexpr float LIFT_STALL_MV = 8000.0f;
-inline constexpr double LIFT_STALL_DEG = 0.5;
-inline constexpr int LIFT_STALL_MS = 700;
-// Descent cruise: the arm lowers at this speed (arm degrees per second) until the setpoint reaches
-// the slow zone above, where LIFT_SLOW_SPEED_DPS takes over for the final approach. Lower = gentler.
-// Every move to DOWN uses it -- the L2 score, the B stow, and auton -- because setTarget() fills it
-// in for any trip to the bottom that asked for a jump (speed 0); nothing free-falls to 0 any more.
-// It is deliberately close to LIFT_FREE_SPEED_DEG_PER_S (150): 130 deg/s is ~87% of what the arm can
-// physically do, which is as fast as a *controlled* descent can be while leaving the loop headroom to
-// brake. Note the arm will NOT fall this fast on its own -- with the motors braking, gravity against
-// back-EMF only drops it at ~15 deg/s -- so this is a driven descent, which is exactly why LIFT_KV
-// exists (see it above). A full descent from the top level (128.3) is now ~1.5 s, not ~4 s.
-//   Rams / reaches the slow zone still moving: lower it (and see LIFT_SLOW_* above).
-//   Descent still feels sluggish: raise it toward 150, the arm's free speed. Above that is pointless;
-//   the motors cannot turn faster, so the setpoint would just run away from the arm.
-inline constexpr double LIFT_LOWER_SPEED_DEG_PER_S = 130.0;  // TUNE: was 40 (~27% of free speed)
-// Descent ramp-up: the profiled trip to DOWN above doesn't start at full cruise (LIFT_LOWER_SPEED_DEG_PER_S)
-// the instant it's commanded -- it starts at this slower "mid" speed and climbs LINEARLY up to cruise
-// over the first LIFT_LOWER_RAMP_DEG of travel measured from wherever the move began (Lift::update(),
-// the goal_ <= DOWN branch), so a score or a stow leaves the height smoothly instead of snapping
-// straight to cruise. After the ramp it holds cruise until the slow zone near 0 (LIFT_SLOW_ZONE_DEG/
-// LIFT_SLOW_SPEED_DPS above) takes over -- one continuous speed curve, mid -> high -> slow -> brake,
-// with no stop or re-target in between (Scoring's pivot-retract floor on the walking setpoint, see
-// Lift::setDescentFloor(), can briefly hold the LAST bit of that curve, never the ramp itself).
-// The ramp is now only a few degrees long on purpose: its job is to take the jerk out of the first
-// tick, not to be a slow phase of its own. 80 deg/s start over 5 deg of travel means cruise is
-// reached in well under a tenth of a second.
-//   Leaves the top too slowly / looks sluggish at the start: raise LIFT_LOWER_START_SPEED_DEG_PER_S
-//   (up to the cruise speed, which removes the ramp entirely) or lower LIFT_LOWER_RAMP_DEG.
-//   Snaps/jerks too hard at the start of a descent: raise LIFT_LOWER_RAMP_DEG (ramps over more
-//   distance) or lower LIFT_LOWER_START_SPEED_DEG_PER_S.
-inline constexpr double LIFT_LOWER_START_SPEED_DEG_PER_S = 80.0;  // TUNE: was 20. Starting ("mid") speed, deg/s
-inline constexpr double LIFT_LOWER_RAMP_DEG = 5.0;                // TUNE: was 15. Deg of travel to reach cruise
-// Runaway guard: output over FAULT_MV, pushing in the direction that SHOULD shrink the error, for
-// FAULT_MS, and |error| ends up FAULT_DEG BIGGER than when that push started = sensor/motor
-// direction mismatch -> cut power, "LIFT FAULT" on the brain, controller rumbles. It deliberately
-// does NOT compare push direction against which way the arm is moving: braking a descending arm
-// pushes up while the arm still moves down, which is correct behaviour, not a runaway.
-// FAULT_DEG had to grow with the speeds. At the old 40 deg/s descent the loop only ever asked for
-// ~2000 mV, below LIFT_FAULT_MV, so the guard was never even armed while lowering. A 130 deg/s
-// descent is driven at ~9000-12000 mV, so it IS armed for the whole trip, and the few degrees of
-// tracking error the arm legitimately builds while it accelerates would have tripped a 3 deg
-// threshold. 10 deg is comfortably above any legitimate transient (LIFT_KV keeps steady-state
-// tracking inside ~2 deg) and still far below what a real wiring reversal does: a runaway arm moves
-// at 130+ deg/s in the wrong direction, so it blows past 10 deg of error growth in under 100 ms,
-// well inside the 300 ms window.
-//   LIFT FAULT on a normal fast move: raise LIFT_FAULT_DEG (and check LIFT_KV isn't too low).
+// Any goal at or below this counts as "a trip to the bottom", which is where Scoring's pivot-retract
+// floor (Lift::setDescentFloor()) is allowed to hold the setpoint. INTAKE (1.1) is inside it.
+inline constexpr double LIFT_BOTTOM_GOAL_DEG = 5.0;          // TUNE
+
+// ---------------------------------------------------------------------------
+// Lift guards
+// ---------------------------------------------------------------------------
+// Stall guard: the motion profile still has distance left to cover but the arm moved less than
+// STALL_DEG in STALL_MS = it can't get there (preset above the real top, or jammed). The lift gives up
+// on that target, holds where it is, and the brain shows BLOCKED.
+// There is deliberately NO voltage threshold any more. The setpoint leash (LIFT_MAX_LEAD_DEG) makes a
+// high output impossible during a jam: the setpoint stops dead against the stuck arm, the velocity
+// feedforward goes to zero, and all that is left is kP * the pinned error -- about 3000 mV pushing up,
+// and only a few hundred pushing down where kG nearly cancels it. The old "output over 8000 mV" test
+// would simply never have fired, and the lift would have pushed quietly against a jam forever.
+// "The profile wants to move and the arm doesn't" is the real condition. It cannot false-trip: the
+// slowest the profile ever walks is LIFT_PRECISE_SPEED_DEG_PER_S, which still covers ~17 deg in a
+// STALL_MS window, and a full-speed move covers ~1.4 deg in a single 10 ms tick.
+//   Shows BLOCKED on a normal move: raise LIFT_STALL_MS, or raise LIFT_STALL_DEG if the arm genuinely
+//   creeps somewhere in its travel. First, though, check it isn't a real jam or a preset above the top.
+inline constexpr double LIFT_STALL_DEG = 0.5;                // TUNE: arm deg of progress that counts as moving
+inline constexpr int LIFT_STALL_MS = 700;                    // TUNE
+// Runaway guard: pushing over FAULT_MV in the direction that should CLOSE the gap to the goal, for
+// FAULT_MS, and the distance to the goal ends up FAULT_DEG BIGGER than when that push started =
+// sensor/motor direction mismatch -> cut power, "LIFT FAULT" on the brain.
+// It watches the distance to the GOAL, not the tracking error against the walking setpoint. It has to:
+// the setpoint leash (LIFT_MAX_LEAD_DEG) deliberately keeps the tracking error small by dragging the
+// setpoint along with the arm, so a reversed sensor would hide behind it. Distance to the goal cannot
+// hide -- a normal move always closes on the goal, and a reversed one runs away from it at 100+ deg/s,
+// which blows past FAULT_DEG inside the FAULT_MS window with room to spare.
+// It deliberately does NOT compare push direction against which way the arm is moving: braking a
+// descending arm pushes up while the arm still moves down, which is correct, not a runaway.
+// A FAULT is cleared by the manual override OR by a new explicit target (see Lift::setTarget()): the
+// guard's job is to stop the motion happening now, not to brick every button until someone remembers
+// to wiggle the D-pad. A real wiring fault simply re-faults within FAULT_MS.
+//   LIFT FAULT on a normal move: raise LIFT_FAULT_DEG, and check LIFT_KV / the direction check in the README.
 inline constexpr float LIFT_FAULT_MV = 6000.0f;
 inline constexpr int LIFT_FAULT_MS = 300;
-inline constexpr double LIFT_FAULT_DEG = 10.0;               // TUNE: was 3, too tight for a 130 deg/s descent
+inline constexpr double LIFT_FAULT_DEG = 5.0;                // TUNE: growth in distance-to-goal that means runaway
+
+// ---------------------------------------------------------------------------
+// Lift homing — find the hard stop and zero there, once per program run
+// ---------------------------------------------------------------------------
+// Why: the arm often powers on sitting well above the bottom. Lift::zero() can only seed the position
+// counter from the rotation sensor's folded absolute angle, which is unambiguous only within +-45 arm
+// deg (+-180 sensor deg) of the true bottom -- further up than that and every preset is off by a whole
+// sensor revolution. Homing removes the guesswork: drive the arm down at a steady, moderate voltage
+// until the sensor stops changing, confirm the sensor's absolute angle really is near its calibrated
+// zero, and set_position(0) there.
+//
+// This is the ONE deliberate exception to "nothing moves at startup" (CLAUDE.md safety rule 1), and it
+// is kept narrow: homing never runs in initialize(). It runs on the first ENABLED mode of a program
+// run -- autonomous(), or opcontrol() if auton did not already do it -- so the field/competition
+// switch, not power-on, is what makes the arm move. It runs inside Lift::update() as a mode, so the
+// 10 ms task is still the only thing that writes the lift motors, nothing blocks on it, and holding
+// D-pad Up/Down cancels it instantly (safety rule 3 is untouched). Lift targets asked for during
+// homing are queued and run the moment it finishes.
+inline constexpr float LIFT_HOME_MV = -4000.0f;              // TUNE: steady downward drive while homing (negative = down)
+// Don't start looking for "stopped" until the arm has been driving this long, so a sticky start isn't
+// mistaken for the bottom.
+inline constexpr int LIFT_HOME_MIN_DRIVE_MS = 250;           // TUNE
+// "Stopped" = the raw sensor moved less than LIFT_HOME_STILL_DEG (SENSOR degrees, not arm degrees)
+// across a LIFT_HOME_STILL_MS window. Small wobble at the stop is expected and allowed.
+inline constexpr double LIFT_HOME_STILL_DEG = 2.5;           // TUNE: sensor degrees
+inline constexpr int LIFT_HOME_STILL_MS = 200;               // TUNE
+// Plausibility window: at the stop, the sensor's own absolute angle (folded to +-180 sensor deg) must
+// be within this much of its calibrated zero before we trust it and set_position(0). The user's own
+// observation is that it settles around 358-359-0-1, i.e. within a degree or two. If the arm stopped
+// somewhere else it is jammed on something, NOT at the bottom: homing then stops pushing, keeps the
+// absolute-angle seed from zero(), and shows HOME FAIL instead of zeroing to a wrong place.
+inline constexpr double LIFT_HOME_ZERO_WINDOW_DEG = 15.0;    // TUNE: sensor degrees either side of zero
+// Hard stop on the whole attempt. Stops pushing and shows HOME FAIL.
+inline constexpr int LIFT_HOME_TIMEOUT_MS = 3000;            // TUNE
+
 // Default timeout for lift.moveTo() when the caller doesn't give one (autonomous safety net so a
 // stuck lift can't hang a routine forever). Pass a different value per call, or 0 to wait forever.
-inline constexpr int LIFT_DEFAULT_TIMEOUT_MS = 2000;         // TUNE
+// A blocking moveTo() called while homing waits for homing AND the move, so give it room for both.
+inline constexpr int LIFT_DEFAULT_TIMEOUT_MS = 2500;         // TUNE
 
 // ---------------------------------------------------------------------------
 // Claw (pneumatic) + autoclamp sensor
@@ -269,7 +319,13 @@ inline constexpr char PIVOT_PISTON_PORT = 'D';
 inline constexpr bool PIVOT_ON_AT_INTAKE = true;             // R1: pivot ON while intaking
 inline constexpr bool PIVOT_ON_AT_MATCHLOAD = false;         // TODO(team): L2 matchload spot, on or off?
 inline constexpr int PIVOT_TIME_MS = 250;                    // TUNE: time for the pivot to finish moving
-inline constexpr int CLAW_CLOSE_TIME_MS = 150;               // TUNE: jaws shut before the lift starts rising (L1)
+// THIS IS THE L1 DELAY. The first L1 tap closes the jaws and waits here before the lift is given any
+// target at all (Scoring::update(), case CLAMPING) -- interlock: the arm must not pull out of an open
+// claw. So the gap between pressing L1 and the arm moving is at least this long, by design. 100 ms is
+// about as low as a pneumatic claw can be trusted with.
+//   Pin slips / the arm starts up before the jaws are shut: raise it back to 150.
+// (Every L1 tap AFTER the first one commands the next level immediately -- no wait.)
+inline constexpr int CLAW_CLOSE_TIME_MS = 100;               // TUNE: was 150. Jaws shut before the lift starts rising (L1)
 // Jaws open before the arm lowers -- only for scoreOrMatchload()'s path (not currently on a button).
 // L2's score() no longer waits on this: the claw opens, the pivot starts retracting, and the lift's
 // own profiled descent all start in the same tick (see Scoring::enter()/update(), case RELEASING).

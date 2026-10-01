@@ -31,15 +31,21 @@ bool Scoring::pivotDone() const {
     return !pivot_ || pros::millis() - pivotMovedAt_ >= static_cast<std::uint32_t>(config::PIVOT_TIME_MS);
 }
 
-void Scoring::command(double degrees, double speedDegPerSec) {
+void Scoring::command(double degrees, bool precise) {
     // Only send a target when it changes, so the driver's Up/Down fine-tune isn't overwritten every loop.
     if (degrees == commanded_) return;
     commanded_ = degrees;
-    lift_.setTarget(degrees, speedDegPerSec);
+    lift_.setTarget(degrees, precise);
 }
 
 bool Scoring::liftArrived(double degrees) const {
-    return lift_.isSettled() && std::fabs(lift_.getPosition() - degrees) <= 2 * config::LIFT_SETTLE_DEG;
+    // isSettled() already means "inside this goal's own tolerance and holding there" (which is
+    // LIFT_PRECISE_TOLERANCE_DEG for INTAKE and LIFT_TOLERANCE_DEG for everything else), so the only
+    // other thing to check is that the lift is settled on the height WE asked for and not an older
+    // one. Do NOT re-test the position against a tolerance of this class's own invention here: that is
+    // what made R1 report "arrived at INTAKE" while the arm sat at 0, because the old 2 *
+    // LIFT_SETTLE_DEG (3.0 deg) was wider than the entire INTAKE height.
+    return lift_.isSettled() && std::fabs(lift_.getTarget() - degrees) < 0.01;
 }
 
 double Scoring::levelHeight() const { return preset::STACK_LEVELS[static_cast<std::size_t>(level_ - 1)]; }
@@ -55,9 +61,8 @@ void Scoring::openClawForPickup() {
     if (autoclamp_) claw_.arm();
 }
 
-void Scoring::moveTo(State destination, double speedDegPerSec) {
+void Scoring::moveTo(State destination) {
     moveDest_ = destination;
-    moveSpeed_ = speedDegPerSec;
     enter(State::MOVING);
 }
 
@@ -85,7 +90,7 @@ void Scoring::enter(State next) {
                 // starts the descent fresh (which also clears any floor left over from a past move),
                 // so the floor set right after it is the one that actually takes effect this tick.
                 setPivot(false);
-                command(preset::DOWN, config::LIFT_LOWER_SPEED_DEG_PER_S);
+                command(preset::DOWN);
                 lift_.setDescentFloor(pivotDone() ? preset::DOWN : preset::PIVOT_CLEAR);
             }
             break;
@@ -108,17 +113,21 @@ void Scoring::reset() {
 void Scoring::goToIntake() {
     // Interlock 4: never drag a held pin back down.
     if (claw_.isClamped()) return;
-    if (state_ == State::CLAMPING || state_ == State::STACKING || state_ == State::RELEASING) return;
+    // Mid-sequence states that must not be interrupted. STACKING is deliberately NOT one of them any
+    // more: interlock 4 above already covers the dangerous case (a pin in the jaws), so if the driver
+    // has opened the claw up at a stack level, R1 should be able to send the arm back down to the
+    // handoff instead of silently doing nothing until they remember to press B.
+    if (state_ == State::CLAMPING || state_ == State::RELEASING) return;
     if (state_ == State::INTAKE_POS) {
         commanded_ = -1.0;  // re-tap snaps it back to INTAKE after a manual nudge
         command(preset::INTAKE);
         return;
     }
     if (state_ == State::MOVING && moveDest_ == State::INTAKE_POS) {
-        commanded_ = -1.0;  // already heading there: keep the speed (slow after a score), just re-send it
+        commanded_ = -1.0;  // already heading there, just re-send it
         return;
     }
-    moveTo(State::INTAKE_POS, 0.0);
+    moveTo(State::INTAKE_POS);
 }
 
 void Scoring::stepUp() {
@@ -134,6 +143,18 @@ void Scoring::stepUp() {
 }
 
 void Scoring::score() {
+    // Already parked at the bottom: there is nothing to score and nowhere to descend to, so L2 is a
+    // NO-OP -- it must not touch the claw.
+    //
+    // This is the bug behind "tapping L2 while all the way down activates the clamp and deactivates".
+    // The claw can legitimately be left CLAMPED with the arm at 0, because the two things that bring
+    // the arm home without scoring -- B (reset()) and the D-pad manual override, which calls reset() --
+    // both deliberately leave the claw alone so they can't drop a pin. The macro forgets it was holding
+    // anything (state_ goes back to IDLE) but the jaws are still shut. L2 then saw isClamped() == true,
+    // entered RELEASING, fired the jaws open and ran a zero-length "descent" that arrived instantly:
+    // one cylinder actuation, with the arm already down and nothing to score. Use A to open the jaws
+    // down here -- that is the claw button.
+    if (lift_.getPosition() <= config::LIFT_BOTTOM_GOAL_DEG) return;
     // Holding a pin (clamped, or mid-clamp/stacking): open the jaws, then (via the RELEASING case in
     // update()) pivot in and lower all the way to DOWN, resetting the level for next time. Nothing
     // held: no matchload fallback here any more (see scoreOrMatchload()) -- just do nothing.
@@ -157,7 +178,7 @@ void Scoring::scoreOrMatchload() {
         commanded_ = -1.0;
         return;
     }
-    moveTo(State::MATCHLOAD_POS, 0.0);
+    moveTo(State::MATCHLOAD_POS);
 }
 
 void Scoring::resetLevel() {
@@ -181,6 +202,13 @@ void Scoring::setAutoclamp(bool on) {
 // state machine
 // ---------------------------------------------------------------------------
 void Scoring::update() {
+    // The lift is homing against its hard stop: it owns the motors, and nothing here may command a
+    // height or flip the pivot out over the top of it (interlock 1 would otherwise extend the pivot as
+    // the arm passed back down through PIVOT_CLEAR). Buttons pressed during homing still take effect --
+    // enter() already ran for them -- they just wait here, and the state machine picks up the instant
+    // homing ends, which also means their elapsed timers have already run down by then.
+    if (lift_.isHoming()) return;
+
     const std::uint32_t elapsed = pros::millis() - stateStart_;
     switch (state_) {
         case State::IDLE:
@@ -196,7 +224,7 @@ void Scoring::update() {
         case State::STACKING: {
             // Driver opened the claw by hand up here: treat it as a score.
             if (!claw_.isClamped()) {
-                moveTo(State::INTAKE_POS, config::LIFT_LOWER_SPEED_DEG_PER_S);
+                moveTo(State::INTAKE_POS);
                 break;
             }
             const double h = levelHeight();
@@ -225,14 +253,14 @@ void Scoring::update() {
                 }
             } else if (elapsed >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS)) {
                 // Interlock 3 (scoreOrMatchload() only -- score()/L2 above no longer waits on this).
-                moveTo(State::INTAKE_POS, config::LIFT_LOWER_SPEED_DEG_PER_S);
+                moveTo(State::INTAKE_POS);
             }
             break;
 
         case State::MOVING: {
             if (!pivotDone()) break;  // interlock 2
             const double h = heightOf(moveDest_);
-            command(h, moveSpeed_);
+            command(h);
             if (liftArrived(h)) enter(moveDest_);
             break;
         }

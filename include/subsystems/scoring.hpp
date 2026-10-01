@@ -2,7 +2,8 @@
 /**
  * Scoring — the "intake macro": owns the lift + claw + pivot sequence so every driver button is
  * one tap and the mechanisms always move in a safe order. Every lift move it makes goes through
- * Lift::setTarget() (the PID), never raw motor power -- see include/subsystems/lift.hpp.
+ * Lift::setTarget() (the lift's own DRIVE -> BRAKE -> HOLD loop), never raw motor power -- see
+ * include/subsystems/lift.hpp.
  *
  * Driver buttons (src/main.cpp; D-pad Up/Down are the lift's plain manual override and are NOT
  * part of this macro -- holding either cancels it, see main.cpp's opcontrol()):
@@ -11,34 +12,46 @@
  *    ^                                                            │  L1 = level+1, stays at 5 (top)
  *    │                                                            L2
  *    │                                                            v
- *    └──────────────────────────────────────────── RELEASING (claw open + pivot retract
- *                                                               + lift descent to DOWN, all at once)
+ *    └──────────────────────────────────────────── RELEASING (claw open + lift descent to DOWN,
+ *                                                               both at once; pivot stays OUT)
  *
  *   IDLE          power-on state, and also where the manual override leaves it. Nothing moves
  *                 until the driver presses something (or the manual override, which bypasses
  *                 this macro entirely). Resets level back to 1.
- *   INTAKE_POS    lift at INTAKE, claw open (autoclamp armed if it's on), pivot ON (PIVOT_ON_AT_INTAKE)
- *   MATCHLOAD_POS lift at MATCHLOAD, claw open (autoclamp armed if it's on), pivot per PIVOT_ON_AT_MATCHLOAD
- *                 -- not currently wired to a driver button; scoreOrMatchload() still reaches it
- *                 for auton or a future button.
+ *   INTAKE_POS    lift at INTAKE, claw open (autoclamp armed if it's on), pivot BACK
+ *   MATCHLOAD_POS lift at MATCHLOAD, claw open (autoclamp armed if it's on), pivot per
+ *                 config::PIVOT_BACK_AT_MATCHLOAD -- not currently wired to a driver button;
+ *                 scoreOrMatchload() still reaches it for auton or a future button.
  *   CLAMPING      jaws closing; waits CLAW_CLOSE_TIME_MS so the lift doesn't pull out of an open claw
- *   STACKING      holding a pin, lift at STACK_LEVELS[level-1]; pivot flips out once above PIVOT_CLEAR
- *   RELEASING     L2/score(): claw opens, pivot starts retracting, and the lift's own profiled
- *                 descent to DOWN all start the instant this state is entered -- one continuous
- *                 motion (see Lift's class comment: one trapezoidal profile into a brake-hold), not a
- *                 wait-then-move sequence. Settles into IDLE once the arm actually arrives at 0.
+ *   STACKING      holding a pin, lift at STACK_LEVELS[level-1], pivot OUT (it swings OUT once the arm
+ *                 is PIVOT_OUT_CLEARANCE_DEG above the INTAKE handoff, or has arrived -- see below)
+ *   RELEASING     L2/score(): claw opens and the lift's own descent to DOWN starts the instant this
+ *                 state is entered -- one continuous motion, no waits. The pivot is already OUT at
+ *                 every stack level and OUT is the default down position, so it does not move (if
+ *                 the driver had toggled it BACK up there, it is put back OUT, without waiting).
+ *                 Settles into IDLE once the arm actually arrives at 0.
  *                 scoreOrMatchload() (not on a button) still uses the older CLAW_OPEN_TIME_MS wait
  *                 then a move to INTAKE_POS, unchanged.
- *   MOVING        scoreOrMatchload()/goTo*() only now: pivot back in (if it was out), then lift to
- *                 the destination -- INTAKE or MATCHLOAD, see heightOf().
+ *   MOVING        scoreOrMatchload()/goTo*() only: pivot OUT (its travel position) and, once it has
+ *                 had PIVOT_TIME_MS to get there if it did move, lift to the destination -- INTAKE or
+ *                 MATCHLOAD, see heightOf().
+ *
+ * THE PIVOT, in the driver's words: OUT (code: true) = swung out, where it sits at power-on, at every
+ * stack level while scoring, and in the default down position after L2 / B. BACK (code: false) =
+ * pulled in toward the intake handoff, ONLY for taking a pin from the intake (R1 / INTAKE_POS). The
+ * ADI level that means OUT is config::PIVOT_OUT_IS_ADI_HIGH; the brain's CLAW line shows both the word
+ * and the raw level so X can be used to confirm it. At power-on the pivot is logically OUT and the ADI
+ * pin is written to the level it already sits at unpowered, so nothing moves at startup.
  *
  * Interlocks:
- *   1. The pivot only flips out once the lift is above PIVOT_CLEAR (clears the intake and drivetrain).
- *   2. On the way down the pivot retracts before the lift passes back below PIVOT_CLEAR. For L2's
- *      RELEASING this is enforced live, not with a wait: the pivot starts retracting the same instant
- *      the descent starts, and Lift::setDescentFloor() holds the walking setpoint at PIVOT_CLEAR (if
- *      it would otherwise get there first) until the pivot reports done -- see Lift's class comment.
- *      For MOVING (scoreOrMatchload()) the lift still simply waits for pivotDone() before it moves.
+ *   1. The arm never leaves the handoff until the jaws have had CLAW_CLOSE_TIME_MS to shut (CLAMPING).
+ *   2. On the way up from the handoff the pivot swings BACK -> OUT only once the arm is
+ *      PIVOT_OUT_CLEARANCE_DEG above lift_preset::INTAKE (or has arrived at the level, whichever is
+ *      first -- it can never leave a level waiting). This is a delay on the swing, never a gate on the
+ *      lift: the lift starts rising the same tick CLAMPING ends. It replaces the old PIVOT_CLEAR
+ *      interlock and L2 descent floor, which were written for the opposite pivot meaning and would
+ *      have forbidden the very positions the driver wants (pivot BACK near the bottom at INTAKE, OUT
+ *      at the bottom after L2). There is no height at which the pivot is forbidden to be OUT or BACK.
  *   3. The arm never moves away from the goal until the jaws have had time to open -- scoreOrMatchload()
  *      only; L2's score() deliberately starts the descent in the same tick the jaws open, per spec.
  *   4. R1 never pulls a held pin back down to the intake.
@@ -65,17 +78,22 @@ class Scoring {
     Scoring(Lift& lift, Claw& claw);
 
     /** Back to IDLE: nothing moves, lift holds where it is, level resets to 1. Also what main.cpp
-     *  calls whenever the driver holds the manual override, so this macro can't fight it. */
+     *  calls whenever the driver holds the manual override, so this macro can't fight it. Touches
+     *  neither the claw nor the pivot. */
     void reset();
+
+    /** B: stow -- reset() the macro, put the pivot OUT (the default down position) and send the lift
+     *  straight down to DOWN. Leaves the claw alone so it can't drop a pin. */
+    void stow();
 
     /** R1 (new-press): put the claw at the intake handoff (ignored while holding a pin or mid-score). */
     void goToIntake();
     /** L1: first tap clamps and lifts to level 1; every tap after goes up one level, staying at
      *  STACK_LEVEL_COUNT (the top) once reached. */
     void stepUp();
-    /** L2: holding a pin -> score (open the jaws, pivot in, then lower all the way to DOWN) and
-     *  reset the level count so the next L1 starts at level 1 again. Not holding anything: no-op --
-     *  there is no matchload fallback on this button any more, see scoreOrMatchload(). */
+    /** L2: holding a pin -> score (open the jaws and lower all the way to DOWN in one motion, pivot
+     *  OUT) and reset the level count so the next L1 starts at level 1 again. Not holding anything:
+     *  no-op -- there is no matchload fallback on this button any more, see scoreOrMatchload(). */
     void score();
     /** Not currently wired to a driver button (previously Down/L2 when empty). Holding a pin ->
      *  same as score() but lowers to INTAKE instead of DOWN. Empty -> go to the matchload position.
@@ -85,12 +103,18 @@ class Scoring {
      *  level 1. Left in place for auton or a future button -- L2's score() already resets the level
      *  after scoring, so this is only useful to back up mid-stack without scoring. */
     void resetLevel();
-    /** Driver: flip the pivot in/out. */
+    /** X: flip the pivot OUT <-> BACK. */
     void togglePivot() { setPivot(!pivotOut_); }
-    /** Make sure the pivot is in. main.cpp calls this just before Lift::requestHome() so the arm can
-     *  never home with the pivot flipped out (it already should be in at power-on; this makes it
-     *  explicit and keeps it true if homing is ever re-run later in a session). */
-    void stowPivot() { setPivot(false); }
+    /** Put the pivot OUT (the power-on / default position). main.cpp calls this just before
+     *  Lift::requestHome() so the arm always homes in its power-on configuration; it is a no-op when
+     *  the pivot is already OUT, which at power-on it is. */
+    void pivotOut() { setPivot(true); }
+    /** Put the pivot BACK (the intake handoff position). */
+    void pivotBack() { setPivot(false); }
+    /** True when the pivot is OUT (see the class comment). */
+    bool isPivotOut() const { return pivotOut_; }
+    /** The raw level the pivot's ADI pin is currently driven to (for the brain's CLAW line). */
+    bool pivotAdiHigh() const { return pivotLevelFor(pivotOut_); }
     /** Manual claw override (clamp / open). */
     void toggleClaw();
 
@@ -109,6 +133,7 @@ class Scoring {
   private:
     void enter(State next);
     void setPivot(bool out);
+    static bool pivotLevelFor(bool out) { return out == config::PIVOT_OUT_IS_ADI_HIGH; }
     void openClawForPickup();
     void moveTo(State destination);
     void command(double degrees, bool precise = false);
@@ -119,8 +144,8 @@ class Scoring {
 
     Lift& lift_;
     Claw& claw_;
-    std::unique_ptr<pros::adi::Pneumatics> pivot_;  // null when there is no pivot actuator
-    bool pivotOut_ = false;
+    std::unique_ptr<pros::adi::DigitalOut> pivot_;  // null when there is no pivot actuator
+    bool pivotOut_ = true;                          // OUT at power-on, see the class comment
     bool autoclamp_ = false;
 
     State state_ = State::IDLE;

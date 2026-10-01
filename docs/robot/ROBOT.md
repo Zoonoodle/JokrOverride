@@ -138,14 +138,14 @@ standing person. All preset heights are in **lift-arm degrees from that resting 
 DOWN           0.0    resting / start
 INTAKE         1.1    claw at the intake handoff (R1 tap)
 MATCHLOAD     15.0    claw at matchload height -- TUNE, not yet measured
-PIVOT_CLEAR   25.0    lowest height the pivot may flip out -- TUNE, not yet measured
 STACK_LEVELS  26.6 / 54.4 / 72.8 / 116.3 / 128.3   levels 1..5 (L1 steps through these)
 MAX          133.3    software hard stop: top level (128.3) + 5 deg margin
 ```
 
 `DOWN`, `INTAKE` and the 5 `STACK_LEVELS` are measured, not guessed -- see "Lift levels" below
-for the 7 reference photos they were read off. `MATCHLOAD` and `PIVOT_CLEAR` are still marked
-TUNE in `config.hpp`; they weren't covered by that photo set.
+for the 7 reference photos they were read off. `MATCHLOAD` is still marked TUNE in `config.hpp`;
+it wasn't covered by that photo set, and `INTAKE` (1.1) is almost certainly a mis-read that needs
+re-measuring off the brain's `LIFT` line.
 
 Driving it: **D-pad Up/Down (hold)** are plain manual power (up / down, neither = brake/hold)
 and always win -- holding either cancels whatever the lift was doing. Everything else (**L1**
@@ -222,11 +222,15 @@ I still could not count the cylinders on the end effector itself from these angl
 - **Claw**: one pneumatic cylinder, driver button **A** toggles clamp/open.
   `CLAW_EXTENDED_IS_CLOSED = true` is a TODO — confirm that extending the cylinder actually
   closes the jaws before trusting any autonomous grab.
-- **Pivot**: a second cylinder that flips the end effector out and back, driver button **X**.
-  `PIVOT_ON_AT_INTAKE = true` (pivot out while intaking), `PIVOT_ON_AT_MATCHLOAD = false`
-  (TODO). Interlock: the pivot only flips out once the lift is above `PIVOT_CLEAR`, and it
-  always comes back in **before** the lift moves down, so it never swings while travelling.
-- Timing knobs: `PIVOT_TIME_MS = 250`, `CLAW_CLOSE_TIME_MS = 150`, `CLAW_OPEN_TIME_MS = 200`.
+- **Pivot**: a second cylinder that swings the end effector **OUT** and **BACK**, driver button
+  **X**. OUT (`true` in code) = swung out: where it sits at power-on, at every stack level while
+  scoring, and in the default down position after L2 / B. BACK (`false`) = pulled in toward the
+  intake handoff, only at INTAKE (R1). At power-on the ADI pin is LOW and the pivot is OUT, so
+  `PIVOT_OUT_IS_ADI_HIGH = false` (TODO: confirm with X; the brain's `CLAW` line shows
+  `PIV OUT[0]`/`PIV BACK[1]`). `PIVOT_BACK_AT_MATCHLOAD = false` (TODO). The only height tied to
+  the pivot is `PIVOT_OUT_CLEARANCE_DEG`: during the L1 rise out of the handoff it swings OUT once
+  the arm is that far above `INTAKE` (or has arrived at the level). It never gates the lift.
+- Timing knobs: `PIVOT_TIME_MS = 250`, `CLAW_CLOSE_TIME_MS = 100`, `CLAW_OPEN_TIME_MS = 200`.
 
 ## Game elements: the pin and the cup
 

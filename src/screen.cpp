@@ -93,12 +93,42 @@ void draw() {
                             lift.getStartupAngle(), home);
     }
 
-    // 5: CLAW is the claw's own state (OPEN/ARMED/CLAMPED/RELEASED) and the intake macro's state and
-    // stack level, then the distance sensor. Without this line there was no way to see that the jaws
-    // were still CLAMPED, or that the macro was parked in STACKING -- and both of those silently
-    // change what R1 and L2 do (interlock 4 makes R1 a no-op while a pin is held, and a claw left
-    // clamped by B or the manual override is what made L2 fire the jaws at the bottom). If a button
-    // seems to do nothing, read this line first.
+    // 5: CLAW is the claw's own state (OPEN/ARMED/CLAMPED/RELEASED), the pivot (OUT/BACK, with the raw
+    // ADI level in brackets so config::PIVOT_OUT_IS_ADI_HIGH can be confirmed with X: if the word says
+    // OUT but the pivot physically went BACK, flip that constant), and the intake macro's state and
+    // stack level. Without this line there was no way to see that the jaws were still CLAMPED, or that
+    // the macro was parked in STACKING -- and both of those silently change what R1 and L2 do
+    // (interlock 4 makes R1 a no-op while a pin is held, and a claw left clamped by B or the manual
+    // override is what made L2 fire the jaws at the bottom). If a button seems to do nothing, read
+    // this line first.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 5, "CLAW %s  PIV %s[%d]  MACRO %s L%d", claw.stateName(),
+                        scoring.isPivotOut() ? "OUT" : "BACK", scoring.pivotAdiHigh() ? 1 : 0, scoring.stateName(),
+                        scoring.getLevel());
+
+    // --- Lift section (lines 6-10): everything needed to judge a move at a glance. ---
+
+    // 6: position -> goal, which named preset (if any) is active, which phase the move is in
+    // (DRIVE / BRAKE / CREEP / HOLD), and SETTLED / BLOCKED / FAULT.
+    //   LIFT 61.4 -> 128.3  STACK 5  DRIVE
+    // means "goal is level 5, the arm is at 61.4 and still under full voltage".
+    {
+        char status[12] = "";
+        if (lift.isFaulted()) std::snprintf(status, sizeof(status), "FAULT");
+        else if (lift.isBlocked()) std::snprintf(status, sizeof(status), "BLOCKED");
+        else if (lift.isSettled()) std::snprintf(status, sizeof(status), "SETTLED");
+        if (lift.hasActiveTarget())
+            pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT %.1f -> %.1f  %s  %s %s", lift.getPosition(),
+                                lift.getTarget(), lift.activePresetName(), lift.phaseName(), status);
+        else
+            pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT %.1f -> none  %s", lift.getPosition(), status);
+    }
+
+    // 7: error, measured arm speed, and what the loop sent to the motors (mV, 0 = brake-hold).
+    pros::screen::print(pros::E_TEXT_MEDIUM, 7, "LIFT err %.1f  vel %.0f/s  out %.0f mV", lift.getError(),
+                        lift.getVelocity(), lift.getOutput());
+
+    // 8: the braking curve's allowed speed at this distance (what BRAKE tracks), how many times this
+    // command has re-driven from HOLD, then the claw distance sensor.
     {
         char dist[26] = "";
         if (const char* p = portProblem(config::CLAW_DISTANCE_PORT, pros::DeviceType::distance)) {
@@ -108,42 +138,14 @@ void draw() {
             if (mm <= 0 || mm >= 9999) std::snprintf(dist, sizeof(dist), "--");
             else std::snprintf(dist, sizeof(dist), "%dmm%s", mm, mm <= config::CLAW_DETECT_MM ? " PIN" : "");
         }
-        pros::screen::print(pros::E_TEXT_MEDIUM, 5, "CLAW %s  MACRO %s L%d  DIST %s", claw.stateName(),
-                            scoring.stateName(), scoring.getLevel(), dist);
+        pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT curve %.0f/s  redrive %d   DIST %s", lift.getBrakeCurve(),
+                            lift.getRedrives(), dist);
     }
 
-    // --- Lift tuning section (lines 6-10): everything needed to tune the PID at a glance. ---
-
-    // 6: position -> goal, which named preset (if any) is active, and settled/blocked/fault status.
-    // During a speed-limited move (every descent to DOWN is one) the PID is not chasing the goal yet
-    // but a setpoint walking toward it, so that gets its own "(sp N)" so the two can't be mixed up:
-    //   LIFT 61.4 -> 0.0 (sp 58.2)  DOWN
-    // means "goal is 0, the loop is currently asking for 58.2, the arm is at 61.4 (3.2 deg behind)".
-    // Once the setpoint lands on the goal the "(sp ...)" disappears and the error is the real error.
-    {
-        char status[12] = "";
-        if (lift.isFaulted()) std::snprintf(status, sizeof(status), "FAULT");
-        else if (lift.isBlocked()) std::snprintf(status, sizeof(status), "BLOCKED");
-        else if (lift.isSettled()) std::snprintf(status, sizeof(status), "SETTLED");
-        char setpoint[16] = "";
-        if (lift.isProfiling()) std::snprintf(setpoint, sizeof(setpoint), "(sp %.1f) ", lift.getSetpoint());
-        if (lift.hasActiveTarget())
-            pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT %.1f -> %.1f %s %s %s", lift.getPosition(),
-                                lift.getTarget(), setpoint, lift.activePresetName(), status);
-        else
-            pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT %.1f -> none  %s", lift.getPosition(), status);
-    }
-
-    // 7: error and total PID output (mV), so you can see the loop working in real time.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 7, "LIFT err %.1f deg   out %.0f mV", lift.getError(), lift.getOutput());
-
-    // 8: P / I / D terms separately (mV each) -- watch these while tuning kP/kD/kI in that order.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT P %.0f   I %.0f   D %.0f", lift.getPTerm(), lift.getITerm(),
-                        lift.getDTerm());
-
-    // 9: the gains themselves, read straight from config.hpp -- tuning happens in code, not here.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 9, "GAIN kP %.0f  kI %.0f  kD %.0f  kG %.0f", config::LIFT_KP,
-                        config::LIFT_KI, config::LIFT_KD, config::LIFT_KG);
+    // 9: the motion constants, read straight from config.hpp -- tuning happens in code, not here.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 9, "BRAKE a %.0f  margin %.1f  creep %.0f  tol %.0f",
+                        config::LIFT_BRAKE_DECEL_DEG_PER_S2, config::LIFT_BRAKE_MARGIN_DEG, config::LIFT_CREEP_DEG_PER_S,
+                        config::LIFT_TOLERANCE_DEG);
 
     // 10: lift motor health -- temp (both readouts lose power around 55 C) and current draw.
     pros::screen::print(pros::E_TEXT_MEDIUM, 10, "LIFT temp %.0fC   current %.0f mA", lift.getTemperature(),

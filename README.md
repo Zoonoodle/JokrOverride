@@ -13,8 +13,9 @@ PROS 4.2.2 · LemLib 0.5.6 · liblvgl 9.2.0
 include/config.hpp            every port, ratio, preset and gain
 include/robot.hpp, src/robot.cpp   chassis (LemLib) + subsystem objects
 include/subsystems/ src/subsystems/
-  lift.*      DR6-4B position PID (gravity feedforward, windup clamp, settle, stall/runaway guards,
-              plain manual override for D-pad Up/Down, moveTo()/setTarget() shared by driver + auton)
+  lift.*      DR6-4B lift: DRIVE -> BRAKE -> HOLD moves (full voltage, braking curve, firmware hold),
+              homing, stall/runaway guards, plain manual override for D-pad Up/Down, a terminal trace,
+              moveTo()/setTarget() shared by driver + auton
   claw.*      pneumatic claw + autoclamp state machine
   intake.*    one-motor roller intake (driver-controlled only)
   scoring.*   intake macro: intake / matchload / 5-level stacking state machine with interlocks,
@@ -56,17 +57,25 @@ allowed to own the lift motors.
 | **D-pad Down** (hold) | lift **down**, full power (same) |
 | let go of Up/Down | lift motors HOLD where they are (no target resumes) |
 | **L1** | intake macro: step up a stack level (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached) |
-| **L2** | intake macro: holding a pin → **SCORE** (open the jaws, pivot in, lower all the way to `DOWN`) and reset the level count so the next L1 starts at level 1 again |
-| **R1** (hold) | intake roller in; (tap) also sends the lift to the **INTAKE** handoff position |
+| **L2** | intake macro: holding a pin → **SCORE** (open the jaws and lower all the way to `DOWN` in one motion; the pivot stays **OUT**) and reset the level count so the next L1 starts at level 1 again |
+| **R1** (hold) | intake roller in; (tap) also sends the lift to the **INTAKE** handoff position, pivot **BACK** once it is there |
 | **R2** (hold) | intake roller out |
-| **B** | **stow**: lift straight down to `DOWN` (0°) and cancel the intake macro |
+| **B** | **stow**: pivot **OUT**, lift straight down to `DOWN` (0°), cancel the intake macro |
 | **A** | claw clamp / open |
-| **X** | pivot in / out |
+| **X** | pivot **OUT** / **BACK** (the brain's `CLAW` line shows `PIV OUT[0]` / `PIV BACK[1]`, word + raw ADI level) |
 | **Y** | autoclamp on / off |
 
-`L1`/`L2`/R1's tap-to-INTAKE/`B` are locked out while Up/Down are held, so a tap can never
-re-command the lift out from under a manual nudge (see interlock 5 in `subsystems/scoring.hpp`).
-They don't touch the claw or pivot, either -- those stay exactly where they physically are.
+**Pivot positions, in the driver's words:** **OUT** = swung out -- where it sits at power-on, at every
+stack level while scoring, and in the default down position after L2 / B. **BACK** = pulled in toward
+the intake handoff, only for taking a pin from the intake (R1). In code `true` = OUT. Which ADI level
+is OUT is `PIVOT_OUT_IS_ADI_HIGH` (`false`: the unpowered LOW level is OUT, because that is where the
+pivot sits at power-on). If X makes the pivot swing BACK while the `CLAW` line says `OUT`, flip that one
+constant. The pivot swings BACK → OUT during the L1 rise once the arm is `PIVOT_OUT_CLEARANCE_DEG` above
+`INTAKE` (or has arrived at the level); nothing else in the lift's motion waits on it.
+
+`L1`/`L2`/R1's tap-to-INTAKE are locked out while Up/Down are held, so a tap can never re-command the
+lift out from under a manual nudge (see interlock 5 in `subsystems/scoring.hpp`). The manual override
+doesn't touch the claw or pivot, either -- those stay exactly where they physically are.
 
 `scoreOrMatchload()` (the old "score, or go to matchload if empty" behaviour) and `resetLevel()`
 (back to level 1 without scoring) are still in `subsystems/scoring.*` but aren't wired to a driver
@@ -92,9 +101,9 @@ lift.cancel();                                                    // stop chasin
 `moveTo(height, timeoutMs, waitUntilSettled)` blocks the calling task only (autonomous or driver
 code) -- the lift's own background task keeps running the PID at a fixed 10 ms regardless.
 `setTarget(height, precise)` is the lower-level, non-blocking version (used internally, and by
-`scoring.cpp`). Every move is profiled -- there is no "jump straight there" mode, because that is what
-oscillated. `precise = true` gets the tight tolerance and slow final approach that `INTAKE` needs; any
-goal within half a degree of `INTAKE` is promoted automatically. See "Lift speed and motion" below.
+`scoring.cpp`). Every move is DRIVE → BRAKE → HOLD (see "Lift speed and motion" below). `precise = true`
+gets the tight tolerance and slow creep that `INTAKE` needs; any goal within half a degree of `INTAKE`
+is promoted automatically.
 
 A blocking `moveTo(..., true)` at the top of a routine also waits out lift homing (see "Lift homing"),
 so give it time for homing plus the move.
@@ -111,63 +120,74 @@ This has already been checked once, from 7 reference photos with the robot power
 
 Because of the 4:1, the sensor turns more than a full revolution (~420° at the sensor for ~105°+ of arm travel) -- the code reads it with `Rotation::get_position()` (multi-turn, keeps counting past 360°), never `get_angle()` (wraps at 360° and would make the lift think it jumped positions partway up). This is already handled in `subsystems/lift.cpp`; it's noted here so nobody "fixes" it back to `get_angle()` later.
 
-A runaway guard catches this if it happens anyway: when the lift pushes hard one way but moves the other, it cuts power and shows `LIFT FAULT` on the brain's `LIFT` line. The manual override (D-pad Up/Down) still works and clears the fault.
+A runaway guard catches this if it happens anyway: during DRIVE the lift pushes full voltage toward the goal, so if the distance to the goal *grows* by `LIFT_FAULT_DEG` it cuts power and shows `LIFT FAULT` on the brain's `LIFT` line. The manual override (D-pad Up/Down) or any new preset button clears the fault.
 
 ## Lift speed and motion
 **The arm's free speed is 150 deg/s.** Both lift motors are red (100 RPM) cartridges; through the
 12T -> 48T (4:1) reduction that is 100 / 4 = 25 arm RPM = 150 arm deg/s. `LIFT_FREE_SPEED_DEG_PER_S`
-in `config.hpp` records it, and nothing should be tuned above it. Everything below lives in
-`include/config.hpp`.
+in `config.hpp` records it. Everything below lives in `include/config.hpp`.
 
-**Every move, up or down, is a trapezoidal profile on the setpoint.** It accelerates at
-`LIFT_ACCEL_DEG_PER_S2` (starting from `LIFT_START_SPEED_DEG_PER_S`, so the first 10 ms tick already
-puts real voltage down and the button feels instant), cruises at `LIFT_MAX_SPEED_DEG_PER_S`, and
-decelerates at `LIFT_DECEL_DEG_PER_S2` so the setpoint lands on the goal with zero speed. Three
-things make that fast *and* impossible to ring:
+**Every preset move is DRIVE → BRAKE → HOLD.** There is no position PID, no setpoint profile and no
+gravity feedforward. Each 10 ms tick the lift looks at the arm's measured position and velocity and
+does one of three things:
 
-- **Velocity feedforward.** `LIFT_KV` = 80 mV per arm deg/s (= 12000 / 150) supplies the voltage the
-  speed needs, so the PID is left correcting a small error rather than generating the whole drive out
-  of a large one.
-- **The leash.** `LIFT_MAX_LEAD_DEG` caps how far ahead of the arm the setpoint may get. If the arm
-  can't keep up, the setpoint waits. The tracking error is therefore bounded however far away the
-  goal is, so the loop can never wind up or store the error an overshoot is made of.
-- **Low gains.** `LIFT_KP` only has to pull in that bounded error.
+- **DRIVE.** Full ±12000 mV toward the goal, from the very first tick -- exactly what the D-pad does --
+  until the arm is going as fast as the braking curve allows for the distance left:
+  `v = sqrt(2 · LIFT_BRAKE_DECEL_DEG_PER_S2 · (distance − LIFT_BRAKE_MARGIN_DEG))`.
+- **BRAKE.** A velocity loop (`LIFT_VEL_KP` / `LIFT_VEL_KI`, clamped to `LIFT_BRAKE_MAX_MV`) follows
+  that curve down to a stop. Its integral learns whatever voltage gravity needs at that angle, so the
+  six-bar's torque curve never has to be known in advance. A normal goal is never chased back the way
+  the arm came: a small overshoot is simply stopped. Once the arm is slower than
+  `LIFT_STOPPED_DEG_PER_S` and inside `LIFT_TOLERANCE_DEG` (5 deg -- a deliberate trade of accuracy for
+  a stop that cannot hunt) → HOLD.
+  `INTAKE` (precise) and `DOWN` use the same loop with a floor: the curve is offset by
+  `LIFT_CREEP_ZONE_DEG` so the arm is down to `LIFT_CREEP_DEG_PER_S` that far out, then **creeps** until
+  it is inside `LIFT_PRECISE_TOLERANCE_DEG` (INTAKE, from either side) or `LIFT_REST_BAND_DEG` above the
+  hard stop (DOWN -- nothing ever drives the arm into the frame).
+- **HOLD.** `brake()` with the motors in hold mode, every tick -- the same firmware hold that catches
+  the arm when you let go of the D-pad. Nothing in this phase pushes toward the goal, so nothing can
+  hunt. **Arrival latches**: HOLD only goes back to DRIVE if the arm is more than `LIFT_REENGAGE_DEG`
+  off, at most `LIFT_MAX_REDRIVES` times per button press. The number of pushes per command is finite.
 
-**Arrival: tolerance, then hold.** Once the arm is inside the goal's tolerance for `LIFT_HOLD_MS` the
-loop *stops chasing* and holds with gravity feedforward plus a low-gain, low-authority P term
-(`LIFT_HOLD_KP` / `LIFT_HOLD_MAX_MV`). It only resumes chasing if the arm drifts
-`LIFT_HOLD_RELEASE_DEG` beyond the tolerance, so it can't flicker at the band edge.
-`LIFT_TOLERANCE_DEG` (5 deg) applies to the stack levels, `DOWN` and `MATCHLOAD` — a deliberate trade
-of a few degrees of accuracy for a stop with no hunting. `INTAKE` is the exception: a **precise**
-goal (`LIFT_PRECISE_*`) crawls the last `LIFT_PRECISE_ZONE_DEG` at `LIFT_PRECISE_SPEED_DEG_PER_S` and
-keeps the full loop inside `LIFT_PRECISE_TOLERANCE_DEG`. Any goal within half a degree of `INTAKE` is
-promoted to precise automatically, so a call site can't forget.
+**The one number that sets where it stops is `LIFT_BRAKE_DECEL_DEG_PER_S2`** -- how hard the arm can
+really brake. Under the real capability = stops short (safe), over = overshoots. Read it off the trace.
 
-The last `LIFT_REST_BAND_DEG` into `DOWN` is a plain brake-hold — the one place the gravity
-feedforward must not be able to push up (`17ab865`). D-pad Up/Down is the full ±12000 mV.
+> Two earlier designs are documented in `git log` so nobody brings them back: a jumped setpoint with
+> `kP = 600` (oscillated, `d2978c7`), and a trapezoidal profile + leash + velocity feedforward + PID +
+> gravity term + arrive/hold hysteresis (`6b8165c`: slow off the line because the leash capped the net
+> drive at ~3000 mV, and still oscillated because its hold relied on a fixed gravity feedforward that is
+> wrong at most angles of a six-bar -- the arm drifted out of the band, got re-chased, drifted again).
 
-> **Do not go back to jumping the setpoint at the goal and letting a high `LIFT_KP` do the work.**
-> That is what oscillated and then tripped a guard: a jumped setpoint means a huge instant error, full
-> voltage, and nothing in the loop that knows when to start slowing down. A profile knows the stopping
-> distance in advance.
+### Capturing a trace
+`LIFT_TRACE = true` prints one integer line per 20 ms to the PROS terminal whenever the arm moves, and
+for half a second after. In VS Code: PROS sidebar → **Brain Terminal** (or `pros terminal` from a
+shell), press a lift button, copy the lines out. Columns:
+
+```
+LIFT <ms> <phase> <pos*10> <goal*10> <vel deg/s> <out mV>
+```
+
+`phase` is `D` drive, `B` brake, `C` creep, `H` hold, `M` manual D-pad, `h` homing, `F` fault, `I` idle.
+`goal*10` is `-1` when nothing is commanded. The lines are written by a separate low-priority task from a
+ring buffer; the control loop itself never prints. In the `B` lines, `vel` should fall by about
+`LIFT_BRAKE_DECEL_DEG_PER_S2 × 0.02` per line -- if it falls much faster the arm can brake harder than
+the constant says (raise it); if `pos` runs past `goal` before `vel` reaches 0, lower it.
 
 ### If it...
 
 | Symptom | Change |
 |---|---|
-| Oscillates / rings at a preset | lower `LIFT_KP` (150), raise `LIFT_KD` a little, lower `LIFT_MAX_LEAD_DEG` (6) |
-| Overshoots the target | lower `LIFT_DECEL_DEG_PER_S2` (braking then starts sooner) |
-| Still sluggish | raise `LIFT_MAX_SPEED_DEG_PER_S` toward 150 and `LIFT_ACCEL_DEG_PER_S2` |
-| Noticeable lag between the button and the arm moving | raise `LIFT_START_SPEED_DEG_PER_S`. If it's L1's *first* tap, that's `CLAW_CLOSE_TIME_MS` — the jaws must shut before the arm pulls away |
-| Jerks/clunks starting a move | lower `LIFT_START_SPEED_DEG_PER_S`, or raise `LIFT_ACCEL_DEG_PER_S2` smoothness by lowering it |
-| Stutters/pulses on a long move | raise `LIFT_MAX_LEAD_DEG` (12-15) — the leash is binding |
-| Arm lags the profile the whole way (steady `err` at cruise) | raise `LIFT_KV` first, then `LIFT_KP` |
-| Sags out of the band after arriving | raise `LIFT_HOLD_KP`, or raise `LIFT_KG` |
-| Twitches/buzzes while holding | lower `LIFT_HOLD_KP` |
-| Slams the frame at the bottom | lower `LIFT_DECEL_DEG_PER_S2`, or raise `LIFT_REST_BAND_DEG` |
-| Stops short of a preset by a few degrees | that is `LIFT_TOLERANCE_DEG` working as designed. Lower it if you really need the accuracy, and expect more hunting |
-| `BLOCKED` on a normal move | the profile had distance left and the arm didn't move -- look for a real jam or a preset above the real top before raising `LIFT_STALL_MS` |
-| `LIFT FAULT` on a normal move | raise `LIFT_FAULT_DEG`; also run the direction check above |
+| Stops short of every preset by the same few degrees | raise `LIFT_BRAKE_DECEL_DEG_PER_S2` (braking starts later). Up to 5 deg short is `LIFT_TOLERANCE_DEG` working as designed |
+| Overshoots a level / arrives still moving / taps the frame at `DOWN` | lower `LIFT_BRAKE_DECEL_DEG_PER_S2`; for `DOWN` also raise `LIFT_CREEP_ZONE_DEG` |
+| `vel` swings above and below the curve in the trace during `B`/`C` (hunts) | lower `LIFT_VEL_KP` |
+| Creep is slow to get going / sags before it starts moving | raise `LIFT_VEL_KI` |
+| Brake feels violent | lower `LIFT_BRAKE_MAX_MV` (expect it to stop a little later: lower `LIFT_BRAKE_DECEL_DEG_PER_S2` to match) |
+| Small spring-back as it grabs the hold | lower `LIFT_STOPPED_DEG_PER_S` (hands over at a slower crawl) |
+| Re-drives once or twice after a stop (`redrive 1` on the brain, `H` then `D` in the trace) | the brake missed by more than `LIFT_REENGAGE_DEG`: fix `LIFT_BRAKE_DECEL_DEG_PER_S2` first; raise `LIFT_REENGAGE_DEG` only if you would rather it just stayed put |
+| Parks too high above the frame after `DOWN` | lower `LIFT_REST_BAND_DEG` (1.5) |
+| Lag between L1's *first* tap and the arm moving | that is `CLAW_CLOSE_TIME_MS` -- the jaws must shut before the arm pulls away |
+| `BLOCKED` on a normal move | DRIVE or CREEP ran `LIFT_STALL_MS` without `LIFT_STALL_DEG` of progress -- look for a real jam or a preset above the real top before raising `LIFT_STALL_MS` |
+| `LIFT FAULT` on a normal move | the distance to the goal grew during DRIVE: run the direction check above before touching `LIFT_FAULT_DEG` |
 | A button seems to do nothing | read the brain's `CLAW` line first. `CLAMPED` makes R1 a no-op (interlock 4), and `MACRO STACKING` means the macro thinks it is holding a pin. `B` resets the macro; `A` opens the jaws |
 
 ## Lift homing (automatic, every program run)
@@ -212,23 +232,21 @@ the absolute angle it saw at the stop — the one the plausibility window was ch
 | Too slow / times out | raise `LIFT_HOME_MV` magnitude (more negative) or `LIFT_HOME_TIMEOUT_MS` |
 
 ## Tuning the claw positions
-All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.hpp`). 0 is where the lift sits when the program starts. `DOWN`, `INTAKE` and the 5 `STACK_LEVELS` are already measured from reference photos (see `docs/robot/ROBOT.md` "Lift levels") -- `MATCHLOAD` and `PIVOT_CLEAR` are still placeholders. To (re)measure any of them:
+All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.hpp`). 0 is where the lift sits when the program starts. `DOWN`, `INTAKE` and the 5 `STACK_LEVELS` are already measured from reference photos (see `docs/robot/ROBOT.md` "Lift levels") -- `MATCHLOAD` is still a placeholder, and `INTAKE` (1.1) almost certainly needs re-measuring. To (re)measure any of them:
 1. Start the program with the lift fully down.
 2. Use **D-pad Up/Down** to put the claw exactly where you want it, then read the brain's `LIFT` line for the current position.
 3. Type that number into the preset:
    - `INTAKE`: claw lined up with the intake handoff
    - `MATCHLOAD`: claw at matchload height
-   - `PIVOT_CLEAR`: lowest height where the pivot can flip out without hitting anything
    - `STACK_LEVELS[0..4]`: the height to drop the 1st through 5th pin on a stack
    - `MAX`: a few degrees above the top level, as a software hard stop -- never raise it just to let a bad preset through
    - **Measure the top first.** Hold Up until the arm is at the top and read the position. Every preset has to be below that number. If the lift shows `BLOCKED` (brain + controller), it was asked to go somewhere it can't physically reach, so it stopped pushing and is holding where it is. Lower that preset.
-4. Timing: `CLAW_CLOSE_TIME_MS` (grip before lifting), `CLAW_OPEN_TIME_MS` (release before lowering -- `scoreOrMatchload()`'s path only; L2's `score()` opens the claw and starts lowering in the same tick), `PIVOT_TIME_MS`, and the motion profile itself -- see "Lift speed and motion" above. `CLAW_CLOSE_TIME_MS` is specifically the gap between the first L1 tap and the arm moving: the jaws must shut before the arm pulls away.
+4. Timing: `CLAW_CLOSE_TIME_MS` (grip before lifting), `CLAW_OPEN_TIME_MS` (release before lowering -- `scoreOrMatchload()`'s path only; L2's `score()` opens the claw and starts lowering in the same tick), `PIVOT_TIME_MS`, `PIVOT_OUT_CLEARANCE_DEG` (how far above `INTAKE` the arm is when the pivot swings OUT during the L1 rise), and the braking constants -- see "Lift speed and motion" above. `CLAW_CLOSE_TIME_MS` is specifically the gap between the first L1 tap and the arm moving: the jaws must shut before the arm pulls away.
 
-**Lift PID** (`LIFT_KG`, `LIFT_KP`, `LIFT_KD`, `LIFT_KI`), in this order, watching the brain's `LIFT P/I/D` line:
-1. **kG:** set kP = kD = 0. Raise kG until the arm stays put at mid-height without drifting down, and stop before it creeps up.
-2. **kP:** raise it until presets are reached quickly with a small overshoot (watch the `P` term and `err`).
-3. **kD:** raise it until the overshoot and bounce go away (watch the `D` term).
-4. **kI:** only if the arm settles consistently short of a preset while holding a pin (watch the `I` term -- it should only move near the target, inside `LIFT_WINDUP_RANGE`).
+**Lift braking** (`LIFT_BRAKE_DECEL_DEG_PER_S2` first, then `LIFT_VEL_KP` / `LIFT_VEL_KI`), with a trace open (see "Capturing a trace"):
+1. **Decel:** tap L1 from the bottom (level 1) and B back down. In the `B` lines, note how fast `vel` really falls, and where `pos` ends up relative to `goal`. Stops short every time → raise `LIFT_BRAKE_DECEL_DEG_PER_S2`; runs past → lower it. Repeat until stack levels land within `LIFT_TOLERANCE_DEG` and `DOWN` creeps the last `LIFT_CREEP_ZONE_DEG`.
+2. **Velocity loop:** if `vel` oscillates around the curve during `B`/`C`, lower `LIFT_VEL_KP`; if the creep toward `INTAKE` is slow to reach `LIFT_CREEP_DEG_PER_S`, raise `LIFT_VEL_KI`.
+3. **INTAKE:** tap R1 and confirm the `C` lines end with `pos` within `LIFT_PRECISE_TOLERANCE_DEG × 10` of `goal`.
 
 ## Brain screen
 Shows live readings the whole time the program runs (disabled, auton and driver), drawn with
@@ -242,11 +260,12 @@ below alongside the existing sensor readouts. A sensor that isn't plugged in sho
 | IMU | `none (not installed)` (no IMU on the robot yet), or heading and total rotation, or `calibrating... keep still` |
 | ODOM | tracking wheel rotation sensor, in degrees |
 | ROT | lift rotation sensor vs motor encoders. Both must go + when the lift goes up |
-| DIST | claw distance sensor mm, confidence, and `PIN` when inside `CLAW_DETECT_MM` |
-| LIFT (position line) | position → target (or `none`), the active named preset (or `custom`/blank), and `SETTLED`/`BLOCKED`/`FAULT` |
-| LIFT (err/out line) | error in lift degrees and total PID output in mV |
-| LIFT (P/I/D line) | the P, I and D terms separately, in mV, so you can watch each one while tuning |
-| GAIN | `kP`/`kI`/`kD`/`kG` read straight from `config.hpp` -- tuning happens in code, not on the controller |
+| ANGLE | the rotation sensor's live raw absolute angle, the startup seed, and the homing state (`HOMING` / `HOMED @ n` / `HOME FAIL @ n`) |
+| CLAW | claw state (`OPEN`/`ARMED`/`CLAMPED`/`RELEASED`), pivot `PIV OUT[0]` / `PIV BACK[1]` (word + raw ADI level), intake-macro state and stack level |
+| LIFT (position line) | position → target (or `none`), the active named preset (or `custom`), the phase (`DRIVE`/`BRAKE`/`CREEP`/`HOLD`), and `SETTLED`/`BLOCKED`/`FAULT` |
+| LIFT (err/vel/out line) | error in lift degrees, measured arm speed in deg/s, and what was sent to the motors in mV (0 = brake-hold) |
+| LIFT (curve line) | the braking curve's allowed speed at this distance, how many times this command re-drove, then `DIST`: claw distance sensor mm and `PIN` when inside `CLAW_DETECT_MM` |
+| BRAKE | `LIFT_BRAKE_DECEL_DEG_PER_S2`, `LIFT_BRAKE_MARGIN_DEG`, `LIFT_CREEP_DEG_PER_S`, `LIFT_TOLERANCE_DEG` read straight from `config.hpp` -- tuning happens in code, not on the controller |
 | LIFT (temp/current line) | lift motor temp (°C) and current draw (mA) |
 | TEMP | hottest left drive / right drive / lift motor and the intake motor (C). Motors lose power around 55 C. |
 | DRV | driver-loop heartbeat: `not started`, or a loop counter plus stick values and the manual-override Up/Down |

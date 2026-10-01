@@ -23,13 +23,14 @@ using subsystems::Scoring;
  *               resume whatever preset or macro step was active before.
  *   L1          intake macro: step up a stack level (1st tap clamps + goes to level 1; each
  *               tap after goes up one level, staying at the top once reached)
- *   L2          intake macro: SCORE (open the jaws, pivot in, lower all the way to DOWN) and
- *               reset the level count so the next L1 starts at level 1 again
+ *   L2          intake macro: SCORE (open the jaws and lower all the way to DOWN in one motion,
+ *               pivot stays OUT) and reset the level count so the next L1 starts at level 1 again
  *   R1 (hold)   intake roller in; (new-press) also sends the lift to the INTAKE handoff position
+ *               (pivot BACK once it is there)
  *   R2 (hold)   intake roller out
- *   B           stow: lift straight down to DOWN (0 deg) and cancel the macro
+ *   B           stow: pivot OUT, lift straight down to DOWN (0 deg), cancel the macro
  *   A           claw clamp / open
- *   X           pivot in / out
+ *   X           pivot OUT / BACK (the brain's CLAW line shows which, and the raw ADI level)
  *   Y           autoclamp on / off
  *
  * The lift PID task (subsystems/lift.*) starts once in initialize() and runs for the whole
@@ -77,7 +78,7 @@ void autonomous() {
     // the first ENABLED mode of a match, so this is the one place homing happens; opcontrol()'s call
     // below is only for a driver-skills run with no auton.
     scoring.reset();
-    scoring.stowPivot();  // never home with the pivot flipped out
+    scoring.pivotOut();  // home in the power-on configuration (pivot OUT); a no-op at power-on
     lift.requestHome();
 
     while (!screen::calibrated) pros::delay(10);  // odometry must be ready before moving
@@ -100,7 +101,7 @@ void opcontrol() {
     // driver control). requestHome() is a no-op once a run has homed, failed or been cancelled, so a
     // real match homes exactly once, during auton. It never blocks: the drive loop below starts
     // immediately and the arm homes underneath it. Holding D-pad Up/Down cancels it.
-    scoring.stowPivot();
+    scoring.pivotOut();
     lift.requestHome();
 
     while (true) {
@@ -136,10 +137,7 @@ void opcontrol() {
             if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R1)) scoring.goToIntake();
             if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L1)) scoring.stepUp();
             if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L2)) scoring.score();
-            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B)) {
-                scoring.reset();
-                lift.moveTo(config::lift_preset::DOWN);
-            }
+            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B)) scoring.stow();  // pivot OUT + lift to DOWN
         }
 
         // --- Claw (A), pivot (X), autoclamp (Y) ---

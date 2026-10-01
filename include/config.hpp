@@ -149,6 +149,18 @@ inline constexpr int LIFT_STALL_MS = 700;
 //   Rams / reaches the slow zone still moving: lower it (and see LIFT_SLOW_* above).
 //   Descent feels sluggish after a score: raise it -- up to ~90 is still well short of free-fall.
 inline constexpr double LIFT_LOWER_SPEED_DEG_PER_S = 40.0;   // TUNE
+// Descent ramp-up: the profiled trip to DOWN above doesn't start at full cruise (LIFT_LOWER_SPEED_DEG_PER_S)
+// the instant it's commanded -- it starts at this slower "mid" speed and climbs LINEARLY up to cruise
+// over the first LIFT_LOWER_RAMP_DEG of travel measured from wherever the move began (Lift::update(),
+// the goal_ <= DOWN branch), so a score or a stow leaves the height smoothly instead of snapping
+// straight to cruise. After the ramp it holds cruise until the slow zone near 0 (LIFT_SLOW_ZONE_DEG/
+// LIFT_SLOW_SPEED_DPS above) takes over -- one continuous speed curve, mid -> high -> slow -> brake,
+// with no stop or re-target in between (Scoring's pivot-retract floor on the walking setpoint, see
+// Lift::setDescentFloor(), can briefly hold the LAST bit of that curve, never the ramp itself).
+//   Leaves the top too slowly / looks sluggish at the start: raise LIFT_LOWER_START_SPEED_DEG_PER_S.
+//   Snaps too hard into cruise: raise LIFT_LOWER_RAMP_DEG (ramps over more distance).
+inline constexpr double LIFT_LOWER_START_SPEED_DEG_PER_S = 20.0;  // TUNE: starting ("mid") speed, deg/s
+inline constexpr double LIFT_LOWER_RAMP_DEG = 15.0;               // TUNE: deg of travel to reach cruise
 // Runaway guard: output over FAULT_MV, pushing in the direction that SHOULD shrink the error, for
 // FAULT_MS, and |error| ends up FAULT_DEG BIGGER than when that push started = sensor/motor
 // direction mismatch -> cut power, "LIFT FAULT" on the brain, controller rumbles. It deliberately
@@ -191,6 +203,9 @@ inline constexpr bool PIVOT_ON_AT_INTAKE = true;             // R1: pivot ON whi
 inline constexpr bool PIVOT_ON_AT_MATCHLOAD = false;         // TODO(team): L2 matchload spot, on or off?
 inline constexpr int PIVOT_TIME_MS = 250;                    // TUNE: time for the pivot to finish moving
 inline constexpr int CLAW_CLOSE_TIME_MS = 150;               // TUNE: jaws shut before the lift starts rising (L1)
-inline constexpr int CLAW_OPEN_TIME_MS = 200;                // TUNE: jaws open before the arm lowers (L2)
+// Jaws open before the arm lowers -- only for scoreOrMatchload()'s path (not currently on a button).
+// L2's score() no longer waits on this: the claw opens, the pivot starts retracting, and the lift's
+// own profiled descent all start in the same tick (see Scoring::enter()/update(), case RELEASING).
+inline constexpr int CLAW_OPEN_TIME_MS = 200;                // TUNE
 
 }  // namespace config

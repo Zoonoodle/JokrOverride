@@ -11,8 +11,8 @@
  *    ^                                                            │  L1 = level+1, stays at 5 (top)
  *    │                                                            L2
  *    │                                                            v
- *    └── (arrives home) ── MOVING <────────────────────── (jaws open) RELEASING
- *          pivot in first, then lift down to DOWN (0), level reset to 1
+ *    └──────────────────────────────────────────── RELEASING (claw open + pivot retract
+ *                                                               + lift descent to DOWN, all at once)
  *
  *   IDLE          power-on state, and also where the manual override leaves it. Nothing moves
  *                 until the driver presses something (or the manual override, which bypasses
@@ -23,14 +23,24 @@
  *                 for auton or a future button.
  *   CLAMPING      jaws closing; waits CLAW_CLOSE_TIME_MS so the lift doesn't pull out of an open claw
  *   STACKING      holding a pin, lift at STACK_LEVELS[level-1]; pivot flips out once above PIVOT_CLEAR
- *   RELEASING     jaws opening; waits CLAW_OPEN_TIME_MS before the arm moves
- *   MOVING        pivot back in (if it was out), then lift to the destination -- INTAKE, MATCHLOAD,
- *                 or (after an L2 score) IDLE/DOWN, see heightOf()
+ *   RELEASING     L2/score(): claw opens, pivot starts retracting, and the lift's own profiled
+ *                 descent to DOWN all start the instant this state is entered -- one continuous
+ *                 motion (see Lift's class comment: mid -> high -> slow -> brake), not a
+ *                 wait-then-move sequence. Settles into IDLE once the arm actually arrives at 0.
+ *                 scoreOrMatchload() (not on a button) still uses the older CLAW_OPEN_TIME_MS wait
+ *                 then a move to INTAKE_POS, unchanged.
+ *   MOVING        scoreOrMatchload()/goTo*() only now: pivot back in (if it was out), then lift to
+ *                 the destination -- INTAKE or MATCHLOAD, see heightOf().
  *
  * Interlocks:
  *   1. The pivot only flips out once the lift is above PIVOT_CLEAR (clears the intake and drivetrain).
- *   2. On the way down the pivot flips back in BEFORE the lift moves.
- *   3. The arm never moves away from the goal until the jaws have had time to open.
+ *   2. On the way down the pivot retracts before the lift passes back below PIVOT_CLEAR. For L2's
+ *      RELEASING this is enforced live, not with a wait: the pivot starts retracting the same instant
+ *      the descent starts, and Lift::setDescentFloor() holds the walking setpoint at PIVOT_CLEAR (if
+ *      it would otherwise get there first) until the pivot reports done -- see Lift's class comment.
+ *      For MOVING (scoreOrMatchload()) the lift still simply waits for pivotDone() before it moves.
+ *   3. The arm never moves away from the goal until the jaws have had time to open -- scoreOrMatchload()
+ *      only; L2's score() deliberately starts the descent in the same tick the jaws open, per spec.
  *   4. R1 never pulls a held pin back down to the intake.
  *   5. The manual override always wins: main.cpp calls reset() whenever D-pad Up/Down is held, so
  *      this macro can never re-command the lift out from under a manual nudge (it does not touch

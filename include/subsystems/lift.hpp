@@ -45,12 +45,16 @@
  * how a controlled descent brakes, and testing motion made it fault on that.
  *
  * Lowering to the bottom: every move to DOWN is profiled, so the setpoint leaves
- * from wherever the arm is and walks down (LIFT_LOWER_SPEED_DEG_PER_S, then
- * LIFT_SLOW_SPEED_DPS for the last LIFT_SLOW_ZONE_DEG) rather than jumping to 0
- * and letting the arm free-fall after it. Above LIFT_REST_BAND_DEG the loop may
- * push either direction -- pushing UP is how it holds the arm back; inside that
- * band it stops controlling and brake-holds, which is the one spot where the
- * gravity feedforward must not be able to lift the arm off the stop (17ab865).
+ * from wherever the arm is and walks down -- LIFT_LOWER_START_SPEED_DEG_PER_S,
+ * ramping up to LIFT_LOWER_SPEED_DEG_PER_S over the first LIFT_LOWER_RAMP_DEG of
+ * travel, then LIFT_SLOW_SPEED_DPS for the last LIFT_SLOW_ZONE_DEG -- rather than
+ * jumping to 0 and letting the arm free-fall after it. setDescentFloor() can hold
+ * the last bit of that walk (Scoring uses it so its pivot has time to retract),
+ * but never stops it outright: one continuous curve, mid -> high -> slow -> brake,
+ * with no re-target hop. Above LIFT_REST_BAND_DEG the loop may push either
+ * direction -- pushing UP is how it holds the arm back; inside that band it stops
+ * controlling and brake-holds, which is the one spot where the gravity
+ * feedforward must not be able to lift the arm off the stop (17ab865).
  *
  * Stall guard: if the lift pushes hard but can't get there (preset above the
  * real top, or jammed), it gives up on that target, holds where it stopped,
@@ -107,6 +111,17 @@ class Lift {
     /** Stop chasing whatever target is active and brake-hold right where the lift is. Does not
      *  resume any previous target later -- same "no old target" rule as releasing the manual override. */
     void cancel();
+
+    /**
+     * While descending to DOWN, don't let the walking setpoint go below this many arm degrees this
+     * tick. For Scoring's pivot interlock: the pivot (which Lift knows nothing about) starts
+     * retracting the same instant a score's descent is commanded, not before it, so Scoring raises
+     * this to config::lift_preset::PIVOT_CLEAR until its own pivotDone() is true, then drops it back
+     * to 0 -- a floor on the last bit of an already-moving profile, never a stop-then-resume. Call
+     * every tick it should apply; setTarget() always resets it to 0 for a brand-new move, so a stale
+     * floor from a past descent can never leak into the next one. 0 (the default) = no floor.
+     */
+    void setDescentFloor(double degrees) { descentFloor_ = degrees; }
 
     /** Final target (where the lift is heading). Only meaningful while hasActiveTarget() is true. */
     double getTarget() const { return goal_; }
@@ -185,6 +200,8 @@ class Lift {
     double goal_ = 0.0;     // final target
     double target_ = 0.0;   // current setpoint (walks toward goal_ when speed_ > 0)
     double speed_ = 0.0;    // deg/s, 0 = jump
+    double descentStart_ = 0.0;  // target_ when this profiled move began, for the ramp-up in update()
+    double descentFloor_ = 0.0;  // see setDescentFloor()
 
     double manualPower_ = 0.0;  // -1..1 from driverPower(), 0 = driver not overriding
     bool wasManual_ = false;

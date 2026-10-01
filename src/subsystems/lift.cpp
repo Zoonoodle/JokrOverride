@@ -118,6 +118,8 @@ void Lift::setTarget(double degrees, double speedDegPerSec) {
     speed_ = resolved;
     // A speed-limited move starts from where the lift actually is, not from the old setpoint.
     target_ = speed_ > 0 ? getPosition() : goal_;
+    descentStart_ = target_;  // anchor for the ramp-up in update(), see LIFT_LOWER_RAMP_DEG
+    descentFloor_ = 0.0;      // a brand-new move never inherits a stale pivot floor, see setDescentFloor()
     resetPid();       // old integral/derivative belong to the old target
     settle_.reset();  // a new target is not settled yet
     settled_ = false;
@@ -218,15 +220,35 @@ void Lift::update() {
     //    Only this speed changes at the handover -- target_ is never snapped back to the live
     //    position mid-descent, because that would throw away exactly the lag the PID is correcting.
     double walkSpeed = speed_;
-    if (goal_ <= config::lift_preset::DOWN && target_ <= config::lift_preset::DOWN + config::LIFT_SLOW_ZONE_DEG)
-        walkSpeed = std::min(walkSpeed, config::LIFT_SLOW_SPEED_DPS);
+    if (goal_ <= config::lift_preset::DOWN) {
+        // Ramp-up: don't start a descent at full cruise -- climb linearly from
+        // LIFT_LOWER_START_SPEED_DEG_PER_S up to cruise (speed_) over the first LIFT_LOWER_RAMP_DEG of
+        // travel from wherever this move began (descentStart_, set once in setTarget()). Measured on
+        // the SETPOINT, same reasoning as the slow zone below: the arm is tracking it, so it leaves
+        // the top smoothly instead of snapping to cruise speed the instant the move is commanded.
+        if (config::LIFT_LOWER_RAMP_DEG > 0.0) {
+            const double traveled = std::fabs(descentStart_ - target_);
+            if (traveled < config::LIFT_LOWER_RAMP_DEG) {
+                const double t = traveled / config::LIFT_LOWER_RAMP_DEG;
+                walkSpeed = config::LIFT_LOWER_START_SPEED_DEG_PER_S +
+                            t * (speed_ - config::LIFT_LOWER_START_SPEED_DEG_PER_S);
+            }
+        }
+        if (target_ <= config::lift_preset::DOWN + config::LIFT_SLOW_ZONE_DEG)
+            walkSpeed = std::min(walkSpeed, config::LIFT_SLOW_SPEED_DPS);
+    }
 
-    // 4) Walk the setpoint toward the goal for speed-limited moves (including the slow walk above).
+    // 4) Walk the setpoint toward the goal for speed-limited moves (including the ramp-up and slow
+    //    walk above), then hold it at descentFloor_ if a caller has raised one (Scoring does, while
+    //    the pivot it owns is still retracting -- see setDescentFloor()). This only ever pauses the
+    //    LAST bit of an already-moving profile: the floor starts at 0 (no effect) and callers raise
+    //    it only once they need it, so it can delay arrival but can never turn into a stop-then-hop.
     if (walkSpeed > 0 && target_ != goal_) {
         const double step = walkSpeed * dt;
         if (std::fabs(goal_ - target_) <= step) target_ = goal_;
         else target_ += goal_ > target_ ? step : -step;
     }
+    if (goal_ <= config::lift_preset::DOWN) target_ = std::max(target_, descentFloor_);
 
     // 5) PID + gravity feedforward. The P and D terms below are computed the same way lemlib::PID
     //    computes them internally (see include/lemlib/pid.hpp: update() takes no dt, so it can't be

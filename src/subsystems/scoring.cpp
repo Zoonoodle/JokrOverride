@@ -75,7 +75,20 @@ void Scoring::enter(State next) {
             break;
         case State::CLAMPING: claw_.clamp(); break;
         case State::STACKING: break;       // update() drives the lift + pivot
-        case State::RELEASING: claw_.disarm(); break;  // jaws open, autoclamp off so it can't re-grab the stack
+        case State::RELEASING:
+            claw_.disarm();  // jaws open now, autoclamp off so it can't re-grab the stack
+            if (scoreToHome_) {
+                // L2 score: claw open, pivot retracting, and the lift's own profiled descent to DOWN
+                // all start in this same tick -- one continuous motion, not a wait-then-move state
+                // machine. Interlock 2 (pivot in before the lift passes below PIVOT_CLEAR) still
+                // holds: the pivot starts retracting now rather than first, and command() below
+                // starts the descent fresh (which also clears any floor left over from a past move),
+                // so the floor set right after it is the one that actually takes effect this tick.
+                setPivot(false);
+                command(preset::DOWN, config::LIFT_LOWER_SPEED_DEG_PER_S);
+                lift_.setDescentFloor(pivotDone() ? preset::DOWN : preset::PIVOT_CLEAR);
+            }
+            break;
         case State::MOVING:
             claw_.disarm();
             setPivot(false);  // interlock 2: pivot in before the lift moves
@@ -200,14 +213,19 @@ void Scoring::update() {
         }
 
         case State::RELEASING:
-            // Interlock 3: the arm doesn't move until the jaws are open.
-            if (elapsed >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS)) {
-                if (scoreToHome_) {
+            if (scoreToHome_) {
+                // score(): the descent is already running (started in enter() above). Just keep
+                // lowering the pivot floor off the instant it's actually safe to -- this never stops
+                // or restarts the lift, only changes how low the setpoint is allowed to walk this
+                // tick -- then drop into IDLE once the arm has actually arrived and settled at 0.
+                lift_.setDescentFloor(pivotDone() ? preset::DOWN : preset::PIVOT_CLEAR);
+                if (liftArrived(preset::DOWN)) {
                     scoreToHome_ = false;
-                    moveTo(State::IDLE, config::LIFT_LOWER_SPEED_DEG_PER_S);  // score(): all the way home
-                } else {
-                    moveTo(State::INTAKE_POS, config::LIFT_LOWER_SPEED_DEG_PER_S);  // scoreOrMatchload()
+                    enter(State::IDLE);
                 }
+            } else if (elapsed >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS)) {
+                // Interlock 3 (scoreOrMatchload() only -- score()/L2 above no longer waits on this).
+                moveTo(State::INTAKE_POS, config::LIFT_LOWER_SPEED_DEG_PER_S);
             }
             break;
 

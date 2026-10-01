@@ -73,56 +73,63 @@ void draw() {
                             lift.getSensorPosition() * config::LIFT_ROTATION_RATIO, lift.getMotorPosition(),
                             lift.getMotorPosition() * config::LIFT_GEAR_RATIO);
 
-    // 4: claw distance sensor
+    // 4: the rotation sensor's own absolute zero (calibrated on the brain's device screen, outside
+    // this code -- see Lift::zero()). ANGLE is the LIVE raw get_angle(), in sensor degrees, so the
+    // calibrated zero can be checked by eye any time (should read ~0 with the arm at the true
+    // bottom). SEED is the one-time signed angle zero() seeded the position counter from at startup.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 4, "ANGLE raw %.1f  seed %.1f", lift.getRawAngle(),
+                        lift.getStartupAngle());
+
+    // 5: claw distance sensor
     if (const char* p = portProblem(config::CLAW_DISTANCE_PORT, pros::DeviceType::distance)) {
-        pros::screen::print(pros::E_TEXT_MEDIUM, 4, "DIST  %s (port %d)", p, config::CLAW_DISTANCE_PORT);
+        pros::screen::print(pros::E_TEXT_MEDIUM, 5, "DIST  %s (port %d)", p, config::CLAW_DISTANCE_PORT);
     } else {
         const int mm = claw.getDistanceMm();
-        if (mm <= 0 || mm >= 9999) pros::screen::print(pros::E_TEXT_MEDIUM, 4, "DIST  nothing in range");
+        if (mm <= 0 || mm >= 9999) pros::screen::print(pros::E_TEXT_MEDIUM, 5, "DIST  nothing in range");
         else
-            pros::screen::print(pros::E_TEXT_MEDIUM, 4, "DIST  %d mm  conf %d  %s", mm, claw.getDistanceConfidence(),
+            pros::screen::print(pros::E_TEXT_MEDIUM, 5, "DIST  %d mm  conf %d  %s", mm, claw.getDistanceConfidence(),
                                 mm <= config::CLAW_DETECT_MM ? "PIN" : "");
     }
 
-    // --- Lift tuning section (lines 5-9): everything needed to tune the PID at a glance. ---
+    // --- Lift tuning section (lines 6-10): everything needed to tune the PID at a glance. ---
 
-    // 5: position -> target, which named preset (if any) is active, and settled/blocked/fault status.
+    // 6: position -> target, which named preset (if any) is active, and settled/blocked/fault status.
     {
         char status[12] = "";
         if (lift.isFaulted()) std::snprintf(status, sizeof(status), "FAULT");
         else if (lift.isBlocked()) std::snprintf(status, sizeof(status), "BLOCKED");
         else if (lift.isSettled()) std::snprintf(status, sizeof(status), "SETTLED");
         if (lift.hasActiveTarget())
-            pros::screen::print(pros::E_TEXT_MEDIUM, 5, "LIFT %.1f -> %.1f  %s  %s", lift.getPosition(),
+            pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT %.1f -> %.1f  %s  %s", lift.getPosition(),
                                 lift.getTarget(), lift.activePresetName(), status);
         else
-            pros::screen::print(pros::E_TEXT_MEDIUM, 5, "LIFT %.1f -> none  %s", lift.getPosition(), status);
+            pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT %.1f -> none  %s", lift.getPosition(), status);
     }
 
-    // 6: error and total PID output (mV), so you can see the loop working in real time.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT err %.1f deg   out %.0f mV", lift.getError(), lift.getOutput());
+    // 7: error and total PID output (mV), so you can see the loop working in real time.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 7, "LIFT err %.1f deg   out %.0f mV", lift.getError(), lift.getOutput());
 
-    // 7: P / I / D terms separately (mV each) -- watch these while tuning kP/kD/kI in that order.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 7, "LIFT P %.0f   I %.0f   D %.0f", lift.getPTerm(), lift.getITerm(),
+    // 8: P / I / D terms separately (mV each) -- watch these while tuning kP/kD/kI in that order.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT P %.0f   I %.0f   D %.0f", lift.getPTerm(), lift.getITerm(),
                         lift.getDTerm());
 
-    // 8: the gains themselves, read straight from config.hpp -- tuning happens in code, not here.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 8, "GAIN kP %.0f  kI %.0f  kD %.0f  kG %.0f", config::LIFT_KP,
+    // 9: the gains themselves, read straight from config.hpp -- tuning happens in code, not here.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 9, "GAIN kP %.0f  kI %.0f  kD %.0f  kG %.0f", config::LIFT_KP,
                         config::LIFT_KI, config::LIFT_KD, config::LIFT_KG);
 
-    // 9: lift motor health -- temp (both readouts lose power around 55 C) and current draw.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 9, "LIFT temp %.0fC   current %.0f mA", lift.getTemperature(),
+    // 10: lift motor health -- temp (both readouts lose power around 55 C) and current draw.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 10, "LIFT temp %.0fC   current %.0f mA", lift.getTemperature(),
                         lift.getCurrentDraw());
 
-    // 10: overall motor temps (C), all mechanisms.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 10, "TEMP  L %.0f  R %.0f  lift %.0f  intake %.0f", hottest(leftDrive),
+    // 11: overall motor temps (C), all mechanisms.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 11, "TEMP  L %.0f  R %.0f  lift %.0f  intake %.0f", hottest(leftDrive),
                         hottest(rightDrive), lift.getTemperature(), intake.getTemperature());
 
-    // 11: driver loop heartbeat. "not started" = opcontrol never ran (not enabled / stuck before it).
+    // 12: driver loop heartbeat. "not started" = opcontrol never ran (not enabled / stuck before it).
     if (driverDebug.loops == 0)
-        pros::screen::print(pros::E_TEXT_MEDIUM, 11, "DRV   not started %s", calibrated ? "" : "(calibrating)");
+        pros::screen::print(pros::E_TEXT_MEDIUM, 12, "DRV   not started %s", calibrated ? "" : "(calibrating)");
     else
-        pros::screen::print(pros::E_TEXT_MEDIUM, 11, "DRV #%u fwd %d trn %d Up %d Dn %d",
+        pros::screen::print(pros::E_TEXT_MEDIUM, 12, "DRV #%u fwd %d trn %d Up %d Dn %d",
                             static_cast<unsigned>(driverDebug.loops), driverDebug.forward, driverDebug.turn,
                             driverDebug.up, driverDebug.down);
 }

@@ -44,9 +44,11 @@ void initialize() {
     master.rumble(".");
     master.print(0, 0, "PROGRAM ON      ");
 
-    // The lift must start fully down (0 = lift_preset::DOWN). zero() only tares the sensor/encoders --
-    // it doesn't move anything. The PID task starts idle: no target is active until a preset button,
-    // the intake macro, or autonomous explicitly commands a height (see lift.hpp).
+    // The lift must start at (or within 45 arm degrees of) DOWN. zero() does NOT re-zero the rotation
+    // sensor -- its absolute zero is calibrated on the brain's device screen and survives power
+    // cycles on its own; zero() just seeds the position counter from it (see the comment in
+    // lift.cpp). It doesn't move anything either way. The PID task starts idle: no target is active
+    // until a preset button, the intake macro, or autonomous explicitly commands a height (see lift.hpp).
     lift.zero();
     lift.startTask();
 

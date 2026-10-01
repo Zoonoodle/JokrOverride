@@ -119,6 +119,12 @@ drive the 12T axle; **the arm is on the 48T axle**. Red cartridges (commit `505e
 > runaway thresholds -- is in lift-arm degrees via those two numbers, so re-check this note
 > first if either ratio is ever touched again.
 
+The rotation sensor's absolute zero has been calibrated (on the brain's device screen, not in
+code) to the true physical bottom of the lift and persists across power cycles on its own —
+`Lift::zero()` only seeds the software position counter from that absolute angle at startup, it
+never resets or re-references the sensor's own zero. See the brain's new `ANGLE` line and the
+comment in `subsystems/lift.cpp`'s `zero()`.
+
 **Down** = the arm folded forward and low over the chassis, end effector near the intake
 handoff in the middle of the robot
 ([`03-lift-down-stowed-rear.jpg`](photos/03-lift-down-stowed-rear.jpg)). This is where the
@@ -165,6 +171,14 @@ the brain's `LIFT` line (already converted to lift-arm degrees). Photos:
 
 The readings rise the whole way from `DOWN` to the top, which is the direction check too --
 confirms `LIFT_ROTATION_REVERSED = false` is correct as committed.
+
+**Caveat:** these photos were taken on a build where `Lift::zero()` still reset the rotation
+sensor's position to 0 at every boot (startup-relative), before it was changed to seed from the
+sensor's own persistent absolute zero instead (see "Lift" above and the comment in
+`subsystems/lift.cpp`'s `zero()`). If the arm wasn't sitting exactly at the true bottom when the
+robot was powered on for this photo session, every reading in the table carries that same
+constant offset. Re-measure against the brain's `LIFT` line (now reading off the real absolute
+zero) if any of these look off on the robot.
 
 Two things worth a physical look, found while reading these photos, neither of which affects
 the heights above (the brain's `LIFT`/`ROT` lines are the rotation sensor, which is what every

@@ -5,7 +5,9 @@
  *
  * Drawn with pros::screen (not the 8-line pros::lcd console) so there's room for a full lift
  * tuning section (position, target, error, output, P/I/D terms, active preset, settled/blocked/
- * fault, gains, temp and current) alongside the existing pose/IMU/odom/distance readouts.
+ * fault, gains, temp and current) alongside the existing pose/IMU/odom/distance readouts, plus an
+ * ANGLE line showing the rotation sensor's live raw absolute angle and the one-time startup seed
+ * (see Lift::zero()) so the sensor's own calibrated zero can be checked by eye.
  */
 
 #include <cstdint>

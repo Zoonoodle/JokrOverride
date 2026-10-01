@@ -79,6 +79,13 @@ inline constexpr double LIFT_ROTATION_RATIO = 4.0;           // confirmed: senso
 // down (where the robot is turned on). Measured straight off the brain's LIFT line in 7 reference
 // photos (docs/robot/photos/levels/, 2026-09-30) with the robot powered on and the arm physically
 // moved to each position by hand; see docs/robot/ROBOT.md "Lift levels" for the photo-by-photo readout.
+//
+// CAVEAT: those photos were taken on a build where Lift::zero() still reset_position()'d the sensor
+// at every boot (startup-relative), before it was changed to seed from the sensor's own persistent
+// absolute zero (see the comment in Lift::zero(), lift.cpp). If the arm wasn't sitting exactly at
+// the true physical bottom when the robot was powered on for that photo session, every one of these
+// numbers carries that same constant offset. Re-measure against the brain's LIFT line (now reading
+// off the absolute zero) if anything here looks off on the real robot.
 namespace lift_preset {
 inline constexpr double DOWN = 0.0;                          // resting / start position (IMG_6088 read 0.1, i.e. ~0)
 inline constexpr double INTAKE = 1.1;                        // measured from photo IMG_6089, 2026-09-30

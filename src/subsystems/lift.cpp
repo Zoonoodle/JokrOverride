@@ -27,8 +27,38 @@ void Lift::resetPid() {
 }
 
 void Lift::zero() {
+    // Motor encoders are only ever a fallback position source (getPosition() prefers the rotation
+    // sensor whenever one is fitted, which it is -- see getPosition() below) and are only read for
+    // the brain's diagnostic ROT/MOT cross-check, so taring them here is harmless.
     motors_.tare_position_all();
-    if (rotation_) rotation_->reset_position();
+
+    // Absolute zero, NOT a startup reset: the rotation sensor's own persistent zero point has been
+    // calibrated (on the brain's device screen, outside this code) to the physical bottom of the
+    // lift, so get_angle() is already a true absolute 0..360 sensor-degree reading from that zero
+    // and survives power cycles on its own -- it does NOT need, and must NOT get, a software reset
+    // here. Resetting it (the old rotation_->reset_position()/set_position(0)) would throw that
+    // calibration away and make every height relative to wherever the arm happened to be sitting at
+    // THIS particular boot instead (e.g. a little high from band tension with the motors unpowered) --
+    // exactly the bug this avoids.
+    //
+    // What we do instead: seed the multi-turn position counter (what get_position() tracks) from the
+    // current absolute angle, folded to the signed sensor-degree range closest to 0, (-180, 180]: a
+    // lift resting a hair low (angle ~359.9 deg) seeds as ~-0.1 deg, not +359.9. From then on
+    // get_position() keeps counting turns correctly from that seed as the arm moves, through
+    // getSensorPosition()'s /LIFT_ROTATION_RATIO conversion to arm degrees.
+    //
+    // This is only unambiguous if the lift powers on within +-45 ARM degrees (+-180 sensor degrees --
+    // one quarter of the 4:1-geared sensor's single revolution) of the true bottom: true by design
+    // (DOWN/0 is the documented power-on position, see config::lift_preset) but NOT verified here --
+    // a lift powered on further from the bottom than that would seed to the wrong turn count. set_reversed()
+    // was already applied in the constructor (it runs long before this, see Lift::Lift()), so it
+    // affects get_angle() here and every later get_position() read the same consistent way.
+    if (rotation_) {
+        std::int32_t angleCentideg = rotation_->get_angle();  // 0..35999 centidegrees, absolute, persists
+        if (angleCentideg > 18000) angleCentideg -= 36000;    // fold into (-18000, 18000] centidegrees
+        startupAngleDeg_ = angleCentideg / 100.0;             // kept for the brain screen only
+        rotation_->set_position(angleCentideg);               // seed the counter -- NOT reset_position()
+    }
     active_ = false;
     goal_ = target_ = 0.0;
     speed_ = 0.0;
@@ -50,6 +80,8 @@ double Lift::getSensorPosition() const {
     // centidegrees -> sensor degrees -> lift degrees
     return rotation_->get_position() / 100.0 / config::LIFT_ROTATION_RATIO;
 }
+
+double Lift::getRawAngle() const { return rotation_ ? rotation_->get_angle() / 100.0 : 0.0; }
 
 double Lift::getTemperature() const {
     double hottest = 0.0;

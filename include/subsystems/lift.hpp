@@ -63,7 +63,9 @@ class Lift {
   public:
     Lift();
 
-    /** Zero the lift at its current position. Call once, with the lift fully down, at power-on. */
+    /** Seed the position counter from the rotation sensor's own calibrated absolute zero (does NOT
+     *  reset/re-zero the sensor itself -- see the long comment in lift.cpp). Call once, with the
+     *  lift at (or within 45 arm degrees of) the true bottom, at power-on. */
     void zero();
 
     /** Start the background task that calls update() every 10 ms. Call once from initialize(). */
@@ -110,6 +112,13 @@ class Lift {
     double getMotorPosition() const;
     /** Lift degrees from the rotation sensor only (0 if none fitted). */
     double getSensorPosition() const;
+    /** Raw rotation sensor angle, in SENSOR degrees (not divided by LIFT_ROTATION_RATIO), 0..360,
+     *  absolute -- this is Rotation::get_angle() read live, every call (0 if no sensor fitted). For
+     *  the brain screen: lets you check the sensor's own calibrated absolute zero by eye. */
+    double getRawAngle() const;
+    /** The signed sensor-degree angle zero() seeded the position counter from at startup (see its
+     *  comment) -- captured once, not live. 0 if zero() hasn't run yet or no sensor is fitted. */
+    double getStartupAngle() const { return startupAngleDeg_; }
 
     /** True once the lift has reached its final target and stayed in band for LIFT_SETTLE_MS. */
     bool isSettled() const { return settled_; }
@@ -152,6 +161,8 @@ class Lift {
     std::unique_ptr<pros::Rotation> rotation_;  // null when no rotation sensor is fitted
     lemlib::PID pid_;
     lemlib::ExitCondition settle_;
+
+    double startupAngleDeg_ = 0.0;  // signed sensor-degree angle zero() seeded position from, see zero()
 
     bool active_ = false;   // false = no commanded height; update() just brakes (see class comment)
     double goal_ = 0.0;     // final target

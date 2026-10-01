@@ -13,7 +13,7 @@ every session, so changes get built, uploaded and tested for real.
 | `include/subsystems/lift.*`, `src/subsystems/lift.cpp` | DR6-4B position PID, gravity feedforward, stall + runaway guards, manual override. **Only** place that writes the lift motors. |
 | `include/subsystems/claw.*` | Pneumatic claw + autoclamp state machine. |
 | `include/subsystems/intake.*` | One-motor roller intake. Driver-controlled only. |
-| `include/subsystems/scoring.*` | Intake / matchload / 7-level stacking state machine and its interlocks. |
+| `include/subsystems/scoring.*` | Intake / matchload / 5-level stacking state machine and its interlocks. |
 | `src/screen.cpp`, `include/screen.hpp` | Brain screen sensor readout. |
 | `src/main.cpp` | `initialize()` / `autonomous()` / `opcontrol()` and the button map. |
 | `README.md` | Port map, button map, tuning procedures. |
@@ -28,7 +28,7 @@ Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
 - **Lift**: DR6-4B six-bar, 2 motors (`20, -13`), **12T→48T (4:1)** — motors on the 12T axle, arm on the 48T. Chain-levelled end effector. Down = folded over the chassis = 0 deg; up = swung up and back.
 - **Lift sensing**: rotation sensor port `16` is what the PID reads, and it sits on the **motored 12T axle**, so **arm degrees = sensor degrees ÷ 4**.
 - **Claw + pivot**: two pneumatic cylinders, ADI `C` (claw) and ADI `D` (pivot). Pivot only flips out above `PIVOT_CLEAR` and always comes back in before the lift lowers.
-- **Game elements — two separate things**: a **pin** (solid yellow: hex head, fluted tapered body, flared base skirt) and a **cup** (ribbed tapered vessel, clear or red). The pin drops into the cup. **The claw grips the pin; the intake handles cups.** Stacks go 7 levels.
+- **Game elements — two separate things**: a **pin** (solid yellow: hex head, fluted tapered body, flared base skirt) and a **cup** (ribbed tapered vessel, clear or red). The pin drops into the cup. **The claw grips the pin; the intake handles cups.** Stacks go 5 levels (`config::lift_preset::STACK_LEVEL_COUNT`), measured from photos — see `docs/robot/ROBOT.md` "Lift levels".
 - **Fixed in `config.hpp`**: there is no IMU on the robot, so `IMU_PORT = 0` (none fitted; it used to be `8`, which is wrong and collides with right-drive port 8) — `robot.cpp` builds no `pros::Imu` and gives LemLib a null IMU pointer. `LIFT_GEAR_RATIO` is `48.0/12.0` and `LIFT_ROTATION_RATIO` is `4.0`, matching the confirmed 4:1 lift gearing above.
 
 ## Workflow — every change
@@ -56,9 +56,9 @@ Standing permission: build, upload and commit every time without asking. Do not 
    background task, is the sole caller of `move_voltage()`/`brake()` on the lift. Never create
    a second `MotorGroup` or `Motor` on the lift ports — that duplicate was the real bug behind
    both the startup bounce and the failing builds. (`399c6d0`, `1de3225`, `d3efc00`)
-3. **Manual lift always wins.** Holding L1/L2 feeds voltage into that same loop ahead of the
-   PID and cancels any active target immediately. Letting go brakes and holds; it must never
-   snap back to an old preset.
+3. **Manual lift always wins.** Holding D-pad Up/Down feeds voltage into that same loop ahead of
+   the PID and cancels any active target immediately. Letting go brakes and holds; it must never
+   snap back to an old preset. (L1/L2 are the intake-macro buttons now, not manual lift.)
 4. Nothing may block driver control from starting — there is no IMU fitted, so calibration
    runs in a background task and is skipped when no IMU answers. Never make startup wait on
    a sensor that may not be there. (`495bb66`, `1de3225`)

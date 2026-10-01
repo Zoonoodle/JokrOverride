@@ -14,10 +14,10 @@ include/config.hpp            every port, ratio, preset and gain
 include/robot.hpp, src/robot.cpp   chassis (LemLib) + subsystem objects
 include/subsystems/ src/subsystems/
   lift.*      DR6-4B position PID (gravity feedforward, windup clamp, settle, stall/runaway guards,
-              plain manual override for L1/L2, moveTo()/setTarget() shared by driver + auton)
+              plain manual override for D-pad Up/Down, moveTo()/setTarget() shared by driver + auton)
   claw.*      pneumatic claw + autoclamp state machine
   intake.*    one-motor roller intake (driver-controlled only)
-  scoring.*   intake macro: intake / matchload / 7-level stacking state machine with interlocks,
+  scoring.*   intake macro: intake / matchload / 5-level stacking state machine with interlocks,
               drives the lift only through Lift::setTarget() (the PID), never raw power
 src/screen.cpp                brain screen sensor readout
 src/main.cpp                  initialize / autonomous stub / opcontrol + button map
@@ -42,39 +42,41 @@ All ports live in `include/config.hpp`. Current values:
 
 ## Driver guide
 The lift PID (`subsystems/lift.*`) runs the whole program, starting idle in `initialize()` -- nothing
-moves on its own. **L1/L2 are always plain manual power**, same feel as full-send motor control; every
-other lift button below goes through the PID (`lift.setTarget()`/`moveTo()`), never raw voltage.
-Pressing L1 or L2 immediately cancels whatever height was active (a preset button or the intake
-macro) and takes over; letting go brakes and holds right there -- it does **not** snap back to the
-old target. See the class comment in `include/subsystems/lift.hpp` for why only one thing is ever
+moves on its own. **D-pad Up/Down (hold) are always plain manual power**, same feel as full-send motor
+control; every other lift button below goes through the PID (`lift.setTarget()`/`moveTo()`), never raw
+voltage. Holding Up or Down immediately cancels whatever height was active (a preset button or the
+intake macro) and takes over; letting go brakes and holds right there -- it does **not** snap back to
+the old target. See the class comment in `include/subsystems/lift.hpp` for why only one thing is ever
 allowed to own the lift motors.
 
 | Button | What it does |
 |---|---|
 | Left stick Y / Right stick X | arcade drive |
-| **L1** (hold) | lift **up**, full power (manual, cancels any preset/macro target) |
-| **L2** (hold) | lift **down**, full power (same) |
-| let go of L1/L2 | lift motors HOLD where they are (no target resumes) |
-| **R1** (hold) | intake in |
-| **R2** (hold) | intake out |
-| **Up** | intake macro: go to the **INTAKE** handoff position |
-| **Left** | intake macro: clamp, then stack (tap again to go up a level, max 7) |
-| **Down** | intake macro: holding a pin → **SCORE**; empty → go to **MATCHLOAD** |
-| **Right** | intake macro: holding a pin → back to stack level 1 |
+| **D-pad Up** (hold) | lift **up**, full power (manual, cancels any preset/macro target) |
+| **D-pad Down** (hold) | lift **down**, full power (same) |
+| let go of Up/Down | lift motors HOLD where they are (no target resumes) |
+| **L1** | intake macro: step up a stack level (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached) |
+| **L2** | intake macro: holding a pin → **SCORE** (open the jaws, pivot in, lower all the way to `DOWN`) and reset the level count so the next L1 starts at level 1 again |
+| **R1** (hold) | intake roller in; (tap) also sends the lift to the **INTAKE** handoff position |
+| **R2** (hold) | intake roller out |
 | **B** | **stow**: lift straight down to `DOWN` (0°) and cancel the intake macro |
 | **A** | claw clamp / open |
 | **X** | pivot in / out |
 | **Y** | autoclamp on / off |
 
-`Up`/`Left`/`Down`/`Right` are locked out while L1/L2 are held, so a tap can never re-command the
-lift out from under a manual nudge (see interlock 5 in `subsystems/scoring.hpp`). They don't touch
-the claw or pivot, either -- those stay exactly where they physically are.
+`L1`/`L2`/R1's tap-to-INTAKE/`B` are locked out while Up/Down are held, so a tap can never
+re-command the lift out from under a manual nudge (see interlock 5 in `subsystems/scoring.hpp`).
+They don't touch the claw or pivot, either -- those stay exactly where they physically are.
+
+`scoreOrMatchload()` (the old "score, or go to matchload if empty" behaviour) and `resetLevel()`
+(back to level 1 without scoring) are still in `subsystems/scoring.*` but aren't wired to a driver
+button right now -- available for autonomous, or a future button.
 
 **Note:** `X` (manual pivot toggle) is independent of the intake macro above. Avoid tapping it while
 the macro is mid-move (`STACKING`/`MOVING`) -- the macro also drives the pivot as part of its
 interlocks, and the two aren't coordinated with each other.
 
-**Brain `DRV` line:** `not started` means driver control never ran (not enabled, or the program crashed; look for a red error on the brain). Otherwise it shows a loop counter going up plus the stick values and L1/L2 it reads. If the counter climbs and `L1 1` shows but the lift doesn't move, the problem is wiring or motor direction, not code.
+**Brain `DRV` line:** `not started` means driver control never ran (not enabled, or the program crashed; look for a red error on the brain). Otherwise it shows a loop counter going up plus the stick values and the manual-override Up/Down it reads. If the counter climbs and `Up 1` shows but the lift doesn't move, the problem is wiring or motor direction, not code.
 
 ## Auton API
 Autonomous and the driver's preset buttons share the same named heights (`config::lift_preset`, see
@@ -82,7 +84,7 @@ Autonomous and the driver's preset buttons share the same named heights (`config
 
 ```cpp
 lift.moveTo(config::lift_preset::INTAKE, 1500, true);            // jump to INTAKE, wait up to 1.5s or until settled
-lift.moveTo(config::lift_preset::STACK_LEVELS[2], 2000, true);   // 3rd stack level
+lift.moveTo(config::lift_preset::STACK_LEVELS[2], 2000, true);   // 3rd of 5 stack levels
 if (!lift.isSettled()) { /* ... */ }
 lift.cancel();                                                    // stop chasing a target, brake-hold in place
 ```
@@ -98,24 +100,26 @@ The lift runs off the **rotation sensor** on port 16, mounted on the 12T motor a
 2. Lift the arm up by hand. **Both (unbracketed) readings must go positive**, and should read about the same as each other. The bracketed raw sensor reading should be about 4x the bracketed raw motor reading (the 4:1) -- if it isn't, `LIFT_GEAR_RATIO`/`LIFT_ROTATION_RATIO` don't match the real gearing, fix those first.
    - the motor reading goes negative → the lift motors are reversed. Flip the signs in `LIFT_PORTS`.
    - the rotation reading goes negative → set `LIFT_ROTATION_REVERSED = true`.
-3. Enable and hold **L1**. The arm must go up. If it goes down, the motor signs are wrong (go back to step 2).
+3. Enable and hold **D-pad Up**. The arm must go up. If it goes down, the motor signs are wrong (go back to step 2).
 
-Because of the 4:1, the sensor turns more than a full revolution (~420° at the sensor for ~105° of arm travel) -- the code reads it with `Rotation::get_position()` (multi-turn, keeps counting past 360°), never `get_angle()` (wraps at 360° and would make the lift think it jumped positions partway up). This is already handled in `subsystems/lift.cpp`; it's noted here so nobody "fixes" it back to `get_angle()` later.
+This has already been checked once, from 7 reference photos with the robot powered on and the arm moved by hand through every named height (`docs/robot/photos/levels/`, see `docs/robot/ROBOT.md` "Lift levels") -- the readings rose the whole way from `DOWN` to the top score level, confirming `LIFT_ROTATION_REVERSED = false` is correct. Still worth re-running this check after any work on the lift's mechanical build.
 
-A runaway guard catches this if it happens anyway: when the lift pushes hard one way but moves the other, it cuts power and shows `LIFT FAULT` on the brain's `LIFT` line. L1/L2 still work and clear the fault.
+Because of the 4:1, the sensor turns more than a full revolution (~420° at the sensor for ~105°+ of arm travel) -- the code reads it with `Rotation::get_position()` (multi-turn, keeps counting past 360°), never `get_angle()` (wraps at 360° and would make the lift think it jumped positions partway up). This is already handled in `subsystems/lift.cpp`; it's noted here so nobody "fixes" it back to `get_angle()` later.
+
+A runaway guard catches this if it happens anyway: when the lift pushes hard one way but moves the other, it cuts power and shows `LIFT FAULT` on the brain's `LIFT` line. The manual override (D-pad Up/Down) still works and clears the fault.
 
 ## Tuning the claw positions
-All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.hpp`). 0 is where the lift sits when the program starts.
+All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.hpp`). 0 is where the lift sits when the program starts. `DOWN`, `INTAKE` and the 5 `STACK_LEVELS` are already measured from reference photos (see `docs/robot/ROBOT.md` "Lift levels") -- `MATCHLOAD` and `PIVOT_CLEAR` are still placeholders. To (re)measure any of them:
 1. Start the program with the lift fully down.
-2. Use **L1/L2** to put the claw exactly where you want it, then read the brain's `LIFT` line for the current position.
-3. Type that number into the preset and repeat for each one:
+2. Use **D-pad Up/Down** to put the claw exactly where you want it, then read the brain's `LIFT` line for the current position.
+3. Type that number into the preset:
    - `INTAKE`: claw lined up with the intake handoff
    - `MATCHLOAD`: claw at matchload height
    - `PIVOT_CLEAR`: lowest height where the pivot can flip out without hitting anything
-   - `STACK_LEVELS[0..6]`: the height to drop the 1st through 7th pin on a stack
-   - `MAX`: just under the hard stop
-   - **Measure the top first.** Hold L1 until the arm is at the top and read the position. Every preset has to be below that number. If the lift shows `BLOCKED` (brain + controller), it was asked to go somewhere it can't physically reach, so it stopped pushing and is holding where it is. Lower that preset.
-4. Timing: `CLAW_CLOSE_TIME_MS` (grip before lifting), `CLAW_OPEN_TIME_MS` (release before lowering), `PIVOT_TIME_MS`, and `LIFT_LOWER_SPEED_DEG_PER_S` (how slowly the arm comes down after a score).
+   - `STACK_LEVELS[0..4]`: the height to drop the 1st through 5th pin on a stack
+   - `MAX`: a few degrees above the top level, as a software hard stop -- never raise it just to let a bad preset through
+   - **Measure the top first.** Hold Up until the arm is at the top and read the position. Every preset has to be below that number. If the lift shows `BLOCKED` (brain + controller), it was asked to go somewhere it can't physically reach, so it stopped pushing and is holding where it is. Lower that preset.
+4. Timing: `CLAW_CLOSE_TIME_MS` (grip before lifting), `CLAW_OPEN_TIME_MS` (release before lowering), `PIVOT_TIME_MS`, `LIFT_LOWER_SPEED_DEG_PER_S` (cruise speed lowering after a score), and `LIFT_SLOW_ZONE_DEG`/`LIFT_SLOW_SPEED_DPS` (the final slow walk into the hard stop at the bottom -- raise `LIFT_SLOW_ZONE_DEG` or lower `LIFT_SLOW_SPEED_DPS` if the arm still rams the bottom on an L2 score or a B stow).
 
 **Lift PID** (`LIFT_KG`, `LIFT_KP`, `LIFT_KD`, `LIFT_KI`), in this order, watching the brain's `LIFT P/I/D` line:
 1. **kG:** set kP = kD = 0. Raise kG until the arm stays put at mid-height without drifting down, and stop before it creeps up.
@@ -142,4 +146,4 @@ below alongside the existing sensor readouts. A sensor that isn't plugged in sho
 | GAIN | `kP`/`kI`/`kD`/`kG` read straight from `config.hpp` -- tuning happens in code, not on the controller |
 | LIFT (temp/current line) | lift motor temp (°C) and current draw (mA) |
 | TEMP | hottest left drive / right drive / lift motor and the intake motor (C). Motors lose power around 55 C. |
-| DRV | driver-loop heartbeat: `not started`, or a loop counter plus stick values and L1/L2 |
+| DRV | driver-loop heartbeat: `not started`, or a loop counter plus stick values and the manual-override Up/Down |

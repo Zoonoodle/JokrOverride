@@ -129,21 +129,57 @@ robot is switched on, and it defines `0.0` lift degrees.
 standing person. All preset heights are in **lift-arm degrees from that resting position**:
 
 ```
-DOWN         0.0    resting / start
-INTAKE       5.0    claw at the intake handoff (R1)
-MATCHLOAD   15.0    claw at matchload height (L2)
-PIVOT_CLEAR 25.0    lowest height the pivot may flip out
-STACK_LEVELS 20 / 30 / 40 / 50 / 60 / 72 / 85   levels 1..7
-MAX        105.0    hard stop, never command past this
+DOWN           0.0    resting / start
+INTAKE         1.1    claw at the intake handoff (R1 tap)
+MATCHLOAD     15.0    claw at matchload height -- TUNE, not yet measured
+PIVOT_CLEAR   25.0    lowest height the pivot may flip out -- TUNE, not yet measured
+STACK_LEVELS  26.6 / 54.4 / 72.8 / 116.3 / 128.3   levels 1..5 (L1 steps through these)
+MAX          133.3    software hard stop: top level (128.3) + 5 deg margin
 ```
 
-Every one of those is marked TUNE — they have **not** been measured on this robot. The
-README "Tuning the claw positions" is the procedure. The real top of travel is not known.
-**(unclear from photos)**
+`DOWN`, `INTAKE` and the 5 `STACK_LEVELS` are measured, not guessed -- see "Lift levels" below
+for the 7 reference photos they were read off. `MATCHLOAD` and `PIVOT_CLEAR` are still marked
+TUNE in `config.hpp`; they weren't covered by that photo set.
 
-Driving it: in driver control the lift is plain motor power (**L1** up, **L2** down, neither =
-brake/hold). The PID, presets, stall guard and runaway guard only run in autonomous. See
-"Safety rules" in `CLAUDE.md` — this split is deliberate and was hard-won.
+Driving it: **D-pad Up/Down (hold)** are plain manual power (up / down, neither = brake/hold)
+and always win -- holding either cancels whatever the lift was doing. Everything else (**L1**
+step up a stack level, **L2** score and return home, **R1** tap to go to INTAKE, **B** stow to
+DOWN) goes through the PID. See "Safety rules" in `CLAUDE.md` and the README "Driver guide" --
+this single-owner split is deliberate and was hard-won.
+
+## Lift levels
+
+Measured by powering the robot on, moving the arm to each named height by hand, and reading
+the brain's `LIFT` line (already converted to lift-arm degrees). Photos:
+[`photos/levels/`](photos/levels/).
+
+| Photo | Named height | Brain `LIFT` line read | `config::lift_preset` |
+|---|---|---|---|
+| [`levels/0-start.jpg`](photos/levels/0-start.jpg) | start / rest | `LIFT 0.1 -> none` | `DOWN = 0.0` |
+| [`levels/1-intake.jpg`](photos/levels/1-intake.jpg) | intake handoff | `LIFT 1.1 -> none` | `INTAKE = 1.1` |
+| [`levels/2-score-L1.jpg`](photos/levels/2-score-L1.jpg) | score level 1 | `LIFT 26.6 -> none` | `STACK_LEVELS[0] = 26.6` |
+| [`levels/3-score-L2.jpg`](photos/levels/3-score-L2.jpg) | score level 2 | `LIFT 54.4 -> none` | `STACK_LEVELS[1] = 54.4` |
+| [`levels/4-score-L3.jpg`](photos/levels/4-score-L3.jpg) | score level 3 | `LIFT 72.8 -> none` | `STACK_LEVELS[2] = 72.8` |
+| [`levels/5-score-L4.jpg`](photos/levels/5-score-L4.jpg) | score level 4 | `LIFT 116.3 -> none` | `STACK_LEVELS[3] = 116.3` |
+| [`levels/6-score-L5.jpg`](photos/levels/6-score-L5.jpg) | score level 5 (top) | `LIFT 128.3 -> none` | `STACK_LEVELS[4] = 128.3` |
+
+The readings rise the whole way from `DOWN` to the top, which is the direction check too --
+confirms `LIFT_ROTATION_REVERSED = false` is correct as committed.
+
+Two things worth a physical look, found while reading these photos, neither of which affects
+the heights above (the brain's `LIFT`/`ROT` lines are the rotation sensor, which is what every
+preset and the PID actually use):
+
+- Every photo's `DIST` line reads `WRONG DEVICE on port (port 11)` and `ODOM` reads
+  `not connected (port 7)` -- the claw distance sensor and the odometry tracking wheel were
+  both disconnected (or something else was on port 11) at the time of these photos.
+  **(unclear from photos -- check the robot)**
+- The brain's `ROT`/`MOT` line shows the rotation-sensor-based reading running almost exactly
+  **2x** the motor-encoder-based reading at every level (e.g. level 5: `ROT 128.3 [513]` vs
+  `MOT 63.9 [256]`), not the 1:1 you'd expect from two sensors on the same 12T axle. Possible
+  causes: the two lift motors' encoders disagreeing (`robot::lift`'s `MotorGroup::get_position()`
+  averages them, so one motor undercounting would read as roughly half), or the rotation sensor
+  isn't geared 1:1 with the motors after all. **(unclear from photos -- check the robot)**
 
 ## Claw and pivot
 
@@ -207,10 +243,11 @@ So: **the claw carries the pin; the intake handles the cups.** Photo 05 is the d
 the claw is holding a bare pin with no cup attached, which is only possible if they separate.
 
 What is **(unclear from photos)** is the scoring relationship: whether cups stack onto a pin,
-or a pin is placed into a stack of cups, or both. `config.hpp` says both things — the
-`STACK_LEVELS` comments call each level "the 1st through 7th cup on a stack" while also
-calling the array "one entry per pin-stack height" — and no stack appears in any photo.
-`lift_preset::STACK_LEVEL_COUNT = 7`, one preset lift height per level, either way.
+or a pin is placed into a stack of cups, or both — no stack appears in any photo.
+`config.hpp`'s `STACK_LEVELS` comments now consistently say "pin" (they used to say "cup" in
+one place, which was a leftover from before the two were told apart; fixed). Either way,
+`lift_preset::STACK_LEVEL_COUNT = 5`, one preset lift height per level, measured from the
+"Lift levels" photos above.
 
 ---
 

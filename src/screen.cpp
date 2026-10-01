@@ -122,9 +122,9 @@ void draw() {
     if (driverDebug.loops == 0)
         pros::screen::print(pros::E_TEXT_MEDIUM, 11, "DRV   not started %s", calibrated ? "" : "(calibrating)");
     else
-        pros::screen::print(pros::E_TEXT_MEDIUM, 11, "DRV #%u fwd %d trn %d L1 %d L2 %d",
+        pros::screen::print(pros::E_TEXT_MEDIUM, 11, "DRV #%u fwd %d trn %d Up %d Dn %d",
                             static_cast<unsigned>(driverDebug.loops), driverDebug.forward, driverDebug.turn,
-                            driverDebug.l1, driverDebug.l2);
+                            driverDebug.up, driverDebug.down);
 }
 
 }  // namespace

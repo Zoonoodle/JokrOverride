@@ -11,18 +11,18 @@ using subsystems::Scoring;
 
 /**
  * Button map (driver). Full walkthrough in README "Driver guide".
- *   Left stick Y / Right stick X  arcade drive
- *   L1 (hold)   lift up, full power, same feel as plain motor power
- *   L2 (hold)   lift down, full power
- *               Pressing either immediately cancels the intake macro / any preset target and
+ *   Left stick Y / Right stick X   arcade drive
+ *   D-pad Up (hold)    lift up, full power, plain manual control (same feel as plain motor power)
+ *   D-pad Down (hold)  lift down, full power, plain manual control
+ *               Holding either immediately cancels the intake macro / any preset target and
  *               takes manual control. Letting go brakes and holds right there -- it does NOT
  *               resume whatever preset or macro step was active before.
- *   R1 (hold)   intake in
- *   R2 (hold)   intake out
- *   Up          intake macro: go to the INTAKE handoff position
- *   Left        intake macro: clamp + stack (tap again to go up a level, max 7)
- *   Down        intake macro: SCORE if holding a pin, else go to MATCHLOAD
- *   Right       intake macro: back to stack level 1
+ *   L1          intake macro: step up a stack level (1st tap clamps + goes to level 1; each
+ *               tap after goes up one level, staying at the top once reached)
+ *   L2          intake macro: SCORE (open the jaws, pivot in, lower all the way to DOWN) and
+ *               reset the level count so the next L1 starts at level 1 again
+ *   R1 (hold)   intake roller in; (new-press) also sends the lift to the INTAKE handoff position
+ *   R2 (hold)   intake roller out
  *   B           stow: lift straight down to DOWN (0 deg) and cancel the macro
  *   A           claw clamp / open
  *   X           pivot in / out
@@ -30,10 +30,10 @@ using subsystems::Scoring;
  *
  * The lift PID task (subsystems/lift.*) starts once in initialize() and runs for the whole
  * program; it is the only code that ever writes to the lift motors (see the class comment in
- * include/subsystems/lift.hpp for why that matters). Up/Left/Down/Right/B and the intake macro
+ * include/subsystems/lift.hpp for why that matters). L1/L2/R1/B and the intake macro
  * (subsystems/scoring.*) all command it through lift.setTarget()/moveTo() -- never raw voltage.
- * L1/L2 only ever reach the lift through lift.driverPower(), which preempts the PID from inside
- * that same task. Nothing else touches the motors.
+ * D-pad Up/Down only ever reach the lift through lift.driverPower(), which preempts the PID from
+ * inside that same task. Nothing else touches the motors.
  */
 
 void initialize() {
@@ -87,34 +87,33 @@ void opcontrol() {
         const int turn = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
         chassis.arcade(forward, turn);
 
-        // --- Lift: L1 up / L2 down, full power, plain manual control (see button map above).
-        // Holding either cancels the intake macro / any preset target so they can never fight over
-        // the motors; scoring.reset() below just stops the macro from re-issuing lift commands, it
-        // doesn't touch the claw or pivot where they physically are. ---
-        const bool l1 = master.get_digital(pros::E_CONTROLLER_DIGITAL_L1);
-        const bool l2 = master.get_digital(pros::E_CONTROLLER_DIGITAL_L2);
-        if (l1) {
+        // --- Lift manual override: D-pad Up/Down, full power, plain manual control (see button map
+        // above). Holding either cancels the intake macro / any preset target so they can never
+        // fight over the motors; scoring.reset() below just stops the macro from re-issuing lift
+        // commands, it doesn't touch the claw or pivot where they physically are. ---
+        const bool up = master.get_digital(pros::E_CONTROLLER_DIGITAL_UP);
+        const bool down = master.get_digital(pros::E_CONTROLLER_DIGITAL_DOWN);
+        if (up) {
             scoring.reset();
             lift.driverPower(1.0);
-        } else if (l2) {
+        } else if (down) {
             scoring.reset();
             lift.driverPower(-1.0);
         } else {
             lift.driverPower(0.0);
         }
 
-        // --- Intake: R1 in, R2 out (hold) ---
+        // --- Intake roller: R1 in, R2 out (hold) ---
         if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) intake.set(Intake::Mode::IN);
         else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) intake.set(Intake::Mode::OUT);
         else intake.set(Intake::Mode::STOP);
 
-        // --- Lift height presets / intake macro. Locked out while L1/L2 are held so a tap here
-        // can never re-command the lift out from under a manual nudge. ---
-        if (!l1 && !l2) {
-            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_UP)) scoring.goToIntake();
-            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_LEFT)) scoring.stepUp();
-            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_DOWN)) scoring.scoreOrMatchload();
-            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_RIGHT)) scoring.resetLevel();
+        // --- Lift height presets / intake macro. Locked out while the manual override is held so a
+        // tap here can never re-command the lift out from under a manual nudge. ---
+        if (!up && !down) {
+            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R1)) scoring.goToIntake();
+            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L1)) scoring.stepUp();
+            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L2)) scoring.score();
             if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B)) {
                 scoring.reset();
                 lift.moveTo(config::lift_preset::DOWN);
@@ -130,7 +129,7 @@ void opcontrol() {
         scoring.update();
 
         // --- Brain "DRV" line: proves this loop is running and what it reads ---
-        screen::driverDebug = {screen::driverDebug.loops + 1, forward, turn, l1, l2};
+        screen::driverDebug = {screen::driverDebug.loops + 1, forward, turn, up, down};
 
         pros::delay(10);
     }

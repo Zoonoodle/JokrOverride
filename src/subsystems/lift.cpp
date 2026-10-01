@@ -109,7 +109,7 @@ const char* Lift::activePresetName() const {
     if (goal_ == preset::PIVOT_CLEAR) return "PIVOT_CLEAR";
     if (goal_ == preset::MAX) return "MAX";
     static const char* const kLevelNames[preset::STACK_LEVEL_COUNT] = {"STACK 1", "STACK 2", "STACK 3", "STACK 4",
-                                                                        "STACK 5", "STACK 6", "STACK 7"};
+                                                                        "STACK 5"};
     for (int i = 0; i < preset::STACK_LEVEL_COUNT; ++i)
         if (goal_ == preset::STACK_LEVELS[i]) return kLevelNames[i];
     return "custom";
@@ -123,8 +123,8 @@ void Lift::update() {
     lastUpdate_ = now;
     const double position = getPosition();
 
-    // 1) Driver manual override (L1/L2): full send, no feedforward -- same feel as plain motor
-    //    power. This is the ONLY thing allowed to preempt the PID, and it always wins: cancel
+    // 1) Driver manual override (D-pad Up/Down): full send, no feedforward -- same feel as plain
+    //    motor power. This is the ONLY thing allowed to preempt the PID, and it always wins: cancel
     //    whatever target was active so nothing "fights" the driver, and so release doesn't jump
     //    back to it either (see class comment).
     if (std::fabs(manualPower_) > 0.02) {
@@ -146,7 +146,7 @@ void Lift::update() {
 
     // 2) No commanded height: brake and hold right here. This is the state at power-on (nothing
     //    moves until something explicitly calls setTarget()/moveTo()) and right after the driver
-    //    lets go of L1/L2 (no old target resumes).
+    //    lets go of the manual override (no old target resumes).
     if (!active_) {
         motors_.brake();
         settled_ = false;
@@ -165,14 +165,27 @@ void Lift::update() {
         return;
     }
 
-    // 3) Walk the setpoint toward the goal for speed-limited moves.
+    // 3) Final stretch down to the bottom: once inside the slow zone, (re)target a slow walk to 0
+    //    instead of whatever jump/speed was active, so the PID is actively holding the arm back
+    //    against gravity for the rest of the way down, not coasting under a capped voltage (a
+    //    voltage cap alone can't slow a falling arm -- only a PID chasing a slow, receding target
+    //    can, because it will push back / brake whenever the arm tries to fall faster than that).
+    //    This re-engages on its own every tick, so even a repeated moveTo(DOWN) mid-descent only
+    //    glitches for a single 10 ms tick before the slow walk picks back up from wherever it is.
+    if (goal_ <= config::lift_preset::DOWN && position <= config::lift_preset::DOWN + config::LIFT_SLOW_ZONE_DEG &&
+        speed_ != config::LIFT_SLOW_SPEED_DPS) {
+        speed_ = config::LIFT_SLOW_SPEED_DPS;
+        target_ = position;  // start the slow walk from right here, not from the old setpoint
+    }
+
+    // 4) Walk the setpoint toward the goal for speed-limited moves (including the slow zone above).
     if (speed_ > 0 && target_ != goal_) {
         const double step = speed_ * dt;
         if (std::fabs(goal_ - target_) <= step) target_ = goal_;
         else target_ += goal_ > target_ ? step : -step;
     }
 
-    // 4) PID + gravity feedforward. The P and D terms below are computed the same way lemlib::PID
+    // 5) PID + gravity feedforward. The P and D terms below are computed the same way lemlib::PID
     //    computes them internally (see include/lemlib/pid.hpp: update() takes no dt, so it can't be
     //    doing any time-based scaling -- kP*error and kD*(error-prevError), one call per tick, same
     //    as here). The I term is the exact residual against the real output, so P+I+D+kG always
@@ -187,7 +200,9 @@ void Lift::update() {
     float output = pidOut + config::LIFT_KG;
 
     // Going to the bottom: never let the gravity feedforward push UP (that's what made the lift bounce
-    // at startup). Always ease down, and once it's resting near the hard stop, hold still.
+    // at startup, 17ab865). Once resting near the hard stop, hold still instead of fighting the frame.
+    // The slow-zone walk above (step 3) is what actually controls descent speed near the bottom now --
+    // this just caps the direction, it does not force a minimum downward push the way it used to.
     if (goal_ <= config::lift_preset::DOWN) {
         if (position <= config::lift_preset::DOWN + config::LIFT_REST_BAND_DEG) {
             motors_.brake();
@@ -199,10 +214,10 @@ void Lift::update() {
             lastP_ = lastI_ = lastD_ = 0.0;
             return;
         }
-        output = std::min(output, -config::LIFT_DOWN_MV);
+        output = std::min(output, 0.0f);
     }
 
-    // 5) Output limit (motors only accept -12000..12000 mV).
+    // 6) Output limit (motors only accept -12000..12000 mV).
     output = std::clamp(output, -config::LIFT_MAX_MV, config::LIFT_MAX_MV);
 
     lastError_ = error;
@@ -211,7 +226,7 @@ void Lift::update() {
     lastI_ = iTerm;
     lastD_ = dTerm;
 
-    // 6) Runaway guard: pushing hard one way for a while but moving the other way = direction mismatch.
+    // 7) Runaway guard: pushing hard one way for a while but moving the other way = direction mismatch.
     const int dir = output >= config::LIFT_FAULT_MV ? 1 : output <= -config::LIFT_FAULT_MV ? -1 : 0;
     if (dir == 0 || dir != pushDir_) {
         pushDir_ = dir;
@@ -227,7 +242,7 @@ void Lift::update() {
         pushStartPos_ = position;
     }
 
-    // 7) Stall guard: pushing hard toward a target it can't reach (past the real top, or jammed).
+    // 8) Stall guard: pushing hard toward a target it can't reach (past the real top, or jammed).
     //    Instead of grinding the motors, give up on that target and hold where it is.
     if (std::fabs(error) > 2 * config::LIFT_SETTLE_DEG && std::fabs(output) >= config::LIFT_STALL_MV) {
         if (stallStart_ == 0) {
@@ -248,7 +263,7 @@ void Lift::update() {
 
     motors_.move_voltage(static_cast<int>(output));
 
-    // 8) Settle check: at the final goal and within the band for long enough.
+    // 9) Settle check: at the final goal and within the band for long enough.
     if (target_ != goal_) {
         settle_.reset();  // still walking toward the goal
         settled_ = false;

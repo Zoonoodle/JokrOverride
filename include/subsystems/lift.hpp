@@ -27,8 +27,8 @@
  *
  *   - No target commanded yet (active_ == false, e.g. fresh boot): update()
  *     just brakes every tick. Nothing moves on its own.
- *   - Driver holding L1/L2 (driverPower() nonzero): full manual voltage, PID
- *     target cancelled immediately, no old preset resumes.
+ *   - Driver holding the manual override, D-pad Up/Down (driverPower() nonzero):
+ *     full manual voltage, PID target cancelled immediately, no old preset resumes.
  *   - Driver just let go: back to the "no target" brake-hold above. It does
  *     NOT snap back to whatever preset was active before -- the driver has to
  *     ask for a height again (setTarget()/moveTo()) if they want the PID back.
@@ -39,7 +39,8 @@
  * (rotation sensor reversed, or LIFT_PORTS reversed), the PID pushes the wrong
  * way, the error grows, and it pushes harder -> the lift drives itself into the
  * bottom. The guard sees "pushing hard one way, moving the other way", cuts the
- * power, and shows LIFT FAULT on the brain. Manual L1/L2 still works and clears it.
+ * power, and shows LIFT FAULT on the brain. The manual override still works and
+ * clears it.
  *
  * Stall guard: if the lift pushes hard but can't get there (preset above the
  * real top, or jammed), it gives up on that target, holds where it stopped,
@@ -92,7 +93,7 @@ class Lift {
     void moveTo(double degrees, int timeoutMs = config::LIFT_DEFAULT_TIMEOUT_MS, bool waitUntilSettled = false);
 
     /** Stop chasing whatever target is active and brake-hold right where the lift is. Does not
-     *  resume any previous target later -- same "no old target" rule as releasing L1/L2. */
+     *  resume any previous target later -- same "no old target" rule as releasing the manual override. */
     void cancel();
 
     /** Final target (where the lift is heading). Only meaningful while hasActiveTarget() is true. */
@@ -133,10 +134,10 @@ class Lift {
     double getDTerm() const { return lastD_; }
 
     /**
-     * Driver manual override for L1/L2: -1..1, full send both directions (same feel as plain
+     * Driver manual override, D-pad Up/Down: -1..1, full send both directions (same feel as plain
      * motor power -- no feedforward, no clamping beyond the input range). Non-zero input
      * immediately cancels any active PID target (see class comment). Call with 0 every loop the
-     * driver isn't holding L1/L2.
+     * driver isn't holding the override.
      */
     void driverPower(double input);
 

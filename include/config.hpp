@@ -74,25 +74,30 @@ inline constexpr bool LIFT_ROTATION_REVERSED = false;        // TODO(team): chec
 // degrees in brackets next to the converted arm degrees so this can be checked by hand.
 inline constexpr double LIFT_ROTATION_RATIO = 4.0;           // confirmed: sensor is on the 12T motor axle
 
-// Preset heights, in DEGREES OF THE LIFT ARM. 0 = fully down (where the robot is turned on).
-// How to measure: see README "Tuning the claw positions".
+// Preset heights, in DEGREES OF THE LIFT ARM (what lift.getPosition() returns -- rotation sensor
+// centidegrees already divided by LIFT_ROTATION_RATIO, see the lift gearing note above). 0 = fully
+// down (where the robot is turned on). Measured straight off the brain's LIFT line in 7 reference
+// photos (docs/robot/photos/levels/, 2026-09-30) with the robot powered on and the arm physically
+// moved to each position by hand; see docs/robot/ROBOT.md "Lift levels" for the photo-by-photo readout.
 namespace lift_preset {
-inline constexpr double DOWN = 0.0;                          // resting / start position
-inline constexpr double INTAKE = 5.0;                        // TUNE: claw lined up with the intake handoff (Up)
-inline constexpr double MATCHLOAD = 15.0;                    // TUNE: claw at matchload height (Down with no pin)
+inline constexpr double DOWN = 0.0;                          // resting / start position (IMG_6088 read 0.1, i.e. ~0)
+inline constexpr double INTAKE = 1.1;                        // measured from photo IMG_6089, 2026-09-30
+inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covered by the reference photos yet
 inline constexpr double PIVOT_CLEAR = 25.0;                  // TUNE: lowest height the pivot can flip out without hitting anything
-// Left taps: tap 1 -> level 1, tap 2 -> level 2 ... tap 7 -> level 7. One entry per pin-stack height.
-inline constexpr int STACK_LEVEL_COUNT = 7;
+// L1 taps: tap 1 -> level 1, tap 2 -> level 2 ... tap 5 -> level 5 (stays at 5, the top). One entry
+// per pin-stack height, measured from photos IMG_6090..IMG_6094 (score levels 1-5), 2026-09-30.
+inline constexpr int STACK_LEVEL_COUNT = 5;
 inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
-    20.0,  // TUNE: level 1 (scoring the 1st pin)
-    30.0,  // TUNE: level 2
-    40.0,  // TUNE: level 3
-    50.0,  // TUNE: level 4
-    60.0,  // TUNE: level 5
-    72.0,  // TUNE: level 6
-    85.0,  // TUNE: level 7
+    26.6,   // measured from photo IMG_6090, 2026-09-30 (level 1)
+    54.4,   // measured from photo IMG_6091, 2026-09-30 (level 2)
+    72.8,   // measured from photo IMG_6092, 2026-09-30 (level 3)
+    116.3,  // measured from photo IMG_6093, 2026-09-30 (level 4)
+    128.3,  // measured from photo IMG_6094, 2026-09-30 (level 5, the top)
 };
-inline constexpr double MAX = 105.0;                         // TODO(team): hard stop, never command past this
+// Software hard stop: top level (128.3, IMG_6094) + 5 deg of margin. setTarget()/moveTo() clamp to
+// this, so it also doubles as "never command past here" -- raise it only once a higher level is
+// actually measured and added above, never just to let a bad preset through.
+inline constexpr double MAX = 133.3;
 }  // namespace lift_preset
 
 // Lift PID — TUNE. Units: error in lift degrees, output in millivolts (-12000..12000).
@@ -101,19 +106,32 @@ inline constexpr float LIFT_KI = 0.0f;                       // TUNE (add last, 
 inline constexpr float LIFT_KD = 800.0f;                     // TUNE
 inline constexpr float LIFT_WINDUP_RANGE = 5.0f;             // integral only builds within 5 deg of target
 inline constexpr float LIFT_KG = 1200.0f;                    // TUNE: mV that holds the lift still (gravity feedforward)
-inline constexpr float LIFT_MAX_MV = 12000.0f;               // output limit (also L1/L2 manual power, full send)
+inline constexpr float LIFT_MAX_MV = 12000.0f;               // output limit (also the manual override's full-send power)
 inline constexpr float LIFT_SETTLE_DEG = 1.5f;               // "at target" band
 inline constexpr int LIFT_SETTLE_MS = 150;                   // must stay in band this long
-// Heading to the bottom (target 0): within this many degrees of 0 counts as "resting", motors just hold.
-// Above it the lift is eased down with at least LIFT_DOWN_MV (never pushed up).
+// Heading to the bottom (target 0): within this many degrees of 0 counts as "resting", motors just
+// brake and hold -- see LIFT_SLOW_ZONE_DEG/LIFT_SLOW_SPEED_DPS below for the controlled approach
+// into this band (this is just the final "stop fighting the frame" cutoff, keep it small).
 inline constexpr double LIFT_REST_BAND_DEG = 3.0;
+// Controlled descent into the bottom (Lift::update(), the goal_ <= DOWN branch): once the arm is
+// within LIFT_SLOW_ZONE_DEG of 0, the PID stops chasing whatever target/speed was active and instead
+// walks the setpoint down to 0 at LIFT_SLOW_SPEED_DPS, same mechanism as setTarget(deg, speed). A
+// slow, actively-tracked target is what actually controls fall speed here -- gravity will always
+// beat a plain voltage cap, but it can't beat a PID that pushes back whenever the arm gets ahead of
+// a target that is only creeping down.
+//   Rams into the bottom / still too fast: raise LIFT_SLOW_ZONE_DEG (start the slow walk earlier)
+//   and/or lower LIFT_SLOW_SPEED_DPS.
+//   Takes too long to come down / looks like it's crawling: lower LIFT_SLOW_ZONE_DEG and/or raise
+//   LIFT_SLOW_SPEED_DPS.
+inline constexpr double LIFT_SLOW_ZONE_DEG = 20.0;           // TUNE: start the slow walk this far above 0
+inline constexpr double LIFT_SLOW_SPEED_DPS = 15.0;          // TUNE: arm degrees/sec during the slow walk
 // Stall guard: output over STALL_MV but moved less than STALL_DEG in STALL_MS = can't get there
 // (target above the real top, or jammed). The lift holds where it is and the brain shows BLOCKED.
 inline constexpr float LIFT_STALL_MV = 8000.0f;
 inline constexpr double LIFT_STALL_DEG = 0.5;
 inline constexpr int LIFT_STALL_MS = 700;
-inline constexpr float LIFT_DOWN_MV = 2000.0f;
-// After L2 scores, the arm lowers back to INTAKE at this speed (lift degrees per second). Lower = gentler.
+// After a score, the arm lowers at this speed (lift degrees per second) until it reaches the slow
+// zone above, where LIFT_SLOW_SPEED_DPS takes over for the final approach. Lower = gentler cruise.
 inline constexpr double LIFT_LOWER_SPEED_DEG_PER_S = 40.0;   // TUNE
 // Runaway guard: output over FAULT_MV for FAULT_MS while the lift moves FAULT_DEG the WRONG way
 // = sensor/motor direction mismatch -> cut power, "LIFT FAULT" on the brain, controller rumbles.

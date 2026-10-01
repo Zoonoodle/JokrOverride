@@ -15,7 +15,7 @@ namespace screen {
 struct DriverDebug {
     std::uint32_t loops = 0;  // 0 = opcontrol has not started
     int forward = 0, turn = 0;
-    bool l1 = false, l2 = false;
+    bool up = false, down = false;  // D-pad Up/Down, the lift's manual override
 };
 extern DriverDebug driverDebug;
 /** True once chassis.calibrate() has finished (it runs in the background). */

@@ -44,7 +44,11 @@ bool Scoring::liftArrived(double degrees) const {
 
 double Scoring::levelHeight() const { return preset::STACK_LEVELS[static_cast<std::size_t>(level_ - 1)]; }
 
-double Scoring::heightOf(State s) const { return s == State::MATCHLOAD_POS ? preset::MATCHLOAD : preset::INTAKE; }
+double Scoring::heightOf(State s) const {
+    if (s == State::MATCHLOAD_POS) return preset::MATCHLOAD;
+    if (s == State::IDLE) return preset::DOWN;  // MOVING's destination after an L2 score() -- "go home"
+    return preset::INTAKE;
+}
 
 void Scoring::openClawForPickup() {
     claw_.disarm();
@@ -62,7 +66,7 @@ void Scoring::enter(State next) {
     stateStart_ = pros::millis();
     commanded_ = -1.0;
     switch (next) {
-        case State::IDLE: break;
+        case State::IDLE: level_ = 1; break;  // arrived home after score() lowers to DOWN (reset() sets IDLE directly, without going through enter())
         case State::INTAKE_POS:
         case State::MATCHLOAD_POS:
             command(heightOf(next));
@@ -114,6 +118,15 @@ void Scoring::stepUp() {
             enter(State::CLAMPING);
             break;
     }
+}
+
+void Scoring::score() {
+    // Holding a pin (clamped, or mid-clamp/stacking): open the jaws, then (via the RELEASING case in
+    // update()) pivot in and lower all the way to DOWN, resetting the level for next time. Nothing
+    // held: no matchload fallback here any more (see scoreOrMatchload()) -- just do nothing.
+    if (!(claw_.isClamped() || state_ == State::CLAMPING || state_ == State::STACKING)) return;
+    scoreToHome_ = true;
+    enter(State::RELEASING);
 }
 
 void Scoring::scoreOrMatchload() {
@@ -179,7 +192,7 @@ void Scoring::update() {
                 // Interlock 1: flip out only once the lift clears the intake/drivetrain.
                 if (lift_.getPosition() >= preset::PIVOT_CLEAR) setPivot(true);
             } else {
-                // Level below the pivot clearance (e.g. Right back to level 1): pivot in first, then lower.
+                // Level below the pivot clearance (e.g. resetLevel() back to level 1): pivot in first, then lower.
                 setPivot(false);
                 if (pivotDone()) command(h);
             }
@@ -188,8 +201,14 @@ void Scoring::update() {
 
         case State::RELEASING:
             // Interlock 3: the arm doesn't move until the jaws are open.
-            if (elapsed >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS))
-                moveTo(State::INTAKE_POS, config::LIFT_LOWER_SPEED_DEG_PER_S);
+            if (elapsed >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS)) {
+                if (scoreToHome_) {
+                    scoreToHome_ = false;
+                    moveTo(State::IDLE, config::LIFT_LOWER_SPEED_DEG_PER_S);  // score(): all the way home
+                } else {
+                    moveTo(State::INTAKE_POS, config::LIFT_LOWER_SPEED_DEG_PER_S);  // scoreOrMatchload()
+                }
+            }
             break;
 
         case State::MOVING: {

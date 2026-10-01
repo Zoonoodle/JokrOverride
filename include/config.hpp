@@ -9,7 +9,8 @@
  *
  * Sources (engineering notebook, 2026-27 Override):
  *   - Drivetrain: 55W, 6 wheels, 2.75" omnis, 450 RPM (Best Solution | Drivetrain RPM & Wheel Size)
- *   - Lift: DR6-4B, 2 motors on a high-strength axle, 12T -> 36T (Build | Lift Drive, 9/10/26)
+ *   - Lift: DR6-4B, 2 motors on a high-strength axle, 12T -> 48T (confirmed on the robot, corrects
+ *     an earlier 12T -> 36T note from Build | Lift Drive, 9/10/26)
  *   - Claw: one pneumatic cylinder (Build | Pneumatic Claw, Improve | Claw 9/16/26)
  *   - Intake: three-stage roller intake + bottom counter roller (Season Summary)
  *   - Odometry: LemLib, ONE odometry pod (Best Solution | Odometry, 9/18/26)
@@ -33,12 +34,16 @@ inline constexpr float DRIVE_RPM = 450.0f;                   // notebook: 450 RP
 inline constexpr float TRACK_WIDTH_IN = 11.5f;               // TODO(team): measure wheel-center to wheel-center
 inline constexpr float HORIZONTAL_DRIFT = 2.0f;              // LemLib: 2 for a drive with traction wheels
 
-// Odometry: one vertical tracking wheel pod + inertial sensor.
+// Odometry: one vertical tracking wheel pod. No inertial sensor is on the robot yet.
 inline constexpr int8_t ODOM_VERTICAL_ROTATION_PORT = 7;     // TODO(team): confirm (negative to reverse)
 inline constexpr float ODOM_WHEEL_DIAMETER_IN = 2.0f;        // TODO(team): confirm pod wheel (2" / 2.75")
 inline constexpr float ODOM_VERTICAL_OFFSET_IN = 0.0f;       // TODO(team): measure left/right offset from center
-// WARNING: port 8 is also in RIGHT_DRIVE_PORTS. One device per port - one of these is wrong.
-inline constexpr int8_t IMU_PORT = 8;                        // TODO(team): FIX - conflicts with right drive port 8
+// Inertial sensor: the robot doesn't have one mounted yet (port 8, the old value here, is a right
+// drive motor -- there is no IMU on this robot to conflict with it). 0 = none fitted: robot.cpp
+// builds no pros::Imu at all, LemLib gets a null IMU pointer (its own documented way to run on the
+// tracking wheel alone), nothing calibrates it, and the brain shows "IMU  none" instead of junk.
+// To add one later: set this to the IMU's own port (not a drive port) -- nothing else changes.
+inline constexpr int8_t IMU_PORT = 0;                        // TODO(team): set once an IMU is mounted
 
 // Chassis PID — TUNE. Starting values from the LemLib tutorial, not tuned on JOKR.
 inline constexpr float LATERAL_KP = 10.0f, LATERAL_KI = 0.0f, LATERAL_KD = 3.0f;   // TUNE
@@ -47,32 +52,39 @@ inline constexpr float ANGULAR_KP = 2.0f, ANGULAR_KI = 0.0f, ANGULAR_KD = 10.0f;
 // ---------------------------------------------------------------------------
 // Lift (DR6-4B)
 // ---------------------------------------------------------------------------
-// Two motors on the high-strength drive axle. 12T motor gear -> 36T lift gear.
+// Two motors on the 12T motor axle, geared into the 48T lift-arm axle: 12T -> 48T = 4:1 torque.
+// Everywhere else in the code (presets, PID target/error, lift.getPosition(), the brain screen)
+// works in LIFT-ARM DEGREES -- this ratio is what converts the motor/sensor side of the 4:1 down
+// to that one shared unit. See Lift::getMotorPosition()/getSensorPosition() in subsystems/lift.cpp.
 inline const std::vector<std::int8_t> LIFT_PORTS = {20, -13};             // TODO(team): confirm ports + which side is reversed
-inline constexpr double LIFT_GEAR_RATIO = 36.0 / 12.0;       // notebook: 12T -> 36T = 3:1 torque
-// Rotation sensor on the lift. 0 = none fitted, use the motor encoders instead.
-// When a port is set, the lift PID runs off THIS sensor, not the motor encoders.
+inline constexpr double LIFT_GEAR_RATIO = 48.0 / 12.0;       // confirmed: 12T -> 48T = 4:1 torque
+// Rotation sensor on the lift, mounted on the 12T MOTOR axle (confirmed) -- not the 48T arm axle.
+// 0 = none fitted, use the motor encoders instead. When a port is set, the lift PID runs off THIS
+// sensor, not the motor encoders.
 inline constexpr int8_t LIFT_ROTATION_PORT = 16;
 // DIRECTION CHECK (do this before anything else, see README "Lift direction check"):
-// raise the lift by hand with the robot disabled and watch "rot" on the brain screen.
+// raise the lift by hand with the robot disabled and watch "ROT" on the brain screen.
 // It must go UP (positive). If it goes negative, flip this to true.
 inline constexpr bool LIFT_ROTATION_REVERSED = false;        // TODO(team): check on the robot
-// Sensor degrees per lift-arm degree. 1.0 if the sensor is on the 36T lift axle,
-// 3.0 if it is on the 12T motor axle. The brain shows "rot" and "mot" side by side:
-// raise the lift and they should read about the same. If rot reads ~3x mot, set 3.0.
-inline constexpr double LIFT_ROTATION_RATIO = 1.0;           // TODO(team): check on the robot
+// Sensor degrees per lift-arm degree = the 4:1 above (sensor is on the fast/motor side, so it spins
+// 4 turns for every 1 turn of the arm). At the full ~105 deg of arm travel the sensor itself turns
+// ~420 deg -- more than one full revolution -- so the code reads it with Rotation::get_position()
+// (multi-turn centidegrees, keeps counting past 360) and NEVER get_angle() (wraps at 360 and would
+// make the lift think it jumped positions partway up). The brain's ROT line shows the raw sensor
+// degrees in brackets next to the converted arm degrees so this can be checked by hand.
+inline constexpr double LIFT_ROTATION_RATIO = 4.0;           // confirmed: sensor is on the 12T motor axle
 
 // Preset heights, in DEGREES OF THE LIFT ARM. 0 = fully down (where the robot is turned on).
 // How to measure: see README "Tuning the claw positions".
 namespace lift_preset {
 inline constexpr double DOWN = 0.0;                          // resting / start position
-inline constexpr double INTAKE = 5.0;                        // TUNE: claw lined up with the intake handoff (R1)
-inline constexpr double MATCHLOAD = 15.0;                    // TUNE: claw at matchload height (L2 with no cup)
+inline constexpr double INTAKE = 5.0;                        // TUNE: claw lined up with the intake handoff (Up)
+inline constexpr double MATCHLOAD = 15.0;                    // TUNE: claw at matchload height (Down with no pin)
 inline constexpr double PIVOT_CLEAR = 25.0;                  // TUNE: lowest height the pivot can flip out without hitting anything
-// L1 taps: tap 1 -> level 1, tap 2 -> level 2 ... tap 7 -> level 7. One entry per pin-stack height.
+// Left taps: tap 1 -> level 1, tap 2 -> level 2 ... tap 7 -> level 7. One entry per pin-stack height.
 inline constexpr int STACK_LEVEL_COUNT = 7;
 inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
-    20.0,  // TUNE: level 1 (scoring the 1st cup)
+    20.0,  // TUNE: level 1 (scoring the 1st pin)
     30.0,  // TUNE: level 2
     40.0,  // TUNE: level 3
     50.0,  // TUNE: level 4
@@ -89,11 +101,9 @@ inline constexpr float LIFT_KI = 0.0f;                       // TUNE (add last, 
 inline constexpr float LIFT_KD = 800.0f;                     // TUNE
 inline constexpr float LIFT_WINDUP_RANGE = 5.0f;             // integral only builds within 5 deg of target
 inline constexpr float LIFT_KG = 1200.0f;                    // TUNE: mV that holds the lift still (gravity feedforward)
-inline constexpr float LIFT_MAX_MV = 12000.0f;               // output limit
+inline constexpr float LIFT_MAX_MV = 12000.0f;               // output limit (also L1/L2 manual power, full send)
 inline constexpr float LIFT_SETTLE_DEG = 1.5f;               // "at target" band
 inline constexpr int LIFT_SETTLE_MS = 150;                   // must stay in band this long
-inline constexpr float LIFT_MANUAL_UP_MV = 12000.0f;         // Up arrow: 100% power (12000 mV is the V5 max)
-inline constexpr float LIFT_MANUAL_DOWN_MV = 9000.0f;        // Down arrow power (gravity adds to it)
 // Heading to the bottom (target 0): within this many degrees of 0 counts as "resting", motors just hold.
 // Above it the lift is eased down with at least LIFT_DOWN_MV (never pushed up).
 inline constexpr double LIFT_REST_BAND_DEG = 3.0;
@@ -110,6 +120,9 @@ inline constexpr double LIFT_LOWER_SPEED_DEG_PER_S = 40.0;   // TUNE
 inline constexpr float LIFT_FAULT_MV = 6000.0f;
 inline constexpr int LIFT_FAULT_MS = 300;
 inline constexpr double LIFT_FAULT_DEG = 3.0;
+// Default timeout for lift.moveTo() when the caller doesn't give one (autonomous safety net so a
+// stuck lift can't hang a routine forever). Pass a different value per call, or 0 to wait forever.
+inline constexpr int LIFT_DEFAULT_TIMEOUT_MS = 2000;         // TUNE
 
 // ---------------------------------------------------------------------------
 // Claw (pneumatic) + autoclamp sensor

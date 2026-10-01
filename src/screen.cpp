@@ -2,7 +2,7 @@
 
 #include "config.hpp"
 #include "pros/device.hpp"
-#include "pros/llemu.hpp"
+#include "pros/screen.hpp"
 #include "pros/rtos.hpp"
 #include "robot.hpp"
 
@@ -33,66 +33,103 @@ double hottest(const pros::MotorGroup& group) {
     return t;
 }
 
+// This is a plain-text readout drawn with pros::screen (not the 8-line pros::lcd console) so the
+// lift tuning section below has room without pushing the existing sensor lines off. Lines are
+// pixel rows under the hood, not a fixed console -- there's nothing special about there being more
+// than 8 of them.
 void draw() {
     // 0: odometry pose (tracking wheel + IMU through LemLib)
     const lemlib::Pose pose = chassis.getPose();
-    pros::lcd::print(0, "POSE  X %.1f  Y %.1f  T %.1f", pose.x, pose.y, pose.theta);
+    pros::screen::print(pros::E_TEXT_MEDIUM, 0, "POSE  X %.1f  Y %.1f  T %.1f", pose.x, pose.y, pose.theta);
 
-    // 1: inertial sensor
-    if (const char* p = portProblem(config::IMU_PORT, pros::DeviceType::imu))
-        pros::lcd::print(1, "IMU   %s (port %d)", p, config::IMU_PORT);
-    else if (imu.is_calibrating())
-        pros::lcd::print(1, "IMU   calibrating... keep still");
+    // 1: inertial sensor -- not installed yet (config::IMU_PORT == 0), show that plainly instead of
+    // treating it as a wiring problem. Odometry runs on the tracking wheel alone until one is added.
+    if (!imu)
+        pros::screen::print(pros::E_TEXT_MEDIUM, 1, "IMU   none (not installed)");
+    else if (const char* p = portProblem(config::IMU_PORT, pros::DeviceType::imu))
+        pros::screen::print(pros::E_TEXT_MEDIUM, 1, "IMU   %s (port %d)", p, config::IMU_PORT);
+    else if (imu->is_calibrating())
+        pros::screen::print(pros::E_TEXT_MEDIUM, 1, "IMU   calibrating... keep still");
     else
-        pros::lcd::print(1, "IMU   heading %.1f  rotation %.1f", imu.get_heading(), imu.get_rotation());
+        pros::screen::print(pros::E_TEXT_MEDIUM, 1, "IMU   heading %.1f  rotation %.1f", imu->get_heading(),
+                            imu->get_rotation());
 
     // 2: odometry tracking wheel
     if (const char* p = portProblem(config::ODOM_VERTICAL_ROTATION_PORT, pros::DeviceType::rotation))
-        pros::lcd::print(2, "ODOM  %s (port %d)", p, std::abs(config::ODOM_VERTICAL_ROTATION_PORT));
+        pros::screen::print(pros::E_TEXT_MEDIUM, 2, "ODOM  %s (port %d)", p, std::abs(config::ODOM_VERTICAL_ROTATION_PORT));
     else
-        pros::lcd::print(2, "ODOM  wheel %.1f deg", verticalEncoder.get_position() / 100.0);
+        pros::screen::print(pros::E_TEXT_MEDIUM, 2, "ODOM  wheel %.1f deg", verticalEncoder.get_position() / 100.0);
 
-    // 3: lift position / target / status
-    pros::lcd::print(3, "LIFT  %.1f -> %.1f deg  %s", lift.getPosition(), lift.getTarget(),
-                     lift.isFaulted() ? "LIFT FAULT" : lift.isBlocked() ? "BLOCKED" : lift.isSettled() ? "SETTLED" : "");
-
-    // 4: lift rotation sensor vs motor encoders (direction check: both must go + when the lift goes up)
+    // 3: lift rotation sensor vs motor encoders, both converted to ARM degrees (the unit everything
+    // else -- presets, PID target/error, the LIFT lines below -- uses), with the raw sensor/motor
+    // degrees in brackets so the 4:1 (config::LIFT_ROTATION_RATIO / LIFT_GEAR_RATIO) can be checked
+    // by hand. Direction check: both must go + when the lift goes up (see README).
     if (const char* p = portProblem(config::LIFT_ROTATION_PORT, pros::DeviceType::rotation))
-        pros::lcd::print(4, "ROT   %s (port %d)  mot %.1f", p, std::abs(config::LIFT_ROTATION_PORT),
-                         lift.getMotorPosition());
+        pros::screen::print(pros::E_TEXT_MEDIUM, 3, "ROT   %s (port %d)  mot %.1f", p,
+                            std::abs(config::LIFT_ROTATION_PORT), lift.getMotorPosition());
     else
-        // lift degrees, with the raw sensor/motor degrees in brackets (raw = before any gear ratio)
-        pros::lcd::print(4, "ROT %.1f [%.0f]  MOT %.1f [%.0f]", lift.getSensorPosition(),
-                         lift.getSensorPosition() * config::LIFT_ROTATION_RATIO, lift.getMotorPosition(),
-                         lift.getMotorPosition() * config::LIFT_GEAR_RATIO);
+        // arm degrees, with the raw sensor/motor degrees in brackets (raw = before the 4:1)
+        pros::screen::print(pros::E_TEXT_MEDIUM, 3, "ROT %.1f [%.0f]  MOT %.1f [%.0f]", lift.getSensorPosition(),
+                            lift.getSensorPosition() * config::LIFT_ROTATION_RATIO, lift.getMotorPosition(),
+                            lift.getMotorPosition() * config::LIFT_GEAR_RATIO);
 
-    // 5: claw distance sensor
+    // 4: claw distance sensor
     if (const char* p = portProblem(config::CLAW_DISTANCE_PORT, pros::DeviceType::distance)) {
-        pros::lcd::print(5, "DIST  %s (port %d)", p, config::CLAW_DISTANCE_PORT);
+        pros::screen::print(pros::E_TEXT_MEDIUM, 4, "DIST  %s (port %d)", p, config::CLAW_DISTANCE_PORT);
     } else {
         const int mm = claw.getDistanceMm();
-        if (mm <= 0 || mm >= 9999) pros::lcd::print(5, "DIST  nothing in range");
+        if (mm <= 0 || mm >= 9999) pros::screen::print(pros::E_TEXT_MEDIUM, 4, "DIST  nothing in range");
         else
-            pros::lcd::print(5, "DIST  %d mm  conf %d  %s", mm, claw.getDistanceConfidence(),
-                             mm <= config::CLAW_DETECT_MM ? "PIN" : "");
+            pros::screen::print(pros::E_TEXT_MEDIUM, 4, "DIST  %d mm  conf %d  %s", mm, claw.getDistanceConfidence(),
+                                mm <= config::CLAW_DETECT_MM ? "PIN" : "");
     }
 
-    // 6: driver loop heartbeat. "not started" = opcontrol never ran (not enabled / stuck before it).
-    if (driverDebug.loops == 0)
-        pros::lcd::print(6, "DRV   not started %s", calibrated ? "" : "(calibrating)");
-    else
-        pros::lcd::print(6, "DRV #%u fwd %d trn %d L1 %d L2 %d", static_cast<unsigned>(driverDebug.loops),
-                         driverDebug.forward, driverDebug.turn, driverDebug.l1, driverDebug.l2);
+    // --- Lift tuning section (lines 5-9): everything needed to tune the PID at a glance. ---
 
-    // 7: motor temps (C). Motors start losing power around 55 C.
-    pros::lcd::print(7, "TEMP  L %.0f  R %.0f  lift %.0f  intake %.0f", hottest(leftDrive), hottest(rightDrive),
-                     lift.getTemperature(), intake.getTemperature());
+    // 5: position -> target, which named preset (if any) is active, and settled/blocked/fault status.
+    {
+        char status[12] = "";
+        if (lift.isFaulted()) std::snprintf(status, sizeof(status), "FAULT");
+        else if (lift.isBlocked()) std::snprintf(status, sizeof(status), "BLOCKED");
+        else if (lift.isSettled()) std::snprintf(status, sizeof(status), "SETTLED");
+        if (lift.hasActiveTarget())
+            pros::screen::print(pros::E_TEXT_MEDIUM, 5, "LIFT %.1f -> %.1f  %s  %s", lift.getPosition(),
+                                lift.getTarget(), lift.activePresetName(), status);
+        else
+            pros::screen::print(pros::E_TEXT_MEDIUM, 5, "LIFT %.1f -> none  %s", lift.getPosition(), status);
+    }
+
+    // 6: error and total PID output (mV), so you can see the loop working in real time.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT err %.1f deg   out %.0f mV", lift.getError(), lift.getOutput());
+
+    // 7: P / I / D terms separately (mV each) -- watch these while tuning kP/kD/kI in that order.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 7, "LIFT P %.0f   I %.0f   D %.0f", lift.getPTerm(), lift.getITerm(),
+                        lift.getDTerm());
+
+    // 8: the gains themselves, read straight from config.hpp -- tuning happens in code, not here.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 8, "GAIN kP %.0f  kI %.0f  kD %.0f  kG %.0f", config::LIFT_KP,
+                        config::LIFT_KI, config::LIFT_KD, config::LIFT_KG);
+
+    // 9: lift motor health -- temp (both readouts lose power around 55 C) and current draw.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 9, "LIFT temp %.0fC   current %.0f mA", lift.getTemperature(),
+                        lift.getCurrentDraw());
+
+    // 10: overall motor temps (C), all mechanisms.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 10, "TEMP  L %.0f  R %.0f  lift %.0f  intake %.0f", hottest(leftDrive),
+                        hottest(rightDrive), lift.getTemperature(), intake.getTemperature());
+
+    // 11: driver loop heartbeat. "not started" = opcontrol never ran (not enabled / stuck before it).
+    if (driverDebug.loops == 0)
+        pros::screen::print(pros::E_TEXT_MEDIUM, 11, "DRV   not started %s", calibrated ? "" : "(calibrating)");
+    else
+        pros::screen::print(pros::E_TEXT_MEDIUM, 11, "DRV #%u fwd %d trn %d L1 %d L2 %d",
+                            static_cast<unsigned>(driverDebug.loops), driverDebug.forward, driverDebug.turn,
+                            driverDebug.l1, driverDebug.l2);
 }
 
 }  // namespace
 
 void start() {
-    pros::lcd::initialize();
     static pros::Task task([] {
         while (true) {
             draw();

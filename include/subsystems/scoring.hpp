@@ -1,22 +1,27 @@
 #pragma once
 /**
- * Scoring — owns the lift + claw + pivot sequence so every driver button is
- * one tap and the mechanisms always move in a safe order.
+ * Scoring — the "intake macro": owns the lift + claw + pivot sequence so every driver button is
+ * one tap and the mechanisms always move in a safe order. Every lift move it makes goes through
+ * Lift::setTarget() (the PID), never raw motor power -- see include/subsystems/lift.hpp.
  *
- *   IDLE ──R1──> INTAKE_POS ──L1──> CLAMPING ──(jaws shut)──> STACKING (level 1..7)
- *    │               ^                                          │  L1 = level+1, R2 = level 1
- *    └──L2──> MATCHLOAD_POS ──L1──> (same CLAMPING path)        │
- *                    ^                                          L2
- *                    │                                          v
- *                    └── L2 (no cup) ── MOVING <── (jaws open) RELEASING
+ * Driver buttons (src/main.cpp; L1/L2 are the lift's plain manual override and are NOT part of
+ * this macro -- pressing either cancels it, see main.cpp's opcontrol()):
+ *
+ *   IDLE ──Up───> INTAKE_POS ──Left──> CLAMPING ──(jaws shut)──> STACKING (level 1..7)
+ *    │               ^                                             │  Left = level+1, Right = level 1
+ *    └──Down─> MATCHLOAD_POS ──Left──> (same CLAMPING path)        │
+ *                    ^                                             Down
+ *                    │                                             v
+ *                    └── Down (no pin) ── MOVING <── (jaws open) RELEASING
  *                                         │  pivot in first, then lift down
  *                                         └──> INTAKE_POS (after a score, lowered slowly)
  *
- *   IDLE          power-on state. Nothing moves until the driver presses something.
+ *   IDLE          power-on state, and also where L1/L2 leave it. Nothing moves until the driver
+ *                 presses something (or L1/L2, which bypass this macro entirely).
  *   INTAKE_POS    lift at INTAKE, claw open (autoclamp armed if it's on), pivot ON (PIVOT_ON_AT_INTAKE)
  *   MATCHLOAD_POS lift at MATCHLOAD, claw open (autoclamp armed if it's on), pivot per PIVOT_ON_AT_MATCHLOAD
  *   CLAMPING      jaws closing; waits CLAW_CLOSE_TIME_MS so the lift doesn't pull out of an open claw
- *   STACKING      holding a cup, lift at STACK_LEVELS[level-1]; pivot flips out once above PIVOT_CLEAR
+ *   STACKING      holding a pin, lift at STACK_LEVELS[level-1]; pivot flips out once above PIVOT_CLEAR
  *   RELEASING     jaws opening; waits CLAW_OPEN_TIME_MS before the arm moves
  *   MOVING        pivot back in (if it was out), then lift to the destination (INTAKE or MATCHLOAD)
  *
@@ -24,7 +29,10 @@
  *   1. The pivot only flips out once the lift is above PIVOT_CLEAR (clears the intake and drivetrain).
  *   2. On the way down the pivot flips back in BEFORE the lift moves.
  *   3. The arm never moves away from the goal until the jaws have had time to open.
- *   4. R1 never pulls a held cup back down to the intake.
+ *   4. Up never pulls a held pin back down to the intake.
+ *   5. L1/L2 always win: main.cpp calls reset() whenever either is held, so this macro can never
+ *      re-command the lift out from under a manual nudge (it does not touch the claw or pivot,
+ *      which stay physically where they were).
  *
  * If config::PIVOT_PISTON_PORT is ' ' the pivot steps are skipped.
  */
@@ -44,16 +52,17 @@ class Scoring {
 
     Scoring(Lift& lift, Claw& claw);
 
-    /** Back to IDLE: nothing moves, lift holds where it is. */
+    /** Back to IDLE: nothing moves, lift holds where it is. Also what main.cpp calls whenever the
+     *  driver holds L1/L2, so this macro can't fight the manual override. */
     void reset();
 
-    /** R1: put the claw at the intake handoff (ignored while holding a cup or mid-score). */
+    /** Up: put the claw at the intake handoff (ignored while holding a pin or mid-score). */
     void goToIntake();
-    /** L1: first tap clamps and lifts to level 1; every tap after goes up one level (max 7). */
+    /** Left: first tap clamps and lifts to level 1; every tap after goes up one level (max 7). */
     void stepUp();
-    /** L2: holding a cup -> score (open, then lower slowly). Empty -> go to the matchload position. */
+    /** Down: holding a pin -> score (open, then lower slowly). Empty -> go to the matchload position. */
     void scoreOrMatchload();
-    /** R2: holding a cup -> back to stack level 1. */
+    /** Right: holding a pin -> back to stack level 1. */
     void resetLevel();
     /** Driver: flip the pivot in/out. */
     void togglePivot() { setPivot(!pivotOut_); }

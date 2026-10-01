@@ -44,16 +44,23 @@ photos)**.
 - **Tracking wheel pod** — `ODOM_VERTICAL_ROTATION_PORT = 7`, exposed as
   `robot::verticalEncoder`. One vertical pod only. I could not positively identify the pod
   in any photo. **(unclear from photos)**
-- **Inertial sensor — there is no IMU on the robot.** One is not fitted. `IMU_PORT = 8` in
-  `config.hpp` is simply wrong (and port 8 is a right-drive port anyway). The code already
-  skips IMU calibration when nothing answers on that port (commit `495bb66`) so it cannot
-  stall startup, and calibration runs in a background task so it cannot delay driver control.
-  Until an IMU is actually mounted, treat LemLib heading/odometry as unavailable.
+- **Inertial sensor — there is no IMU on the robot.** One is not fitted. `config.hpp` now sets
+  `IMU_PORT = 0` (it used to be `8`, which was simply wrong -- port 8 is a right-drive port).
+  `robot.cpp` only constructs a `pros::Imu` when `IMU_PORT != 0`; with it at `0`, `robot::imu`
+  is a null `std::unique_ptr`, LemLib's `OdomSensors` gets a null IMU pointer (its own
+  documented way to run on the tracking wheel alone), nothing calibrates it, and the brain
+  screen shows `IMU  none (not installed)` instead of junk. Treat LemLib heading/odometry as
+  tracking-wheel-only until a real IMU is mounted on its own port and `IMU_PORT` is set to it
+  -- that's the only line that needs to change.
 - **Lift rotation sensor** — `LIFT_ROTATION_PORT = 16`. The lift PID runs off this sensor,
   not the motor encoders. **It is mounted on the motored 12T axle**, not on the 48T arm axle,
   so it turns 4× for every degree the arm moves:
-  **arm degrees = sensor degrees ÷ 4**, i.e. `LIFT_ROTATION_RATIO` must be `4.0`.
-  (`config.hpp` still carries the old `1.0` — see the note under "Lift".)
+  **arm degrees = sensor degrees ÷ 4**, i.e. `LIFT_ROTATION_RATIO = 4.0` (`config.hpp` is
+  fixed to this value now -- see the note under "Lift"). The brain's `ROT` line shows the
+  converted arm degrees with the raw sensor degrees in brackets so the 4:1 can be checked by
+  hand, and the lift reads the sensor with `Rotation::get_position()` (multi-turn), not
+  `get_angle()` (wraps at 360°) -- at 4:1 the sensor turns more than a full revolution over
+  the arm's ~105° of travel, so a wrapping read would make the lift think it jumped position.
 - **Claw distance sensor (autoclamp)** — `CLAW_DISTANCE_PORT = 11`, `CLAW_DETECT_MM = 40`.
   `config.hpp` says it is not mounted yet, and I saw nothing at the claw that looks like a
   distance sensor. Autoclamp is off by default (`CLAW_AUTOCLAMP_AT_START = false`).
@@ -106,11 +113,11 @@ drive the 12T axle; **the arm is on the 48T axle**. Red cartridges (commit `505e
 | Lift motors | `config::LIFT_PORTS`, `robot::lift` (`subsystems::Lift`) | `20, -13` (13 reversed) |
 | Lift rotation sensor | `config::LIFT_ROTATION_PORT` (on the 12T motor axle) | `16` |
 
-> **Two values in `config.hpp` describe the old 3:1 build and are wrong for this robot:**
-> `LIFT_GEAR_RATIO` should be `48.0 / 12.0`, and `LIFT_ROTATION_RATIO` should be `4.0`
-> (the sensor is on the motored 12T axle, so it reads 4 sensor degrees per arm degree).
-> Everything downstream — presets, PID gains, the stall and runaway thresholds — is scaled
-> by those two numbers, so fix them before tuning anything.
+> **`config.hpp` is fixed to match this 4:1 build:** `LIFT_GEAR_RATIO = 48.0 / 12.0` and
+> `LIFT_ROTATION_RATIO = 4.0` (the sensor is on the motored 12T axle, so it reads 4 sensor
+> degrees per arm degree). Everything downstream -- presets, PID gains, the stall and
+> runaway thresholds -- is in lift-arm degrees via those two numbers, so re-check this note
+> first if either ratio is ever touched again.
 
 **Down** = the arm folded forward and low over the chassis, end effector near the intake
 handoff in the middle of the robot

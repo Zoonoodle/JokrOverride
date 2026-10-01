@@ -12,7 +12,8 @@ Lift::Lift()
       pid_(config::LIFT_KP, config::LIFT_KI, config::LIFT_KD, config::LIFT_WINDUP_RANGE, true),
       settle_(config::LIFT_SETTLE_DEG, config::LIFT_SETTLE_MS) {
     motors_.set_encoder_units_all(pros::v5::MotorEncoderUnits::degrees);
-    // HOLD keeps the arm from dropping if the loop ever outputs 0.
+    // HOLD keeps the arm from dropping under its own weight whenever update() brakes (idle, or the
+    // driver just let go of L1/L2).
     motors_.set_brake_mode_all(pros::v5::MotorBrake::hold);
     if (config::LIFT_ROTATION_PORT != 0) {
         rotation_ = std::make_unique<pros::Rotation>(config::LIFT_ROTATION_PORT);
@@ -20,14 +21,22 @@ Lift::Lift()
     }
 }
 
+void Lift::resetPid() {
+    pid_.reset();
+    shadowPrevError_ = 0.0;  // kept in lockstep with pid_'s internal prevError, see update()
+}
+
 void Lift::zero() {
     motors_.tare_position_all();
     if (rotation_) rotation_->reset_position();
+    active_ = false;
     goal_ = target_ = 0.0;
     speed_ = 0.0;
     faulted_ = false;
+    blocked_ = false;
     pushStart_ = 0;
-    pid_.reset();
+    stallStart_ = 0;
+    resetPid();
     settle_.reset();
 }
 
@@ -48,64 +57,106 @@ double Lift::getTemperature() const {
     return hottest;
 }
 
+double Lift::getCurrentDraw() const {
+    double highest = 0.0;
+    for (std::int32_t c : motors_.get_current_draw_all()) highest = std::max(highest, static_cast<double>(c));
+    return highest;
+}
+
 double Lift::getPosition() const { return rotation_ ? getSensorPosition() : getMotorPosition(); }
 
 void Lift::setTarget(double degrees, double speedDegPerSec) {
     const double clamped = std::clamp(degrees, config::lift_preset::DOWN, config::lift_preset::MAX);
-    if (clamped == goal_ && speedDegPerSec == speed_) return;
+    if (active_ && clamped == goal_ && speedDegPerSec == speed_) return;
+    active_ = true;
     blocked_ = false;
     stallStart_ = 0;
     goal_ = clamped;
     speed_ = speedDegPerSec;
     // A slow move starts from where the lift actually is, not from the old setpoint.
     target_ = speed_ > 0 ? getPosition() : goal_;
-    pid_.reset();     // old integral/derivative belong to the old target
+    resetPid();       // old integral/derivative belong to the old target
     settle_.reset();  // a new target is not settled yet
     settled_ = false;
 }
 
-void Lift::setDirect(bool on) {
-    if (on == direct_) return;
-    if (!on) {
-        faulted_ = false;
-        setTarget(getPosition());  // PID picks up holding wherever the driver left it
-        pid_.reset();
+void Lift::moveTo(double degrees, int timeoutMs, bool waitUntilSettled) {
+    setTarget(degrees);
+    if (!waitUntilSettled) return;
+    const std::uint32_t start = pros::millis();
+    while (!isSettled() && !isBlocked() && !isFaulted()) {
+        if (timeoutMs > 0 && pros::millis() - start >= static_cast<std::uint32_t>(timeoutMs)) break;
+        pros::delay(10);
     }
-    direct_ = on;
 }
 
-void Lift::move(int power) {
-    if (direct_) motors_.move(power);
+void Lift::cancel() {
+    active_ = false;
+    speed_ = 0.0;
+    blocked_ = false;
+    stallStart_ = 0;
+    settled_ = false;
+    resetPid();
+    settle_.reset();
 }
 
-void Lift::manual(double input) { manualInput_ = std::clamp(input, -1.0, 1.0); }
+const char* Lift::activePresetName() const {
+    if (!active_) return "none";
+    namespace preset = config::lift_preset;
+    if (goal_ == preset::DOWN) return "DOWN";
+    if (goal_ == preset::INTAKE) return "INTAKE";
+    if (goal_ == preset::MATCHLOAD) return "MATCHLOAD";
+    if (goal_ == preset::PIVOT_CLEAR) return "PIVOT_CLEAR";
+    if (goal_ == preset::MAX) return "MAX";
+    static const char* const kLevelNames[preset::STACK_LEVEL_COUNT] = {"STACK 1", "STACK 2", "STACK 3", "STACK 4",
+                                                                        "STACK 5", "STACK 6", "STACK 7"};
+    for (int i = 0; i < preset::STACK_LEVEL_COUNT; ++i)
+        if (goal_ == preset::STACK_LEVELS[i]) return kLevelNames[i];
+    return "custom";
+}
+
+void Lift::driverPower(double input) { manualPower_ = std::clamp(input, -1.0, 1.0); }
 
 void Lift::update() {
-    if (direct_) return;  // driver control: move() owns the motors, nothing else touches them
     const std::uint32_t now = pros::millis();
     const double dt = lastUpdate_ == 0 ? 0.01 : (now - lastUpdate_) / 1000.0;
     lastUpdate_ = now;
     const double position = getPosition();
 
-    // 1) Driver override: raw power, but never past the top stop or below the bottom.
-    //    Also the way out of a fault: manual doesn't trust the PID.
-    if (std::fabs(manualInput_) > 0.05) {
-        double mv;
-        if (manualInput_ > 0) mv = manualInput_ * config::LIFT_MANUAL_UP_MV;                     // Up: full power
-        else mv = manualInput_ * config::LIFT_MANUAL_DOWN_MV + config::LIFT_KG;                  // Down: gravity helps
-        if (position >= config::lift_preset::MAX && manualInput_ > 0) mv = config::LIFT_KG;     // at the top: just hold
-        if (position <= config::lift_preset::DOWN && manualInput_ < 0) mv = 0;                  // at the bottom: stop
-        motors_.move_voltage(static_cast<int>(std::clamp(mv, -12000.0, 12000.0)));
+    // 1) Driver manual override (L1/L2): full send, no feedforward -- same feel as plain motor
+    //    power. This is the ONLY thing allowed to preempt the PID, and it always wins: cancel
+    //    whatever target was active so nothing "fights" the driver, and so release doesn't jump
+    //    back to it either (see class comment).
+    if (std::fabs(manualPower_) > 0.02) {
+        if (active_) cancel();
         wasManual_ = true;
+        const double mv = std::clamp(manualPower_, -1.0, 1.0) * config::LIFT_MAX_MV;
+        motors_.move_voltage(static_cast<int>(mv));
         settled_ = false;
         pushStart_ = 0;
+        lastError_ = 0.0;
+        lastOutput_ = mv;
+        lastP_ = lastI_ = lastD_ = 0.0;
         return;
     }
-    // Driver just let go: hold here instead of snapping back to the old preset.
     if (wasManual_) {
         wasManual_ = false;
-        faulted_ = false;  // driver took over; give the PID another chance
-        setTarget(position);
+        faulted_ = false;  // driver took manual control; give the PID a clean slate next time
+    }
+
+    // 2) No commanded height: brake and hold right here. This is the state at power-on (nothing
+    //    moves until something explicitly calls setTarget()/moveTo()) and right after the driver
+    //    lets go of L1/L2 (no old target resumes).
+    if (!active_) {
+        motors_.brake();
+        settled_ = false;
+        lastError_ = 0.0;
+        lastOutput_ = 0.0;
+        lastP_ = lastI_ = lastD_ = 0.0;
+        pushStart_ = 0;
+        stallStart_ = 0;
+        blocked_ = false;
+        return;
     }
 
     if (faulted_) {
@@ -114,16 +165,26 @@ void Lift::update() {
         return;
     }
 
-    // 2) Walk the setpoint toward the goal for speed-limited moves.
+    // 3) Walk the setpoint toward the goal for speed-limited moves.
     if (speed_ > 0 && target_ != goal_) {
         const double step = speed_ * dt;
         if (std::fabs(goal_ - target_) <= step) target_ = goal_;
         else target_ += goal_ > target_ ? step : -step;
     }
 
-    // 3) PID + gravity feedforward.
+    // 4) PID + gravity feedforward. The P and D terms below are computed the same way lemlib::PID
+    //    computes them internally (see include/lemlib/pid.hpp: update() takes no dt, so it can't be
+    //    doing any time-based scaling -- kP*error and kD*(error-prevError), one call per tick, same
+    //    as here). The I term is the exact residual against the real output, so P+I+D+kG always
+    //    equals the actual output regardless, even if that assumption is ever slightly off. This is
+    //    for the tuning screen only; it never feeds back into control.
     const float error = static_cast<float>(target_ - position);
-    float output = pid_.update(error) + config::LIFT_KG;
+    const float pTerm = config::LIFT_KP * error;
+    const float dTerm = config::LIFT_KD * (error - static_cast<float>(shadowPrevError_));
+    shadowPrevError_ = error;
+    const float pidOut = pid_.update(error);
+    const float iTerm = pidOut - pTerm - dTerm;
+    float output = pidOut + config::LIFT_KG;
 
     // Going to the bottom: never let the gravity feedforward push UP (that's what made the lift bounce
     // at startup). Always ease down, and once it's resting near the hard stop, hold still.
@@ -132,16 +193,25 @@ void Lift::update() {
             motors_.brake();
             settled_ = true;
             pushStart_ = 0;
-            pid_.reset();
+            resetPid();
+            lastError_ = error;
+            lastOutput_ = 0.0;
+            lastP_ = lastI_ = lastD_ = 0.0;
             return;
         }
         output = std::min(output, -config::LIFT_DOWN_MV);
     }
 
-    // 4) Output limit (motors only accept -12000..12000 mV).
+    // 5) Output limit (motors only accept -12000..12000 mV).
     output = std::clamp(output, -config::LIFT_MAX_MV, config::LIFT_MAX_MV);
 
-    // 5) Runaway guard: pushing hard one way for a while but moving the other way = direction mismatch.
+    lastError_ = error;
+    lastOutput_ = output;
+    lastP_ = pTerm;
+    lastI_ = iTerm;
+    lastD_ = dTerm;
+
+    // 6) Runaway guard: pushing hard one way for a while but moving the other way = direction mismatch.
     const int dir = output >= config::LIFT_FAULT_MV ? 1 : output <= -config::LIFT_FAULT_MV ? -1 : 0;
     if (dir == 0 || dir != pushDir_) {
         pushDir_ = dir;
@@ -157,7 +227,7 @@ void Lift::update() {
         pushStartPos_ = position;
     }
 
-    // 6) Stall guard: pushing hard toward a target it can't reach (past the real top, or jammed).
+    // 7) Stall guard: pushing hard toward a target it can't reach (past the real top, or jammed).
     //    Instead of grinding the motors, give up on that target and hold where it is.
     if (std::fabs(error) > 2 * config::LIFT_SETTLE_DEG && std::fabs(output) >= config::LIFT_STALL_MV) {
         if (stallStart_ == 0) {
@@ -178,7 +248,7 @@ void Lift::update() {
 
     motors_.move_voltage(static_cast<int>(output));
 
-    // 7) Settle check: at the final goal and within the band for long enough.
+    // 8) Settle check: at the final goal and within the band for long enough.
     if (target_ != goal_) {
         settle_.reset();  // still walking toward the goal
         settled_ = false;

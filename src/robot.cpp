@@ -13,12 +13,15 @@ pros::MotorGroup rightDrive(config::RIGHT_DRIVE_PORTS, pros::v5::MotorGears::blu
 static lemlib::Drivetrain drivetrain(&leftDrive, &rightDrive, config::TRACK_WIDTH_IN, config::DRIVE_WHEEL_DIAMETER_IN,
                                      config::DRIVE_RPM, config::HORIZONTAL_DRIFT);
 
-// ---- Odometry (notebook: ONE odometry pod + IMU) ----
+// ---- Odometry (notebook: ONE odometry pod; no IMU on the robot yet) ----
 pros::Rotation verticalEncoder(config::ODOM_VERTICAL_ROTATION_PORT);
 static lemlib::TrackingWheel verticalWheel(&verticalEncoder, config::ODOM_WHEEL_DIAMETER_IN,
                                            config::ODOM_VERTICAL_OFFSET_IN);
-pros::Imu imu(config::IMU_PORT);
-static lemlib::OdomSensors sensors(&verticalWheel, nullptr, nullptr, nullptr, &imu);
+// config::IMU_PORT == 0 means no IMU is fitted: build nothing on a (possibly wrong/shared) port,
+// and give LemLib a null IMU pointer, which is its own documented way to run on the tracking
+// wheel alone. Add a real IMU later by setting IMU_PORT -- nothing else here needs to change.
+std::unique_ptr<pros::Imu> imu = config::IMU_PORT != 0 ? std::make_unique<pros::Imu>(config::IMU_PORT) : nullptr;
+static lemlib::OdomSensors sensors(&verticalWheel, nullptr, nullptr, nullptr, imu.get());
 
 // ---- Chassis PID (TUNE) ----
 static lemlib::ControllerSettings lateral(config::LATERAL_KP, config::LATERAL_KI, config::LATERAL_KD,

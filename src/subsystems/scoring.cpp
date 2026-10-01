@@ -89,7 +89,7 @@ void Scoring::reset() {
 }
 
 void Scoring::goToIntake() {
-    // Interlock 4: never drag a held cup back down.
+    // Interlock 4: never drag a held pin back down.
     if (claw_.isClamped()) return;
     if (state_ == State::CLAMPING || state_ == State::STACKING || state_ == State::RELEASING) return;
     if (state_ == State::INTAKE_POS) {
@@ -179,7 +179,7 @@ void Scoring::update() {
                 // Interlock 1: flip out only once the lift clears the intake/drivetrain.
                 if (lift_.getPosition() >= preset::PIVOT_CLEAR) setPivot(true);
             } else {
-                // Level below the pivot clearance (e.g. R2 back to level 1): pivot in first, then lower.
+                // Level below the pivot clearance (e.g. Right back to level 1): pivot in first, then lower.
                 setPivot(false);
                 if (pivotDone()) command(h);
             }

@@ -120,16 +120,19 @@ inline constexpr int LIFT_SETTLE_MS = 150;                   // must stay in ban
 // brake and hold -- see LIFT_SLOW_ZONE_DEG/LIFT_SLOW_SPEED_DPS below for the controlled approach
 // into this band (this is just the final "stop fighting the frame" cutoff, keep it small).
 inline constexpr double LIFT_REST_BAND_DEG = 3.0;
-// Controlled descent into the bottom (Lift::update(), the goal_ <= DOWN branch): once the arm is
-// within LIFT_SLOW_ZONE_DEG of 0, the PID stops chasing whatever target/speed was active and instead
-// walks the setpoint down to 0 at LIFT_SLOW_SPEED_DPS, same mechanism as setTarget(deg, speed). A
-// slow, actively-tracked target is what actually controls fall speed here -- gravity will always
-// beat a plain voltage cap, but it can't beat a PID that pushes back whenever the arm gets ahead of
-// a target that is only creeping down.
-//   Rams into the bottom / still too fast: raise LIFT_SLOW_ZONE_DEG (start the slow walk earlier)
-//   and/or lower LIFT_SLOW_SPEED_DPS.
-//   Takes too long to come down / looks like it's crawling: lower LIFT_SLOW_ZONE_DEG and/or raise
-//   LIFT_SLOW_SPEED_DPS.
+// Controlled descent into the bottom (Lift::update(), the goal_ <= DOWN branch). The WHOLE trip to
+// 0 is profiled, not just the last stretch: the setpoint starts at wherever the arm is when the move
+// is commanded and walks down at LIFT_LOWER_SPEED_DEG_PER_S (the cruise, below), then at
+// LIFT_SLOW_SPEED_DPS for the last LIFT_SLOW_ZONE_DEG. The arm tracks the setpoint, so it is already
+// slow by the time it gets near the frame instead of arriving at full speed with 20 deg left to stop
+// in. A slow, actively-tracked setpoint is the only thing that controls fall speed -- gravity always
+// beats a plain voltage cap, but it can't beat a PID that pushes back (upward, if that is what it
+// takes) whenever the arm gets ahead of a setpoint that is only creeping down. Note the slow zone is
+// measured on the SETPOINT, not the arm, so the handover happens before the arm is in the zone.
+//   Rams into the bottom / still too fast: raise LIFT_SLOW_ZONE_DEG (hand over to the slow walk
+//   earlier), lower LIFT_SLOW_SPEED_DPS, and/or lower LIFT_LOWER_SPEED_DEG_PER_S.
+//   Takes too long to come down / looks like it's crawling: lower LIFT_SLOW_ZONE_DEG, raise
+//   LIFT_SLOW_SPEED_DPS, and/or raise LIFT_LOWER_SPEED_DEG_PER_S.
 inline constexpr double LIFT_SLOW_ZONE_DEG = 20.0;           // TUNE: start the slow walk this far above 0
 inline constexpr double LIFT_SLOW_SPEED_DPS = 15.0;          // TUNE: arm degrees/sec during the slow walk
 // Stall guard: output over STALL_MV but moved less than STALL_DEG in STALL_MS = can't get there
@@ -137,11 +140,20 @@ inline constexpr double LIFT_SLOW_SPEED_DPS = 15.0;          // TUNE: arm degree
 inline constexpr float LIFT_STALL_MV = 8000.0f;
 inline constexpr double LIFT_STALL_DEG = 0.5;
 inline constexpr int LIFT_STALL_MS = 700;
-// After a score, the arm lowers at this speed (lift degrees per second) until it reaches the slow
-// zone above, where LIFT_SLOW_SPEED_DPS takes over for the final approach. Lower = gentler cruise.
+// Descent cruise: the arm lowers at this speed (arm degrees per second) until the setpoint reaches
+// the slow zone above, where LIFT_SLOW_SPEED_DPS takes over for the final approach. Lower = gentler.
+// Every move to DOWN uses it -- the L2 score, the B stow, and auton -- because setTarget() fills it
+// in for any trip to the bottom that asked for a jump (speed 0); nothing free-falls to 0 any more.
+// Free reference: a red 100 RPM motor through the 4:1 is ~150 arm deg/s wide open, so this is the
+// fraction of full speed the descent runs at.
+//   Rams / reaches the slow zone still moving: lower it (and see LIFT_SLOW_* above).
+//   Descent feels sluggish after a score: raise it -- up to ~90 is still well short of free-fall.
 inline constexpr double LIFT_LOWER_SPEED_DEG_PER_S = 40.0;   // TUNE
-// Runaway guard: output over FAULT_MV for FAULT_MS while the lift moves FAULT_DEG the WRONG way
-// = sensor/motor direction mismatch -> cut power, "LIFT FAULT" on the brain, controller rumbles.
+// Runaway guard: output over FAULT_MV, pushing in the direction that SHOULD shrink the error, for
+// FAULT_MS, and |error| ends up FAULT_DEG BIGGER than when that push started = sensor/motor
+// direction mismatch -> cut power, "LIFT FAULT" on the brain, controller rumbles. It deliberately
+// does NOT compare push direction against which way the arm is moving: braking a descending arm
+// pushes up while the arm still moves down, which is correct behaviour, not a runaway.
 inline constexpr float LIFT_FAULT_MV = 6000.0f;
 inline constexpr int LIFT_FAULT_MS = 300;
 inline constexpr double LIFT_FAULT_DEG = 3.0;

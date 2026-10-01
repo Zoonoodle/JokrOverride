@@ -93,15 +93,22 @@ void draw() {
 
     // --- Lift tuning section (lines 6-10): everything needed to tune the PID at a glance. ---
 
-    // 6: position -> target, which named preset (if any) is active, and settled/blocked/fault status.
+    // 6: position -> goal, which named preset (if any) is active, and settled/blocked/fault status.
+    // During a speed-limited move (every descent to DOWN is one) the PID is not chasing the goal yet
+    // but a setpoint walking toward it, so that gets its own "(sp N)" so the two can't be mixed up:
+    //   LIFT 61.4 -> 0.0 (sp 58.2)  DOWN
+    // means "goal is 0, the loop is currently asking for 58.2, the arm is at 61.4 (3.2 deg behind)".
+    // Once the setpoint lands on the goal the "(sp ...)" disappears and the error is the real error.
     {
         char status[12] = "";
         if (lift.isFaulted()) std::snprintf(status, sizeof(status), "FAULT");
         else if (lift.isBlocked()) std::snprintf(status, sizeof(status), "BLOCKED");
         else if (lift.isSettled()) std::snprintf(status, sizeof(status), "SETTLED");
+        char setpoint[16] = "";
+        if (lift.isProfiling()) std::snprintf(setpoint, sizeof(setpoint), "(sp %.1f) ", lift.getSetpoint());
         if (lift.hasActiveTarget())
-            pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT %.1f -> %.1f  %s  %s", lift.getPosition(),
-                                lift.getTarget(), lift.activePresetName(), status);
+            pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT %.1f -> %.1f %s %s %s", lift.getPosition(),
+                                lift.getTarget(), setpoint, lift.activePresetName(), status);
         else
             pros::screen::print(pros::E_TEXT_MEDIUM, 6, "LIFT %.1f -> none  %s", lift.getPosition(), status);
     }

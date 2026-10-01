@@ -99,13 +99,24 @@ double Lift::getPosition() const { return rotation_ ? getSensorPosition() : getM
 
 void Lift::setTarget(double degrees, double speedDegPerSec) {
     const double clamped = std::clamp(degrees, config::lift_preset::DOWN, config::lift_preset::MAX);
-    if (active_ && clamped == goal_ && speedDegPerSec == speed_) return;
+    // A trip to the bottom is ALWAYS profiled, even when the caller asked for a jump (speed 0, e.g.
+    // the B stow button or a bare auton moveTo(DOWN)). A setpoint that jumps straight to 0 means the
+    // arm drops at whatever voltage the PID will give it (~150 arm deg/s wide open) and only starts
+    // being slowed once it is already inside the last LIFT_SLOW_ZONE_DEG -- far too late to stop in.
+    // Filling in the cruise here instead means the setpoint, and therefore the arm, is walking down
+    // at a known speed for the whole trip. The resolved speed (not the raw argument) is what the
+    // "same move, ignore it" check below compares, so a repeated moveTo(DOWN) mid-descent really is
+    // a no-op and can't restart the profile from wherever the arm has got to.
+    const double resolved = clamped <= config::lift_preset::DOWN && speedDegPerSec <= 0.0
+                                ? config::LIFT_LOWER_SPEED_DEG_PER_S
+                                : speedDegPerSec;
+    if (active_ && clamped == goal_ && resolved == speed_) return;
     active_ = true;
     blocked_ = false;
     stallStart_ = 0;
     goal_ = clamped;
-    speed_ = speedDegPerSec;
-    // A slow move starts from where the lift actually is, not from the old setpoint.
+    speed_ = resolved;
+    // A speed-limited move starts from where the lift actually is, not from the old setpoint.
     target_ = speed_ > 0 ? getPosition() : goal_;
     resetPid();       // old integral/derivative belong to the old target
     settle_.reset();  // a new target is not settled yet
@@ -197,22 +208,22 @@ void Lift::update() {
         return;
     }
 
-    // 3) Final stretch down to the bottom: once inside the slow zone, (re)target a slow walk to 0
-    //    instead of whatever jump/speed was active, so the PID is actively holding the arm back
-    //    against gravity for the rest of the way down, not coasting under a capped voltage (a
-    //    voltage cap alone can't slow a falling arm -- only a PID chasing a slow, receding target
-    //    can, because it will push back / brake whenever the arm tries to fall faster than that).
-    //    This re-engages on its own every tick, so even a repeated moveTo(DOWN) mid-descent only
-    //    glitches for a single 10 ms tick before the slow walk picks back up from wherever it is.
-    if (goal_ <= config::lift_preset::DOWN && position <= config::lift_preset::DOWN + config::LIFT_SLOW_ZONE_DEG &&
-        speed_ != config::LIFT_SLOW_SPEED_DPS) {
-        speed_ = config::LIFT_SLOW_SPEED_DPS;
-        target_ = position;  // start the slow walk from right here, not from the old setpoint
-    }
+    // 3) How fast the setpoint is allowed to move this tick. Normally that is just the commanded
+    //    speed_ (setTarget() already guarantees a nonzero one for any trip to the bottom, so the
+    //    whole descent is profiled from wherever the arm was when the move started). The final
+    //    stretch is slower: once the SETPOINT -- not the arm -- is within LIFT_SLOW_ZONE_DEG of 0,
+    //    it creeps the rest of the way at LIFT_SLOW_SPEED_DPS. Testing the setpoint is the point:
+    //    the arm is tracking it, so it has already been decelerating since before it entered the
+    //    zone, instead of showing up at the zone boundary at full speed with 20 deg left to stop in.
+    //    Only this speed changes at the handover -- target_ is never snapped back to the live
+    //    position mid-descent, because that would throw away exactly the lag the PID is correcting.
+    double walkSpeed = speed_;
+    if (goal_ <= config::lift_preset::DOWN && target_ <= config::lift_preset::DOWN + config::LIFT_SLOW_ZONE_DEG)
+        walkSpeed = std::min(walkSpeed, config::LIFT_SLOW_SPEED_DPS);
 
-    // 4) Walk the setpoint toward the goal for speed-limited moves (including the slow zone above).
-    if (speed_ > 0 && target_ != goal_) {
-        const double step = speed_ * dt;
+    // 4) Walk the setpoint toward the goal for speed-limited moves (including the slow walk above).
+    if (walkSpeed > 0 && target_ != goal_) {
+        const double step = walkSpeed * dt;
         if (std::fabs(goal_ - target_) <= step) target_ = goal_;
         else target_ += goal_ > target_ ? step : -step;
     }
@@ -231,22 +242,25 @@ void Lift::update() {
     const float iTerm = pidOut - pTerm - dTerm;
     float output = pidOut + config::LIFT_KG;
 
-    // Going to the bottom: never let the gravity feedforward push UP (that's what made the lift bounce
-    // at startup, 17ab865). Once resting near the hard stop, hold still instead of fighting the frame.
-    // The slow-zone walk above (step 3) is what actually controls descent speed near the bottom now --
-    // this just caps the direction, it does not force a minimum downward push the way it used to.
-    if (goal_ <= config::lift_preset::DOWN) {
-        if (position <= config::lift_preset::DOWN + config::LIFT_REST_BAND_DEG) {
-            motors_.brake();
-            settled_ = true;
-            pushStart_ = 0;
-            resetPid();
-            lastError_ = error;
-            lastOutput_ = 0.0;
-            lastP_ = lastI_ = lastD_ = 0.0;
-            return;
-        }
-        output = std::min(output, 0.0f);
+    // Going to the bottom: inside the rest band, stop controlling altogether and just brake-hold.
+    // That is the one place the gravity feedforward must not be allowed to push UP -- an arm already
+    // sitting on (or held a hair above, by the rubber bands) the hard stop with kG under it is what
+    // made the lift bounce at startup (17ab865), and there is nothing left to control down there
+    // anyway. ABOVE the rest band the output is deliberately NOT clamped downward: pushing up is how
+    // the loop brakes an arm that is falling faster than the setpoint is walking, and the old
+    // `output = std::min(output, 0)` here made that impossible, so the whole descent could only ever
+    // coast -- it arrived at the frame at whatever speed gravity had given it. Which way the bands
+    // and gravity net out at a given height is not known, so the loop is simply allowed to push
+    // either way and let the error decide.
+    if (goal_ <= config::lift_preset::DOWN && position <= config::lift_preset::DOWN + config::LIFT_REST_BAND_DEG) {
+        motors_.brake();
+        settled_ = true;
+        pushStart_ = 0;
+        resetPid();
+        lastError_ = error;
+        lastOutput_ = 0.0;
+        lastP_ = lastI_ = lastD_ = 0.0;
+        return;
     }
 
     // 6) Output limit (motors only accept -12000..12000 mV).
@@ -258,20 +272,27 @@ void Lift::update() {
     lastI_ = iTerm;
     lastD_ = dTerm;
 
-    // 7) Runaway guard: pushing hard one way for a while but moving the other way = direction mismatch.
-    const int dir = output >= config::LIFT_FAULT_MV ? 1 : output <= -config::LIFT_FAULT_MV ? -1 : 0;
+    // 7) Runaway guard: the failure it exists for is a direction mismatch -- rotation sensor or
+    //    LIFT_PORTS reversed, so the loop pushes the wrong way, the error grows, and it pushes
+    //    harder until the lift drives itself into a hard stop. The tell is the ERROR, not the
+    //    motion: push hard in the direction that should shrink the error, and watch whether the
+    //    error shrinks. It must not be "pushing one way while the arm moves the other", which is
+    //    what this used to test -- braking a descending arm is exactly that pattern (output up,
+    //    arm still travelling down) and it is the correct thing to be doing, so a controlled
+    //    descent kept tripping a guard meant for a wiring fault.
+    const int dir = std::fabs(output) >= config::LIFT_FAULT_MV && output * error > 0.0f ? (output > 0 ? 1 : -1) : 0;
     if (dir == 0 || dir != pushDir_) {
         pushDir_ = dir;
         pushStart_ = dir == 0 ? 0 : now;
-        pushStartPos_ = position;
+        pushStartErr_ = std::fabs(error);
     } else if (now - pushStart_ >= static_cast<std::uint32_t>(config::LIFT_FAULT_MS)) {
-        if ((position - pushStartPos_) * dir < -config::LIFT_FAULT_DEG) {
+        if (std::fabs(error) - pushStartErr_ > config::LIFT_FAULT_DEG) {
             faulted_ = true;
             motors_.brake();
             return;
         }
-        pushStart_ = now;  // moving the right way (or stalled): start a new window
-        pushStartPos_ = position;
+        pushStart_ = now;  // error shrinking or holding: start a new window
+        pushStartErr_ = std::fabs(error);
     }
 
     // 8) Stall guard: pushing hard toward a target it can't reach (past the real top, or jammed).

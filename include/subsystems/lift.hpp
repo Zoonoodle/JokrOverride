@@ -38,9 +38,19 @@
  * Runaway guard: if the sensor and the motors disagree on which way is "up"
  * (rotation sensor reversed, or LIFT_PORTS reversed), the PID pushes the wrong
  * way, the error grows, and it pushes harder -> the lift drives itself into the
- * bottom. The guard sees "pushing hard one way, moving the other way", cuts the
- * power, and shows LIFT FAULT on the brain. The manual override still works and
- * clears it.
+ * bottom. The guard sees "pushing hard in the direction that should shrink the
+ * error, and the error grew anyway", cuts the power, and shows LIFT FAULT on the
+ * brain. The manual override still works and clears it. It judges the error, not
+ * the motion, on purpose: pushing up while the arm is still travelling down is
+ * how a controlled descent brakes, and testing motion made it fault on that.
+ *
+ * Lowering to the bottom: every move to DOWN is profiled, so the setpoint leaves
+ * from wherever the arm is and walks down (LIFT_LOWER_SPEED_DEG_PER_S, then
+ * LIFT_SLOW_SPEED_DPS for the last LIFT_SLOW_ZONE_DEG) rather than jumping to 0
+ * and letting the arm free-fall after it. Above LIFT_REST_BAND_DEG the loop may
+ * push either direction -- pushing UP is how it holds the arm back; inside that
+ * band it stops controlling and brake-holds, which is the one spot where the
+ * gravity feedforward must not be able to lift the arm off the stop (17ab865).
  *
  * Stall guard: if the lift pushes hard but can't get there (preset above the
  * real top, or jammed), it gives up on that target, holds where it stopped,
@@ -100,6 +110,13 @@ class Lift {
 
     /** Final target (where the lift is heading). Only meaningful while hasActiveTarget() is true. */
     double getTarget() const { return goal_; }
+    /** The setpoint the PID is actually chasing this tick. For a speed-limited move (every descent
+     *  to DOWN is one) it walks from where the arm was toward getTarget(), so it is NOT the goal
+     *  until the move finishes -- the brain screen shows it separately as "(sp ...)" so the goal and
+     *  the walking setpoint can't be confused for each other. */
+    double getSetpoint() const { return target_; }
+    /** True while the setpoint is still walking toward the goal (a profiled move in progress). */
+    bool isProfiling() const { return active_ && target_ != goal_; }
     /** False when the PID has no commanded height (fresh boot, just cancelled, or driver manual). */
     bool hasActiveTarget() const { return active_; }
     /** Name of the config::lift_preset height the current target matches ("custom" if it doesn't
@@ -187,7 +204,7 @@ class Lift {
     // runaway guard
     bool faulted_ = false;
     std::uint32_t pushStart_ = 0;  // when the output first went over LIFT_FAULT_MV (0 = not pushing)
-    double pushStartPos_ = 0.0;
+    double pushStartErr_ = 0.0;    // |error| when that push started -- the guard faults if it GREW, see update()
     int pushDir_ = 0;
 
     std::unique_ptr<pros::Task> task_;

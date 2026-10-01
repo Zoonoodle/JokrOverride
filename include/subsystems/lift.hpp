@@ -44,11 +44,22 @@
  * the motion, on purpose: pushing up while the arm is still travelling down is
  * how a controlled descent brakes, and testing motion made it fault on that.
  *
- * Lowering to the bottom: every move to DOWN is profiled, so the setpoint leaves
- * from wherever the arm is and walks down -- LIFT_LOWER_START_SPEED_DEG_PER_S,
- * ramping up to LIFT_LOWER_SPEED_DEG_PER_S over the first LIFT_LOWER_RAMP_DEG of
- * travel, then LIFT_SLOW_SPEED_DPS for the last LIFT_SLOW_ZONE_DEG -- rather than
- * jumping to 0 and letting the arm free-fall after it. setDescentFloor() can hold
+ * Speed: an UP move (and any down move that stops well clear of the frame) jumps
+ * the setpoint straight to the goal, so the PID drives the full 12000 mV until it
+ * is within LIFT_MAX_MV/LIFT_KP of the target and then closes in -- that is as
+ * fast as the hardware goes. The manual override is likewise the full 12000 mV.
+ *
+ * Lowering to the bottom: every move to DOWN or INTAKE (anything at or below
+ * config::LIFT_BOTTOM_GOAL_DEG, see headingToBottom()) is profiled instead, so the
+ * setpoint leaves from wherever the arm is and walks down --
+ * LIFT_LOWER_START_SPEED_DEG_PER_S, ramping up to LIFT_LOWER_SPEED_DEG_PER_S over
+ * the first LIFT_LOWER_RAMP_DEG of travel, then LIFT_SLOW_SPEED_DPS for the last
+ * LIFT_SLOW_ZONE_DEG -- rather than jumping to 0 and letting the arm arrive at the
+ * frame at whatever speed it got to. The cruise is ~87% of the arm's free speed,
+ * which only works because a profiled move also gets a VELOCITY FEEDFORWARD
+ * (LIFT_KV * the setpoint's own speed): without it the PID would need a 15-20 deg
+ * tracking error just to drive the arm that fast, and the arm would reach the slow
+ * zone late and still moving. setDescentFloor() can hold
  * the last bit of that walk (Scoring uses it so its pivot has time to retract),
  * but never stops it outright: one continuous curve, mid -> high -> slow -> brake,
  * with no re-target hop. Above LIFT_REST_BAND_DEG the loop may push either
@@ -188,6 +199,12 @@ class Lift {
 
   private:
     void resetPid();
+    /** True when the active goal is low enough to count as "a trip to the bottom" (at or below
+     *  config::LIFT_BOTTOM_GOAL_DEG, i.e. DOWN or INTAKE). Those moves get the profiled descent --
+     *  ramp, cruise, slow zone -- instead of a bare setpoint jump, so nothing can arrive at the frame
+     *  at full speed. Checked in setTarget() (which fills in the cruise speed) and in update() (the
+     *  speed profile and the pivot floor). */
+    bool headingToBottom() const { return goal_ <= config::LIFT_BOTTOM_GOAL_DEG; }
 
     pros::MotorGroup motors_;
     std::unique_ptr<pros::Rotation> rotation_;  // null when no rotation sensor is fitted

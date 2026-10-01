@@ -100,14 +100,18 @@ double Lift::getPosition() const { return rotation_ ? getSensorPosition() : getM
 void Lift::setTarget(double degrees, double speedDegPerSec) {
     const double clamped = std::clamp(degrees, config::lift_preset::DOWN, config::lift_preset::MAX);
     // A trip to the bottom is ALWAYS profiled, even when the caller asked for a jump (speed 0, e.g.
-    // the B stow button or a bare auton moveTo(DOWN)). A setpoint that jumps straight to 0 means the
-    // arm drops at whatever voltage the PID will give it (~150 arm deg/s wide open) and only starts
-    // being slowed once it is already inside the last LIFT_SLOW_ZONE_DEG -- far too late to stop in.
-    // Filling in the cruise here instead means the setpoint, and therefore the arm, is walking down
-    // at a known speed for the whole trip. The resolved speed (not the raw argument) is what the
-    // "same move, ignore it" check below compares, so a repeated moveTo(DOWN) mid-descent really is
-    // a no-op and can't restart the profile from wherever the arm has got to.
-    const double resolved = clamped <= config::lift_preset::DOWN && speedDegPerSec <= 0.0
+    // the B stow button, R1's goToIntake(), or a bare auton moveTo(DOWN)). A setpoint that jumps
+    // straight to the bottom means the arm drops at whatever voltage the PID will give it (12000 mV,
+    // ~150 arm deg/s wide open) and only starts being slowed once it is already inside the last
+    // LIFT_SLOW_ZONE_DEG -- far too late to stop in. Filling in the cruise here instead means the
+    // setpoint, and therefore the arm, is walking down at a known speed for the whole trip. The
+    // resolved speed (not the raw argument) is what the "same move, ignore it" check below compares,
+    // so a repeated moveTo(DOWN) mid-descent really is a no-op and can't restart the profile from
+    // wherever the arm has got to.
+    //   The test is LIFT_BOTTOM_GOAL_DEG, not DOWN exactly: INTAKE (1.1 deg) is mechanically the
+    //   bottom too, and R1 from the top stack level used to be the one unprofiled free-fall left in
+    //   the code because 1.1 > 0 slipped past a `<= DOWN` test.
+    const double resolved = clamped <= config::LIFT_BOTTOM_GOAL_DEG && speedDegPerSec <= 0.0
                                 ? config::LIFT_LOWER_SPEED_DEG_PER_S
                                 : speedDegPerSec;
     if (active_ && clamped == goal_ && resolved == speed_) return;
@@ -213,14 +217,14 @@ void Lift::update() {
     // 3) How fast the setpoint is allowed to move this tick. Normally that is just the commanded
     //    speed_ (setTarget() already guarantees a nonzero one for any trip to the bottom, so the
     //    whole descent is profiled from wherever the arm was when the move started). The final
-    //    stretch is slower: once the SETPOINT -- not the arm -- is within LIFT_SLOW_ZONE_DEG of 0,
+    //    stretch is slower: once the SETPOINT -- not the arm -- is within LIFT_SLOW_ZONE_DEG of the goal,
     //    it creeps the rest of the way at LIFT_SLOW_SPEED_DPS. Testing the setpoint is the point:
     //    the arm is tracking it, so it has already been decelerating since before it entered the
     //    zone, instead of showing up at the zone boundary at full speed with 20 deg left to stop in.
     //    Only this speed changes at the handover -- target_ is never snapped back to the live
     //    position mid-descent, because that would throw away exactly the lag the PID is correcting.
     double walkSpeed = speed_;
-    if (goal_ <= config::lift_preset::DOWN) {
+    if (headingToBottom()) {
         // Ramp-up: don't start a descent at full cruise -- climb linearly from
         // LIFT_LOWER_START_SPEED_DEG_PER_S up to cruise (speed_) over the first LIFT_LOWER_RAMP_DEG of
         // travel from wherever this move began (descentStart_, set once in setTarget()). Measured on
@@ -234,8 +238,9 @@ void Lift::update() {
                             t * (speed_ - config::LIFT_LOWER_START_SPEED_DEG_PER_S);
             }
         }
-        if (target_ <= config::lift_preset::DOWN + config::LIFT_SLOW_ZONE_DEG)
-            walkSpeed = std::min(walkSpeed, config::LIFT_SLOW_SPEED_DPS);
+        // Slow zone, measured from the GOAL (not from 0): a trip to INTAKE gets the same gentle last
+        // stretch as a trip to DOWN, which is the point of LIFT_BOTTOM_GOAL_DEG.
+        if (target_ <= goal_ + config::LIFT_SLOW_ZONE_DEG) walkSpeed = std::min(walkSpeed, config::LIFT_SLOW_SPEED_DPS);
     }
 
     // 4) Walk the setpoint toward the goal for speed-limited moves (including the ramp-up and slow
@@ -243,12 +248,26 @@ void Lift::update() {
     //    the pivot it owns is still retracting -- see setDescentFloor()). This only ever pauses the
     //    LAST bit of an already-moving profile: the floor starts at 0 (no effect) and callers raise
     //    it only once they need it, so it can delay arrival but can never turn into a stop-then-hop.
+    const double prevTarget = target_;
     if (walkSpeed > 0 && target_ != goal_) {
         const double step = walkSpeed * dt;
         if (std::fabs(goal_ - target_) <= step) target_ = goal_;
         else target_ += goal_ > target_ ? step : -step;
     }
-    if (goal_ <= config::lift_preset::DOWN) target_ = std::max(target_, descentFloor_);
+    if (headingToBottom()) target_ = std::max(target_, descentFloor_);
+
+    // 4b) Velocity feedforward for profiled moves. How fast the setpoint ACTUALLY moved this tick
+    //     (after the slow zone, the ramp, arrival at the goal and the pivot floor have all had their
+    //     say) times LIFT_KV, the motors' mV per arm deg/s. This is what lets the descent cruise at
+    //     ~87% of free speed and still be a tracked profile: the feedforward supplies the voltage the
+    //     speed needs, so the PID only has to correct the small leftover error instead of generating
+    //     the whole ~9000 mV out of a 15-20 deg tracking lag. Without it the arm reached the slow
+    //     zone late and fast (the lag), and the growing error during spin-up looked like a runaway.
+    //     Clamped to the walk speed so a floor change or an arrival can never turn into a voltage
+    //     spike, and 0 for a jump move (target_ == goal_ from the first tick, so prevTarget == target_).
+    const double setpointVel =
+        dt > 0.0 ? std::clamp((target_ - prevTarget) / dt, -walkSpeed, walkSpeed) : 0.0;
+    const float vff = static_cast<float>(config::LIFT_KV * setpointVel);
 
     // 5) PID + gravity feedforward. The P and D terms below are computed the same way lemlib::PID
     //    computes them internally (see include/lemlib/pid.hpp: update() takes no dt, so it can't be
@@ -262,9 +281,11 @@ void Lift::update() {
     shadowPrevError_ = error;
     const float pidOut = pid_.update(error);
     const float iTerm = pidOut - pTerm - dTerm;
-    float output = pidOut + config::LIFT_KG;
+    float output = pidOut + config::LIFT_KG + vff;  // vff = velocity feedforward, step 4b above
 
-    // Going to the bottom: inside the rest band, stop controlling altogether and just brake-hold.
+    // Going to DOWN specifically (not just headingToBottom() -- a goal of INTAKE is above the hard
+    // stop, so there is still something to hold there and the PID finishes that move normally):
+    // inside the rest band, stop controlling altogether and just brake-hold.
     // That is the one place the gravity feedforward must not be allowed to push UP -- an arm already
     // sitting on (or held a hair above, by the rubber bands) the hard stop with kG under it is what
     // made the lift bounce at startup (17ab865), and there is nothing left to control down there

@@ -107,10 +107,43 @@ inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
 inline constexpr double MAX = 133.3;
 }  // namespace lift_preset
 
+// ---------------------------------------------------------------------------
+// Lift speed budget — what the hardware can actually do
+// ---------------------------------------------------------------------------
+// Both lift motors are RED (100 RPM) cartridges (see the MotorGears::red in Lift::Lift()). Through
+// the 12T -> 48T (4:1) reduction the ARM's free speed is 100 / 4 = 25 arm RPM = 25 * 360 / 60 =
+// 150 arm deg/s. That number is the ceiling for every speed below; nothing in the code should ask
+// for more than it, and anything far under it is leaving the lift slow on purpose.
+inline constexpr double LIFT_FREE_SPEED_DEG_PER_S = 150.0;   // red 100 RPM / 4:1 = 25 arm RPM = 150 deg/s
+// Volts (mV) per arm deg/s at the motor, i.e. LIFT_MAX_MV / LIFT_FREE_SPEED_DEG_PER_S = 12000/150 = 80.
+// Used as a VELOCITY FEEDFORWARD on profiled (speed-limited) moves: while the setpoint is walking at
+// v deg/s, the loop adds LIFT_KV * v mV so the motors are already turning at roughly the right speed
+// instead of the PID having to build a big tracking error first to get there. Without it, a 130 deg/s
+// descent needs ~-9000 mV, which with kP alone means the arm has to sit ~15-20 deg BELOW the setpoint
+// the whole way down -- a lag that makes the slow zone near the bottom meaningless (the arm arrives
+// there late and fast) and that looks exactly like a runaway to the fault guard. With it, the arm
+// tracks the profile within a couple of degrees at any speed.
+//   Arm lags the setpoint on a fast descent (brain `err` stays several deg negative): raise it.
+//   Arm leads / dives ahead of the setpoint (`err` stays positive going down): lower it.
+inline constexpr float LIFT_KV = 80.0f;                      // TUNE: mV per arm deg/s of setpoint speed
+// Any goal at or below this height counts as "a trip to the bottom": it gets the profiled descent
+// (ramp -> cruise -> slow zone) instead of a bare setpoint jump, so nothing can free-fall into the
+// frame. INTAKE (1.1) is inside it on purpose -- R1 from the top level is a trip to the bottom in
+// every way that matters mechanically. Keep it small; it is a "near the frame" test, not a preset.
+inline constexpr double LIFT_BOTTOM_GOAL_DEG = 5.0;          // TUNE
+
 // Lift PID — TUNE. Units: error in lift degrees, output in millivolts (-12000..12000).
-inline constexpr float LIFT_KP = 300.0f;                     // TUNE
+// kP sizing: an UP move jumps the setpoint straight to the preset, so the PID is what decides how
+// fast it gets there. Output saturates at 12000 mV while |error| > LIFT_MAX_MV/kP = 20 deg, so the
+// arm runs wide open for all but the last 20 deg and then closes in at roughly kP/(LIFT_KV + kD/100)
+// deg/s per deg of error = 600/92 ~ 6.5x error, i.e. ~65 deg/s with 10 deg to go, ~13 deg/s with 2.
+// At the old kP = 300 that approach was half as fast and was most of the time a preset move took.
+//   Overshoots / bounces at a preset: raise LIFT_KD first (it only resists fast error changes, it
+//   barely slows the approach), then back kP off toward 450.
+//   Still sluggish arriving at a preset: raise kP (700-800), keeping kD at about 2x kP.
+inline constexpr float LIFT_KP = 600.0f;                     // TUNE: was 300, doubled for snappier arrivals
 inline constexpr float LIFT_KI = 0.0f;                       // TUNE (add last, only if it stalls short)
-inline constexpr float LIFT_KD = 800.0f;                     // TUNE
+inline constexpr float LIFT_KD = 1200.0f;                    // TUNE: was 800, raised with kP to damp the faster approach
 inline constexpr float LIFT_WINDUP_RANGE = 5.0f;             // integral only builds within 5 deg of target
 inline constexpr float LIFT_KG = 1200.0f;                    // TUNE: mV that holds the lift still (gravity feedforward)
 inline constexpr float LIFT_MAX_MV = 12000.0f;               // output limit (also the manual override's full-send power)
@@ -120,7 +153,8 @@ inline constexpr int LIFT_SETTLE_MS = 150;                   // must stay in ban
 // brake and hold -- see LIFT_SLOW_ZONE_DEG/LIFT_SLOW_SPEED_DPS below for the controlled approach
 // into this band (this is just the final "stop fighting the frame" cutoff, keep it small).
 inline constexpr double LIFT_REST_BAND_DEG = 3.0;
-// Controlled descent into the bottom (Lift::update(), the goal_ <= DOWN branch). The WHOLE trip to
+// Controlled descent into the bottom (Lift::update(), the headingToBottom() branch -- any goal at or
+// below LIFT_BOTTOM_GOAL_DEG, which is DOWN and INTAKE). The WHOLE trip to
 // 0 is profiled, not just the last stretch: the setpoint starts at wherever the arm is when the move
 // is commanded and walks down at LIFT_LOWER_SPEED_DEG_PER_S (the cruise, below), then at
 // LIFT_SLOW_SPEED_DPS for the last LIFT_SLOW_ZONE_DEG. The arm tracks the setpoint, so it is already
@@ -133,10 +167,25 @@ inline constexpr double LIFT_REST_BAND_DEG = 3.0;
 //   earlier), lower LIFT_SLOW_SPEED_DPS, and/or lower LIFT_LOWER_SPEED_DEG_PER_S.
 //   Takes too long to come down / looks like it's crawling: lower LIFT_SLOW_ZONE_DEG, raise
 //   LIFT_SLOW_SPEED_DPS, and/or raise LIFT_LOWER_SPEED_DEG_PER_S.
-inline constexpr double LIFT_SLOW_ZONE_DEG = 20.0;           // TUNE: start the slow walk this far above 0
-inline constexpr double LIFT_SLOW_SPEED_DPS = 15.0;          // TUNE: arm degrees/sec during the slow walk
+// SIZING (why 25, not 20 or 5): the slow zone has to be at least the arm's stopping distance from
+// cruise, or the arm is still travelling fast when the setpoint runs out of room. Decelerating from
+// LIFT_LOWER_SPEED_DEG_PER_S = 130 deg/s with the full 12000 mV of upward authority plus the rubber
+// bands takes roughly 0.2 s, so v^2/(2a) with a ~ 650 deg/s^2 is ~13 deg of travel; add ~10 deg for
+// the couple of ticks of tracking lag the arm still carries at cruise even with LIFT_KV, and round
+// up: 25 deg. The last 25 deg then walks at LIFT_SLOW_SPEED_DPS = 35 deg/s (0.7 s) instead of the
+// old 15 (1.3 s), and the arm is down to ~20 deg/s by the time it reaches LIFT_REST_BAND_DEG and
+// brake-holds -- a tap, not a slam.
+//   Taps/bangs the frame at the bottom: lower LIFT_SLOW_SPEED_DPS (toward 20) first, then raise
+//   LIFT_SLOW_ZONE_DEG, then raise LIFT_REST_BAND_DEG (brake-hold starts higher).
+//   Crawls the last bit: raise LIFT_SLOW_SPEED_DPS, lower LIFT_SLOW_ZONE_DEG.
+inline constexpr double LIFT_SLOW_ZONE_DEG = 25.0;           // TUNE: start the slow walk this far above the goal
+inline constexpr double LIFT_SLOW_SPEED_DPS = 35.0;          // TUNE: arm degrees/sec during the slow walk
 // Stall guard: output over STALL_MV but moved less than STALL_DEG in STALL_MS = can't get there
 // (target above the real top, or jammed). The lift holds where it is and the brain shows BLOCKED.
+// UNCHANGED at the new speeds, on purpose: it only arms when the arm is barely moving (less than
+// LIFT_STALL_DEG = 0.5 deg of travel in a whole LIFT_STALL_MS window), and a normal full-speed move
+// covers 1.3 deg per 10 ms tick, so it re-arms every single tick and can never time out. Making the
+// lift faster makes this guard harder to false-trip, not easier.
 inline constexpr float LIFT_STALL_MV = 8000.0f;
 inline constexpr double LIFT_STALL_DEG = 0.5;
 inline constexpr int LIFT_STALL_MS = 700;
@@ -144,11 +193,15 @@ inline constexpr int LIFT_STALL_MS = 700;
 // the slow zone above, where LIFT_SLOW_SPEED_DPS takes over for the final approach. Lower = gentler.
 // Every move to DOWN uses it -- the L2 score, the B stow, and auton -- because setTarget() fills it
 // in for any trip to the bottom that asked for a jump (speed 0); nothing free-falls to 0 any more.
-// Free reference: a red 100 RPM motor through the 4:1 is ~150 arm deg/s wide open, so this is the
-// fraction of full speed the descent runs at.
+// It is deliberately close to LIFT_FREE_SPEED_DEG_PER_S (150): 130 deg/s is ~87% of what the arm can
+// physically do, which is as fast as a *controlled* descent can be while leaving the loop headroom to
+// brake. Note the arm will NOT fall this fast on its own -- with the motors braking, gravity against
+// back-EMF only drops it at ~15 deg/s -- so this is a driven descent, which is exactly why LIFT_KV
+// exists (see it above). A full descent from the top level (128.3) is now ~1.5 s, not ~4 s.
 //   Rams / reaches the slow zone still moving: lower it (and see LIFT_SLOW_* above).
-//   Descent feels sluggish after a score: raise it -- up to ~90 is still well short of free-fall.
-inline constexpr double LIFT_LOWER_SPEED_DEG_PER_S = 40.0;   // TUNE
+//   Descent still feels sluggish: raise it toward 150, the arm's free speed. Above that is pointless;
+//   the motors cannot turn faster, so the setpoint would just run away from the arm.
+inline constexpr double LIFT_LOWER_SPEED_DEG_PER_S = 130.0;  // TUNE: was 40 (~27% of free speed)
 // Descent ramp-up: the profiled trip to DOWN above doesn't start at full cruise (LIFT_LOWER_SPEED_DEG_PER_S)
 // the instant it's commanded -- it starts at this slower "mid" speed and climbs LINEARLY up to cruise
 // over the first LIFT_LOWER_RAMP_DEG of travel measured from wherever the move began (Lift::update(),
@@ -157,18 +210,32 @@ inline constexpr double LIFT_LOWER_SPEED_DEG_PER_S = 40.0;   // TUNE
 // LIFT_SLOW_SPEED_DPS above) takes over -- one continuous speed curve, mid -> high -> slow -> brake,
 // with no stop or re-target in between (Scoring's pivot-retract floor on the walking setpoint, see
 // Lift::setDescentFloor(), can briefly hold the LAST bit of that curve, never the ramp itself).
-//   Leaves the top too slowly / looks sluggish at the start: raise LIFT_LOWER_START_SPEED_DEG_PER_S.
-//   Snaps too hard into cruise: raise LIFT_LOWER_RAMP_DEG (ramps over more distance).
-inline constexpr double LIFT_LOWER_START_SPEED_DEG_PER_S = 20.0;  // TUNE: starting ("mid") speed, deg/s
-inline constexpr double LIFT_LOWER_RAMP_DEG = 15.0;               // TUNE: deg of travel to reach cruise
+// The ramp is now only a few degrees long on purpose: its job is to take the jerk out of the first
+// tick, not to be a slow phase of its own. 80 deg/s start over 5 deg of travel means cruise is
+// reached in well under a tenth of a second.
+//   Leaves the top too slowly / looks sluggish at the start: raise LIFT_LOWER_START_SPEED_DEG_PER_S
+//   (up to the cruise speed, which removes the ramp entirely) or lower LIFT_LOWER_RAMP_DEG.
+//   Snaps/jerks too hard at the start of a descent: raise LIFT_LOWER_RAMP_DEG (ramps over more
+//   distance) or lower LIFT_LOWER_START_SPEED_DEG_PER_S.
+inline constexpr double LIFT_LOWER_START_SPEED_DEG_PER_S = 80.0;  // TUNE: was 20. Starting ("mid") speed, deg/s
+inline constexpr double LIFT_LOWER_RAMP_DEG = 5.0;                // TUNE: was 15. Deg of travel to reach cruise
 // Runaway guard: output over FAULT_MV, pushing in the direction that SHOULD shrink the error, for
 // FAULT_MS, and |error| ends up FAULT_DEG BIGGER than when that push started = sensor/motor
 // direction mismatch -> cut power, "LIFT FAULT" on the brain, controller rumbles. It deliberately
 // does NOT compare push direction against which way the arm is moving: braking a descending arm
 // pushes up while the arm still moves down, which is correct behaviour, not a runaway.
+// FAULT_DEG had to grow with the speeds. At the old 40 deg/s descent the loop only ever asked for
+// ~2000 mV, below LIFT_FAULT_MV, so the guard was never even armed while lowering. A 130 deg/s
+// descent is driven at ~9000-12000 mV, so it IS armed for the whole trip, and the few degrees of
+// tracking error the arm legitimately builds while it accelerates would have tripped a 3 deg
+// threshold. 10 deg is comfortably above any legitimate transient (LIFT_KV keeps steady-state
+// tracking inside ~2 deg) and still far below what a real wiring reversal does: a runaway arm moves
+// at 130+ deg/s in the wrong direction, so it blows past 10 deg of error growth in under 100 ms,
+// well inside the 300 ms window.
+//   LIFT FAULT on a normal fast move: raise LIFT_FAULT_DEG (and check LIFT_KV isn't too low).
 inline constexpr float LIFT_FAULT_MV = 6000.0f;
 inline constexpr int LIFT_FAULT_MS = 300;
-inline constexpr double LIFT_FAULT_DEG = 3.0;
+inline constexpr double LIFT_FAULT_DEG = 10.0;               // TUNE: was 3, too tight for a 130 deg/s descent
 // Default timeout for lift.moveTo() when the caller doesn't give one (autonomous safety net so a
 // stuck lift can't hang a routine forever). Pass a different value per call, or 0 to wait forever.
 inline constexpr int LIFT_DEFAULT_TIMEOUT_MS = 2000;         // TUNE

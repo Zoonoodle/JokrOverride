@@ -9,16 +9,25 @@
  *
  * State machine:
  *
- *   OPEN ──(arm)──> ARMED ──(pin seen for DEBOUNCE ms)──> CLAMPED
- *     ^               ^                                     │
- *     │               └──(lockout over)── RELEASED <──(release)┘
- *     └──(disarm)──────────────────────────────────────────────
+ *   CLOSED ──(open / arm / R1)──> OPEN ──(arm)──> ARMED ──(pin seen for DEBOUNCE ms)──> CLAMPED
+ *     (power-on)                    ^               ^                                     │
+ *                                   │               └──(lockout over)── RELEASED <──(release)┘
+ *                                   └──(disarm)──────────────────────────────────────────────
  *
+ *   CLOSED   jaws shut because that is the cylinder's unpowered position, i.e. where the claw is
+ *            at power-on. Nothing is known to be in the jaws, so it does NOT count as clamped:
+ *            R1 may open it and go to the intake (interlock 4 in scoring.hpp is about a pin the
+ *            code grabbed, not the power-on state). A is the way to open it by hand.
  *   OPEN     jaws open, autoclamp off (driver in full manual control)
  *   ARMED    jaws open, watching the sensor
- *   CLAMPED  jaws closed on a pin
+ *   CLAMPED  jaws closed on a pin (L1, A, or the autoclamp)
  *   RELEASED jaws just opened; autoclamp is locked out for RELEASE_LOCKOUT ms
  *            so the pin we just let go of is not grabbed again, then -> ARMED
+ *
+ * Which ADI level closes the jaws is config::CLAW_CLOSED_IS_ADI_HIGH (false on this robot: the
+ * unpowered LOW level is closed). At power-on the pin is written to the level it already sits at,
+ * so nothing moves at startup; the brain's CLAW line shows the state and the raw level so A can be
+ * used to confirm the constant.
  */
 
 #include "pros/adi.hpp"
@@ -30,11 +39,11 @@ namespace subsystems {
 
 class Claw {
   public:
-    enum class State { OPEN, ARMED, CLAMPED, RELEASED };
+    enum class State { CLOSED, OPEN, ARMED, CLAMPED, RELEASED };
 
     Claw();
 
-    /** Turn autoclamp on (OPEN -> ARMED). */
+    /** Turn autoclamp on (CLOSED/OPEN -> ARMED, jaws open). */
     void arm();
     /** Turn autoclamp off; the jaws open and stay open (-> OPEN). */
     void disarm();
@@ -42,14 +51,19 @@ class Claw {
     void clamp();
     /** Open the jaws (CLAMPED -> RELEASED, starts the lockout). */
     void release();
-    /** One button for the driver: clamp if open, release if clamped. */
+    /** One button for the driver: open if shut (CLOSED or CLAMPED), clamp if open. */
     void toggle();
 
     /** Run one step of the state machine. Call every loop (10 ms). */
     void update();
 
     State getState() const { return state_; }
+    /** True when the jaws were closed ON PURPOSE (L1 / A / autoclamp): a pin is presumed held. */
     bool isClamped() const { return state_ == State::CLAMPED; }
+    /** True whenever the jaws are physically shut, including the power-on CLOSED state. */
+    bool isClosed() const { return state_ == State::CLAMPED || state_ == State::CLOSED; }
+    /** The raw level the claw's ADI pin is currently driven to (for the brain's CLAW line). */
+    bool adiHigh() const { return levelFor(isClosed()); }
     /** True if the sensor currently sees something between the jaws. */
     bool seesPin();
     /** Raw distance sensor reading in mm (large value / error when nothing is in range or it's unplugged). */
@@ -59,10 +73,11 @@ class Claw {
 
   private:
     void setJaws(bool closed);
+    static bool levelFor(bool closed);
 
-    pros::adi::Pneumatics piston_;
+    pros::adi::DigitalOut piston_;
     pros::Distance sensor_;
-    State state_ = State::OPEN;
+    State state_ = State::CLOSED;    // unpowered = closed, see the class comment
     std::uint32_t seenSince_ = 0;    // when the pin was first seen (0 = not seen)
     std::uint32_t releasedAt_ = 0;   // when the jaws were last opened
 };

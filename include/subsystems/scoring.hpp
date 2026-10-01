@@ -24,7 +24,7 @@
  *                 scoreOrMatchload() still reaches it for auton or a future button.
  *   CLAMPING      jaws closing; waits CLAW_CLOSE_TIME_MS so the lift doesn't pull out of an open claw
  *   STACKING      holding a pin, lift at STACK_LEVELS[level-1], pivot OUT (it swings OUT once the arm
- *                 is PIVOT_OUT_CLEARANCE_DEG above the INTAKE handoff, or has arrived -- see below)
+ *                 has risen out of the handoff zone, INTAKE + PIVOT_HANDOFF_ZONE_DEG, or has arrived)
  *   RELEASING     L2/score(): claw opens and the lift's own descent to DOWN starts the instant this
  *                 state is entered -- one continuous motion, no waits. The pivot is already OUT at
  *                 every stack level and OUT is the default down position, so it does not move (if
@@ -32,9 +32,12 @@
  *                 Settles into IDLE once the arm actually arrives at 0.
  *                 scoreOrMatchload() (not on a button) still uses the older CLAW_OPEN_TIME_MS wait
  *                 then a move to INTAKE_POS, unchanged.
- *   MOVING        scoreOrMatchload()/goTo*() only: pivot OUT (its travel position) and, once it has
- *                 had PIVOT_TIME_MS to get there if it did move, lift to the destination -- INTAKE or
- *                 MATCHLOAD, see heightOf().
+ *   MOVING        scoreOrMatchload()/goTo*() only: claw open, lift to the destination -- INTAKE or
+ *                 MATCHLOAD, see heightOf() -- with the pivot placed by height every tick: heading to
+ *                 the intake it is BACK inside the handoff zone and OUT above it, so it swings BACK as
+ *                 the arm comes down into the zone; heading elsewhere it is OUT. A swing that starts
+ *                 up at a level gets PIVOT_TIME_MS before the lift moves; a swing inside the zone
+ *                 never holds the lift.
  *
  * THE PIVOT, in the driver's words: OUT (code: true) = swung out, where it sits at power-on, at every
  * stack level while scoring, and in the default down position after L2 / B. BACK (code: false) =
@@ -45,16 +48,21 @@
  *
  * Interlocks:
  *   1. The arm never leaves the handoff until the jaws have had CLAW_CLOSE_TIME_MS to shut (CLAMPING).
- *   2. On the way up from the handoff the pivot swings BACK -> OUT only once the arm is
- *      PIVOT_OUT_CLEARANCE_DEG above lift_preset::INTAKE (or has arrived at the level, whichever is
- *      first -- it can never leave a level waiting). This is a delay on the swing, never a gate on the
- *      lift: the lift starts rising the same tick CLAMPING ends. It replaces the old PIVOT_CLEAR
- *      interlock and L2 descent floor, which were written for the opposite pivot meaning and would
- *      have forbidden the very positions the driver wants (pivot BACK near the bottom at INTAKE, OUT
- *      at the bottom after L2). There is no height at which the pivot is forbidden to be OUT or BACK.
+ *   2. The handoff zone (lift_preset::INTAKE up to INTAKE + PIVOT_HANDOFF_ZONE_DEG) times the pivot:
+ *      heading to or at the intake it is BACK inside the zone and OUT above it, so on R1 it swings
+ *      BACK as the arm comes down into the zone and on L1 it swings OUT as the arm rises out of it (or
+ *      when the arm arrives at the level, whichever is first -- it can never leave a level waiting).
+ *      This only times the swing, it never gates the lift: the lift starts rising the same tick
+ *      CLAMPING ends. It replaces the old PIVOT_CLEAR interlock and L2 descent floor, which were
+ *      written for the opposite pivot meaning and would have forbidden the very positions the driver
+ *      wants (pivot BACK near the bottom at INTAKE, OUT at the bottom after L2). There is no height at
+ *      which the pivot is forbidden to be OUT or BACK.
  *   3. The arm never moves away from the goal until the jaws have had time to open -- scoreOrMatchload()
  *      only; L2's score() deliberately starts the descent in the same tick the jaws open, per spec.
- *   4. R1 never pulls a held pin back down to the intake.
+ *   4. R1 never pulls a held pin back down to the intake: it is a no-op while the claw is CLAMPED
+ *      (shut by L1, A or the autoclamp). The power-on CLOSED state is NOT clamped -- the jaws are shut
+ *      only because that is the cylinder's unpowered position -- so R1 straight after power-on opens
+ *      them and goes to the intake. Starting a match with a pin in the claw: press L1, not R1.
  *   5. The manual override always wins: main.cpp calls reset() whenever D-pad Up/Down is held, so
  *      this macro can never re-command the lift out from under a manual nudge (it does not touch
  *      the claw or pivot, which stay physically where they were).
@@ -137,6 +145,8 @@ class Scoring {
     void openClawForPickup();
     void moveTo(State destination);
     void command(double degrees, bool precise = false);
+    /** True while the arm is inside the handoff zone, INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG. */
+    bool inHandoffZone() const;
     bool pivotDone() const;
     bool liftArrived(double degrees) const;
     double levelHeight() const;

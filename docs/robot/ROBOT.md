@@ -219,17 +219,22 @@ I still could not count the cylinders on the end effector itself from these angl
 | Pivot cylinder | `config::PIVOT_PISTON_PORT` (owned by `subsystems::Scoring`) | ADI **D** |
 | Claw distance sensor | `config::CLAW_DISTANCE_PORT` (not mounted yet) | `11` |
 
-- **Claw**: one pneumatic cylinder, driver button **A** toggles clamp/open.
-  `CLAW_EXTENDED_IS_CLOSED = true` is a TODO — confirm that extending the cylinder actually
-  closes the jaws before trusting any autonomous grab.
+- **Claw**: one pneumatic cylinder, driver button **A** toggles open/clamp. The jaws are shut
+  when the cylinder is unpowered, so the claw is physically closed at power-on and at the ADI's
+  LOW level: `CLAW_CLOSED_IS_ADI_HIGH = false` (observed 2026-10-01 -- the old
+  `CLAW_EXTENDED_IS_CLOSED = true` had it backwards; TODO: confirm with A on the brain's `CLAW`
+  line, which shows `CLOSED[0]` at power-on). The power-on `CLOSED` state is not `CLAMPED`, so R1
+  may open the jaws and go to the intake.
 - **Pivot**: a second cylinder that swings the end effector **OUT** and **BACK**, driver button
   **X**. OUT (`true` in code) = swung out: where it sits at power-on, at every stack level while
   scoring, and in the default down position after L2 / B. BACK (`false`) = pulled in toward the
   intake handoff, only at INTAKE (R1). At power-on the ADI pin is LOW and the pivot is OUT, so
   `PIVOT_OUT_IS_ADI_HIGH = false` (TODO: confirm with X; the brain's `CLAW` line shows
   `PIV OUT[0]`/`PIV BACK[1]`). `PIVOT_BACK_AT_MATCHLOAD = false` (TODO). The only height tied to
-  the pivot is `PIVOT_OUT_CLEARANCE_DEG`: during the L1 rise out of the handoff it swings OUT once
-  the arm is that far above `INTAKE` (or has arrived at the level). It never gates the lift.
+  the pivot is the handoff zone, `INTAKE` to `INTAKE + PIVOT_HANDOFF_ZONE_DEG`: heading to or at
+  the intake the pivot is BACK inside it and OUT above it, so it swings BACK as R1 brings the arm
+  down into the zone and OUT as L1 lifts it out (or when the arm arrives at the level). It never
+  gates the lift.
 - Timing knobs: `PIVOT_TIME_MS = 250`, `CLAW_CLOSE_TIME_MS = 100`, `CLAW_OPEN_TIME_MS = 200`.
 
 ## Game elements: the pin and the cup

@@ -93,17 +93,17 @@ void draw() {
                             lift.getStartupAngle(), home);
     }
 
-    // 5: CLAW is the claw's own state (OPEN/ARMED/CLAMPED/RELEASED), the pivot (OUT/BACK, with the raw
-    // ADI level in brackets so config::PIVOT_OUT_IS_ADI_HIGH can be confirmed with X: if the word says
-    // OUT but the pivot physically went BACK, flip that constant), and the intake macro's state and
-    // stack level. Without this line there was no way to see that the jaws were still CLAMPED, or that
-    // the macro was parked in STACKING -- and both of those silently change what R1 and L2 do
-    // (interlock 4 makes R1 a no-op while a pin is held, and a claw left clamped by B or the manual
-    // override is what made L2 fire the jaws at the bottom). If a button seems to do nothing, read
-    // this line first.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 5, "CLAW %s  PIV %s[%d]  MACRO %s L%d", claw.stateName(),
-                        scoring.isPivotOut() ? "OUT" : "BACK", scoring.pivotAdiHigh() ? 1 : 0, scoring.stateName(),
-                        scoring.getLevel());
+    // 5: CLAW is the claw's own state (CLOSED/OPEN/ARMED/CLAMPED/RELEASED), the pivot (OUT/BACK), each
+    // with the raw ADI level in brackets so config::CLAW_CLOSED_IS_ADI_HIGH / PIVOT_OUT_IS_ADI_HIGH can
+    // be confirmed with A / X (if the word says one thing and the mechanism did the other, flip that
+    // constant), and the intake macro's state and stack level. Without this line there was no way to
+    // see that the jaws were still CLAMPED, or that the macro was parked in STACKING -- and both of
+    // those silently change what R1 and L2 do (interlock 4 makes R1 a no-op while a pin is held, and a
+    // claw left clamped by B or the manual override is what made L2 fire the jaws at the bottom). If a
+    // button seems to do nothing, read this line first.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 5, "CLAW %s[%d]  PIV %s[%d]  MACRO %s L%d", claw.stateName(),
+                        claw.adiHigh() ? 1 : 0, scoring.isPivotOut() ? "OUT" : "BACK", scoring.pivotAdiHigh() ? 1 : 0,
+                        scoring.stateName(), scoring.getLevel());
 
     // --- Lift section (lines 6-10): everything needed to judge a move at a glance. ---
 

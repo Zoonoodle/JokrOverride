@@ -5,14 +5,15 @@
 
 namespace subsystems {
 
-Claw::Claw()
-    : piston_(config::CLAW_PISTON_PORT, !config::CLAW_EXTENDED_IS_CLOSED),  // start with the jaws open
-      sensor_(config::CLAW_DISTANCE_PORT) {}
+bool Claw::levelFor(bool closed) { return closed == config::CLAW_CLOSED_IS_ADI_HIGH; }
 
-void Claw::setJaws(bool closed) {
-    if (closed == config::CLAW_EXTENDED_IS_CLOSED) piston_.extend();
-    else piston_.retract();
-}
+Claw::Claw()
+    // The jaws are physically CLOSED at power-on (the cylinder's unpowered position), so start in
+    // State::CLOSED and write the pin to the level CLOSED means -- with CLAW_CLOSED_IS_ADI_HIGH ==
+    // false that is LOW, the level the ADI already sits at, so nothing moves at startup.
+    : piston_(static_cast<std::uint8_t>(config::CLAW_PISTON_PORT), levelFor(true)), sensor_(config::CLAW_DISTANCE_PORT) {}
+
+void Claw::setJaws(bool closed) { piston_.set_value(levelFor(closed) ? HIGH : LOW); }
 
 bool Claw::seesPin() {
     const int mm = sensor_.get_distance();
@@ -21,7 +22,7 @@ bool Claw::seesPin() {
 }
 
 void Claw::arm() {
-    if (state_ == State::OPEN) {
+    if (state_ == State::OPEN || state_ == State::CLOSED) {
         setJaws(false);
         seenSince_ = 0;
         state_ = State::ARMED;
@@ -45,13 +46,14 @@ void Claw::release() {
 }
 
 void Claw::toggle() {
-    if (state_ == State::CLAMPED) release();
+    if (isClosed()) release();
     else clamp();
 }
 
 void Claw::update() {
     const std::uint32_t now = pros::millis();
     switch (state_) {
+        case State::CLOSED:
         case State::OPEN:
         case State::CLAMPED:
             break;  // nothing automatic happens here; the driver or the scoring sequence decides
@@ -78,6 +80,7 @@ void Claw::update() {
 
 const char* Claw::stateName() const {
     switch (state_) {
+        case State::CLOSED: return "CLOSED";
         case State::OPEN: return "OPEN";
         case State::ARMED: return "ARMED";
         case State::CLAMPED: return "CLAMPED";

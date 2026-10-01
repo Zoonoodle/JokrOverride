@@ -58,10 +58,10 @@ allowed to own the lift motors.
 | let go of Up/Down | lift motors HOLD where they are (no target resumes) |
 | **L1** | intake macro: step up a stack level (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached) |
 | **L2** | intake macro: holding a pin → **SCORE** (open the jaws and lower all the way to `DOWN` in one motion; the pivot stays **OUT**) and reset the level count so the next L1 starts at level 1 again |
-| **R1** (hold) | intake roller in; (tap) also sends the lift to the **INTAKE** handoff position, pivot **BACK** once it is there |
+| **R1** (hold) | intake roller in; (tap) also sends the lift to the **INTAKE** handoff position with the jaws **open** and the pivot **BACK** (swings BACK as the arm comes into the handoff zone). No-op while a pin is `CLAMPED` |
 | **R2** (hold) | intake roller out |
 | **B** | **stow**: pivot **OUT**, lift straight down to `DOWN` (0°), cancel the intake macro |
-| **A** | claw clamp / open |
+| **A** | claw open / clamp. The claw is physically **shut at power-on** (the cylinder's unpowered position): the `CLAW` line shows `CLOSED[0]` and A opens it. `CLAW_CLOSED_IS_ADI_HIGH` (`false`) says which ADI level is closed; if A opens the jaws while the line says `CLAMPED`, flip it |
 | **X** | pivot **OUT** / **BACK** (the brain's `CLAW` line shows `PIV OUT[0]` / `PIV BACK[1]`, word + raw ADI level) |
 | **Y** | autoclamp on / off |
 
@@ -70,8 +70,10 @@ stack level while scoring, and in the default down position after L2 / B. **BACK
 the intake handoff, only for taking a pin from the intake (R1). In code `true` = OUT. Which ADI level
 is OUT is `PIVOT_OUT_IS_ADI_HIGH` (`false`: the unpowered LOW level is OUT, because that is where the
 pivot sits at power-on). If X makes the pivot swing BACK while the `CLAW` line says `OUT`, flip that one
-constant. The pivot swings BACK → OUT during the L1 rise once the arm is `PIVOT_OUT_CLEARANCE_DEG` above
-`INTAKE` (or has arrived at the level); nothing else in the lift's motion waits on it.
+constant. The handoff zone, `INTAKE` up to `INTAKE + PIVOT_HANDOFF_ZONE_DEG`, times the swing: heading
+to or at the intake the pivot is BACK inside the zone and OUT above it, so it swings BACK as R1 brings
+the arm down into the zone and OUT as L1 lifts it out (or when the arm arrives at the level). Nothing in
+the lift's motion waits on it.
 
 `L1`/`L2`/R1's tap-to-INTAKE are locked out while Up/Down are held, so a tap can never re-command the
 lift out from under a manual nudge (see interlock 5 in `subsystems/scoring.hpp`). The manual override
@@ -188,7 +190,7 @@ the constant says (raise it); if `pos` runs past `goal` before `vel` reaches 0, 
 | Lag between L1's *first* tap and the arm moving | that is `CLAW_CLOSE_TIME_MS` -- the jaws must shut before the arm pulls away |
 | `BLOCKED` on a normal move | DRIVE or CREEP ran `LIFT_STALL_MS` without `LIFT_STALL_DEG` of progress -- look for a real jam or a preset above the real top before raising `LIFT_STALL_MS` |
 | `LIFT FAULT` on a normal move | the distance to the goal grew during DRIVE: run the direction check above before touching `LIFT_FAULT_DEG` |
-| A button seems to do nothing | read the brain's `CLAW` line first. `CLAMPED` makes R1 a no-op (interlock 4), and `MACRO STACKING` means the macro thinks it is holding a pin. `B` resets the macro; `A` opens the jaws |
+| A button seems to do nothing | read the brain's `CLAW` line first. `CLAMPED` makes R1 a no-op (interlock 4), and `MACRO STACKING` means the macro thinks it is holding a pin. `B` resets the macro; `A` opens the jaws. (`CLOSED` -- the power-on state -- does not block R1) |
 
 ## Lift homing (automatic, every program run)
 The arm often powers on sitting well above the bottom. `Lift::zero()` can only seed the position
@@ -241,7 +243,7 @@ All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.h
    - `STACK_LEVELS[0..4]`: the height to drop the 1st through 5th pin on a stack
    - `MAX`: a few degrees above the top level, as a software hard stop -- never raise it just to let a bad preset through
    - **Measure the top first.** Hold Up until the arm is at the top and read the position. Every preset has to be below that number. If the lift shows `BLOCKED` (brain + controller), it was asked to go somewhere it can't physically reach, so it stopped pushing and is holding where it is. Lower that preset.
-4. Timing: `CLAW_CLOSE_TIME_MS` (grip before lifting), `CLAW_OPEN_TIME_MS` (release before lowering -- `scoreOrMatchload()`'s path only; L2's `score()` opens the claw and starts lowering in the same tick), `PIVOT_TIME_MS`, `PIVOT_OUT_CLEARANCE_DEG` (how far above `INTAKE` the arm is when the pivot swings OUT during the L1 rise), and the braking constants -- see "Lift speed and motion" above. `CLAW_CLOSE_TIME_MS` is specifically the gap between the first L1 tap and the arm moving: the jaws must shut before the arm pulls away.
+4. Timing: `CLAW_CLOSE_TIME_MS` (grip before lifting), `CLAW_OPEN_TIME_MS` (release before lowering -- `scoreOrMatchload()`'s path only; L2's `score()` opens the claw and starts lowering in the same tick), `PIVOT_TIME_MS`, `PIVOT_HANDOFF_ZONE_DEG` (how far above `INTAKE` the pivot swaps between BACK and OUT on the way to / from the intake), and the braking constants -- see "Lift speed and motion" above. `CLAW_CLOSE_TIME_MS` is specifically the gap between the first L1 tap and the arm moving: the jaws must shut before the arm pulls away.
 
 **Lift braking** (`LIFT_BRAKE_DECEL_DEG_PER_S2` first, then `LIFT_VEL_KP` / `LIFT_VEL_KI`), with a trace open (see "Capturing a trace"):
 1. **Decel:** tap L1 from the bottom (level 1) and B back down. In the `B` lines, note how fast `vel` really falls, and where `pos` ends up relative to `goal`. Stops short every time → raise `LIFT_BRAKE_DECEL_DEG_PER_S2`; runs past → lower it. Repeat until stack levels land within `LIFT_TOLERANCE_DEG` and `DOWN` creeps the last `LIFT_CREEP_ZONE_DEG`.
@@ -261,7 +263,7 @@ below alongside the existing sensor readouts. A sensor that isn't plugged in sho
 | ODOM | tracking wheel rotation sensor, in degrees |
 | ROT | lift rotation sensor vs motor encoders. Both must go + when the lift goes up |
 | ANGLE | the rotation sensor's live raw absolute angle, the startup seed, and the homing state (`HOMING` / `HOMED @ n` / `HOME FAIL @ n`) |
-| CLAW | claw state (`OPEN`/`ARMED`/`CLAMPED`/`RELEASED`), pivot `PIV OUT[0]` / `PIV BACK[1]` (word + raw ADI level), intake-macro state and stack level |
+| CLAW | claw state (`CLOSED`/`OPEN`/`ARMED`/`CLAMPED`/`RELEASED`) and pivot `PIV OUT` / `PIV BACK`, each with the raw ADI level in brackets (`CLAW CLOSED[0]  PIV OUT[0]` at power-on), then intake-macro state and stack level |
 | LIFT (position line) | position → target (or `none`), the active named preset (or `custom`), the phase (`DRIVE`/`BRAKE`/`CREEP`/`HOLD`), and `SETTLED`/`BLOCKED`/`FAULT` |
 | LIFT (err/vel/out line) | error in lift degrees, measured arm speed in deg/s, and what was sent to the motors in mV (0 = brake-hold) |
 | LIFT (curve line) | the braking curve's allowed speed at this distance, how many times this command re-drove, then `DIST`: claw distance sensor mm and `PIN` when inside `CLAW_DETECT_MM` |

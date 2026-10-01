@@ -282,7 +282,14 @@ inline constexpr int LIFT_DEFAULT_TIMEOUT_MS = 2500;         // TUNE
 // Claw (pneumatic) + autoclamp sensor
 // ---------------------------------------------------------------------------
 inline constexpr char CLAW_PISTON_PORT = 'C';                // TODO(team): confirm ADI port
-inline constexpr bool CLAW_EXTENDED_IS_CLOSED = true;        // TODO(team): does extending the cylinder close the jaws?
+// Which ADI level CLOSES the jaws. Observed on the robot (2026-10-01): with the pin LOW -- at power-on,
+// and at the intake where the code had "opened" the jaws -- the claw was clamped shut, so the
+// unpowered/LOW level is CLOSED and HIGH opens it. (The old CLAW_EXTENDED_IS_CLOSED = true said the
+// opposite, which is why L1's "clamp" opened the jaws and R1's "open" closed them.) Because unpowered
+// is closed, the claw is physically CLOSED at power-on and the code starts in Claw::State::CLOSED
+// without writing anything the ADI isn't already at -- nothing moves at startup. If pressing A opens
+// the jaws when the brain's CLAW line says CLAMPED, flip this one constant.
+inline constexpr bool CLAW_CLOSED_IS_ADI_HIGH = false;       // TODO(team): confirm with A on the brain's CLAW line
 // Autoclamp: a distance sensor looking between the jaws. None is in the notebook yet.
 inline constexpr int8_t CLAW_DISTANCE_PORT = 11;             // TODO(team): mount + confirm port
 inline constexpr int CLAW_DETECT_MM = 40;                    // TODO(team): distance that means "pin is between the jaws"
@@ -316,14 +323,17 @@ inline constexpr bool PIVOT_OUT_IS_ADI_HIGH = false;         // TODO(team): conf
 // The matchload spot (scoreOrMatchload(), not on a driver button): take the pin with the pivot BACK
 // like at the intake, or OUT like everywhere else?
 inline constexpr bool PIVOT_BACK_AT_MATCHLOAD = false;       // TODO(team): confirm
-// While L1 lifts a pin up out of the intake handoff, the pivot swings from BACK to OUT once the arm is
-// this many degrees ABOVE lift_preset::INTAKE (or has arrived at the level, whichever is first, so a
-// level can never be left waiting for it). It is a delay, not a gate: the lift starts rising the same
-// tick L1's clamp finishes. 0 = swing OUT the instant the lift starts. This is the ONLY height the
-// pivot's motion is tied to -- the old PIVOT_CLEAR interlock is gone (see scoring.hpp).
-//   The pin swings into the intake as it leaves the handoff: raise it.
-//   The pivot is still swinging when the arm reaches level 1: lower it toward 0.
-inline constexpr double PIVOT_OUT_CLEARANCE_DEG = 10.0;      // TUNE
+// The handoff zone: from lift_preset::INTAKE up to this many degrees above it. While the intake macro
+// is heading to or sitting at the intake, the pivot is BACK inside this zone and OUT above it, so on
+// R1 it swings BACK as the arm comes down into the zone (not only once the lift reports "arrived" --
+// a slightly short stop still gets the pivot BACK), and on L1 it swings OUT as the arm rises out of
+// the zone (or when it arrives at the level, whichever is first, so a level can never be left waiting
+// for it). It only ever times the swing; it never gates the lift. This is the ONLY height the pivot's
+// motion is tied to -- the old PIVOT_CLEAR interlock is gone (see scoring.hpp).
+//   The pin swings into the intake as it leaves the handoff on L1: raise it.
+//   The pivot is still swinging when the arm reaches level 1, or still OUT when the arm reaches the
+//   handoff on R1: lower it.
+inline constexpr double PIVOT_HANDOFF_ZONE_DEG = 10.0;       // TUNE
 inline constexpr int PIVOT_TIME_MS = 250;                    // TUNE: time for the pivot to finish moving
 // THIS IS THE L1 DELAY. The first L1 tap closes the jaws and waits here before the lift is given any
 // target at all (Scoring::update(), case CLAMPING) -- interlock: the arm must not pull out of an open

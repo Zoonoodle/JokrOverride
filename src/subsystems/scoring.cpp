@@ -80,9 +80,8 @@ void Scoring::enter(State next) {
         case State::MATCHLOAD_POS:
             command(heightOf(next));
             openClawForPickup();
-            // The intake handoff is the one place the pivot is BACK (the driver's definition). The
-            // arm is already at the height when this runs (MOVING waits for arrival), so this is the
-            // same swing-at-the-handoff the robot has always done at R1.
+            // The intake handoff is the one place the pivot is BACK (the driver's definition). MOVING
+            // normally already swung it BACK on the way down into the handoff zone; this makes sure.
             setPivot(next == State::INTAKE_POS ? false : !config::PIVOT_BACK_AT_MATCHLOAD);
             break;
         case State::CLAMPING: claw_.clamp(); break;
@@ -100,10 +99,13 @@ void Scoring::enter(State next) {
             }
             break;
         case State::MOVING:
-            claw_.disarm();
-            setPivot(true);  // OUT is the travel position; update() gives it PIVOT_TIME_MS if it did move
+            claw_.disarm();  // jaws open for the pickup; update() places the pivot by height
             break;
     }
+}
+
+bool Scoring::inHandoffZone() const {
+    return lift_.getPosition() <= preset::INTAKE + config::PIVOT_HANDOFF_ZONE_DEG;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,8 +199,9 @@ void Scoring::resetLevel() {
 }
 
 void Scoring::toggleClaw() {
+    // Shut (CLAMPED, or CLOSED since power-on) -> open; open -> clamp.
     const bool pickup = state_ == State::INTAKE_POS || state_ == State::MATCHLOAD_POS;
-    if (!claw_.isClamped()) claw_.clamp();
+    if (!claw_.isClosed()) claw_.clamp();
     else if (pickup && autoclamp_) claw_.release();  // lockout, then autoclamp watches again
     else claw_.disarm();
 }
@@ -239,10 +242,10 @@ void Scoring::update() {
             }
             const double h = levelHeight();
             command(h);  // the lift starts rising now, every time -- the pivot never gates it
-            // Interlock 2: the pivot swings BACK -> OUT once the pin is clear of the handoff, or once
-            // the arm has arrived at the level (so a level can never be left waiting for it). From
-            // IDLE (pivot already OUT) this is a no-op.
-            if (lift_.getPosition() >= preset::INTAKE + config::PIVOT_OUT_CLEARANCE_DEG || liftArrived(h)) setPivot(true);
+            // Interlock 2: the pivot swings BACK -> OUT once the pin has risen out of the handoff
+            // zone, or once the arm has arrived at the level (so a level can never be left waiting
+            // for it). From IDLE (pivot already OUT) this is a no-op.
+            if (!inHandoffZone() || liftArrived(h)) setPivot(true);
             break;
         }
 
@@ -261,7 +264,17 @@ void Scoring::update() {
             break;
 
         case State::MOVING: {
-            if (!pivotDone()) break;  // the pivot was just swung OUT for travel: give it PIVOT_TIME_MS
+            // Pivot by height, every tick: heading to the intake it is BACK inside the handoff zone and
+            // OUT above it, so on R1 it swings BACK as the arm comes down into the zone -- not only once
+            // the lift reports "arrived", so a slightly short stop still gets it there. Heading
+            // anywhere else it is OUT (the travel position).
+            const bool wantBack = moveDest_ == State::INTAKE_POS ? inHandoffZone()
+                                  : moveDest_ == State::MATCHLOAD_POS ? config::PIVOT_BACK_AT_MATCHLOAD && liftArrived(heightOf(moveDest_))
+                                                                       : false;
+            setPivot(!wantBack);
+            // If that swing started from a stack level (pivot was BACK up there via X), let it finish
+            // before the arm moves; a swing inside the handoff zone never holds the lift.
+            if (!pivotDone() && !inHandoffZone()) break;
             const double h = heightOf(moveDest_);
             command(h);
             if (liftArrived(h)) enter(moveDest_);

@@ -26,10 +26,11 @@ using subsystems::Scoring;
  *   L2          intake macro: SCORE (open the jaws and lower all the way to DOWN in one motion,
  *               pivot stays OUT) and reset the level count so the next L1 starts at level 1 again
  *   R1 (hold)   intake roller in; (new-press) also sends the lift to the INTAKE handoff position
- *               (pivot BACK once it is there)
+ *               with the jaws open and the pivot BACK (a no-op while a pin is CLAMPED)
  *   R2 (hold)   intake roller out
  *   B           stow: pivot OUT, lift straight down to DOWN (0 deg), cancel the macro
- *   A           claw clamp / open
+ *   A           claw open / clamp (the claw is physically shut at power-on; the CLAW line shows
+ *               CLOSED[0], and A opens it)
  *   X           pivot OUT / BACK (the brain's CLAW line shows which, and the raw ADI level)
  *   Y           autoclamp on / off
  *

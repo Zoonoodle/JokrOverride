@@ -70,7 +70,7 @@ Which one is in force is **latched the moment the button goes down**, from wheth
 | | **R1** (hold) | **R2** (hold) |
 |---|---|---|
 | **Nothing clamped** (`R:INTAKE`) | intake roller **in**; a tap also sends the lift to the **INTAKE** handoff with the jaws open and the pivot **BACK** | intake roller **out** |
-| **A pin `CLAMPED`** (`R:LIFT`) | lift **up** at `R_LIFT_UP_PCT` (90%). Plain voltage, same feel as the D-pad | lift **down**, controlled: closed-loop on the measured arm speed at `R_LIFT_DOWN_PCT` (50%) of the free speed, slowing to the crawl near the bottom and **seating** on the hard stop. Hold it all the way down and it ends exactly like an L2 |
+| **A pin `CLAMPED`** (`R:LIFT`) | lift **up** at `R_LIFT_UP_PCT` (90%). Plain voltage, same feel as the D-pad | lift **down**, controlled: closed-loop on the measured arm speed at `R_LIFT_DOWN_PCT` (65%) of the free speed, slowing to the crawl near the bottom and **seating** on the hard stop. Hold it all the way down and it ends exactly like an L2 |
 
 Letting go of either brakes and holds where it is -- no old target resumes. **D-pad Up/Down still win
 over both.** Neither runs the intake in `R:LIFT` mode. If the claw clamps or unclamps *while* R1/R2 is

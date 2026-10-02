@@ -231,7 +231,7 @@ inline constexpr double LIFT_SEAT_TEMP_LIMIT_C = 50.0;       // safety net, not 
 // Up is plain voltage; down goes through the banded descent above (so it seats at the bottom exactly
 // like L2 does) with this as its top-band speed.
 inline constexpr double R_LIFT_UP_PCT = 90.0;                // TUNE: R1 up, % of full voltage
-inline constexpr double R_LIFT_DOWN_PCT = 50.0;              // TUNE: R2 down, % of free speed
+inline constexpr double R_LIFT_DOWN_PCT = 65.0;              // TUNE: R2 down, % of free speed (~98 deg/s)
 
 // --- Arrival bands ---------------------------------------------------------
 // How close counts as arrived for the stack levels and MATCHLOAD. 5 deg of final error at a stack

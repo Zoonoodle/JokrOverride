@@ -103,8 +103,14 @@ makes rapid L1 taps merge: `setTarget()` on a move already in flight *only moves
 never restart the move, because that wipes the velocity integral and resets the approach clock. A **descent**
 (a non-precise goal at or below `LIFT_BOTTOM_GOAL_DEG`: L2's run home, B, auton DOWN, R2 in clamped
 mode) is DESCEND (three position-banded speeds — `LIFT_DESCENT_TOP_PCT`, `_MID_PCT` through the middle,
-`_SLOW_PCT` below `LIFT_DESCENT_SLOW_ZONE_DEG`, ramped between) → SEAT (a constant `LIFT_SEAT_MV`
-pressed into the hard stop, so it does not park above the frame and cannot bounce). An **L2 score** is
+`_SLOW_PCT` below `LIFT_DESCENT_SLOW_ZONE_DEG`, ramped between, down to `LIFT_SEAT_DETECT_DEG`) → FINAL
+(a dedicated closed-loop push at a constant `LIFT_FINAL_DEG_PER_S` with up to `LIFT_FINAL_MAX_MV` of
+downward authority — more force than SEAT's hold, so it can push through a cup caught in the intake or
+plain six-bar/chain friction a few degrees short of 0, which is what "stopped under `LIFT_SEAT_DETECT_DEG`"
+used to get mistaken for seated; hands over once the arm is within `LIFT_SEAT_ZERO_DEG` of 0 **and**
+still, or gives up after `LIFT_SEAT_MAX_MS` and seats wherever it stopped, shown as `SEAT(short)`) → SEAT
+(a constant `LIFT_SEAT_MV` pressed into the hard stop, so it does not park above the frame and cannot
+bounce). An **L2 score** is
 a third kind: `Lift::startScore()` → PRESS (push the pin onto the stack with the jaws **shut**, capped
 at `L2_PRESS_MAX_MV`) → contact, decided by `subsystems::ContactDetector` → REL (the lift raises
 `needsClawRelease()`; **Scoring** opens the claw, the lift never touches a cylinder) → the freed check

@@ -376,7 +376,8 @@ const char* Lift::phaseName() const {
         case Phase::APPROACH: return "APPROACH";
         case Phase::HOLD: return "HOLD";
         case Phase::DESCEND: return returnFast_ ? "RETURN" : "DESCEND";
-        case Phase::SEAT: return seatHot_ ? "SEAT(hot)" : "SEAT";
+        case Phase::FINAL: return "FINAL";
+        case Phase::SEAT: return seatHot_ ? "SEAT(hot)" : (seatShort_ ? "SEAT(short)" : "SEAT");
         case Phase::PRESS: return "PRESS";
         case Phase::RELEASE:
             // Which signal fired is the first thing worth knowing when tuning, so it goes on the line.
@@ -515,7 +516,17 @@ void Lift::enterDescend(std::uint32_t now, double position, double topPct, doubl
     seatTempTick_ = 0;
 }
 
-void Lift::enterSeat(std::uint32_t now) {
+void Lift::enterFinal(std::uint32_t now) {
+    phase_ = Phase::FINAL;
+    phaseStart_ = now;
+    stallStart_ = 0;
+    seatStillSince_ = now;  // the "is it actually still" window starts fresh at the handover
+    descentRef_ = std::max(-velocity_, 0.0);  // ramp on from whatever DESCEND already had it doing
+    velI_ = std::clamp(gravityMv_, -static_cast<double>(config::LIFT_FINAL_MAX_MV),
+                       static_cast<double>(config::LIFT_FINAL_MAX_MV));
+}
+
+void Lift::enterSeat(std::uint32_t now, bool shortSeat) {
     phase_ = Phase::SEAT;
     phaseStart_ = now;
     stallStart_ = 0;
@@ -523,6 +534,7 @@ void Lift::enterSeat(std::uint32_t now) {
     velI_ = 0.0;
     gravityMv_ = 0.0;  // the frame is holding the arm now, not the motors
     seatTempTick_ = 0;
+    seatShort_ = shortSeat;
 }
 
 bool Lift::stalled(std::uint32_t now, double position) {
@@ -790,9 +802,10 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
         position > config::LIFT_SEAT_DETECT_DEG + config::LIFT_SEAT_UNSEAT_DEG) {
         enterDescend(now, position, descentTopPct_, descentMidPct_);  // knocked off the stop: walk it back down
     }
-    if (phase_ == Phase::DESCEND) {
-        // Runaway guard: we are commanding DOWN, so the arm must not climb. A reversed rotation sensor
-        // or a reversed LIFT_PORTS sign shows up here within ~60 ms.
+    if (phase_ == Phase::DESCEND || phase_ == Phase::FINAL) {
+        // Runaway guard, for the whole trip down (DESCEND or FINAL): we are commanding DOWN, so the
+        // arm must not climb. A reversed rotation sensor or a reversed LIFT_PORTS sign shows up here
+        // within ~60 ms.
         if (position > descentStart_ + config::LIFT_FAULT_DEG) {
             faulted_ = true;
             motors_.brake();
@@ -801,18 +814,40 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
             trace(now, 'F', position, 0.0, true);
             return;
         }
+    }
+    if (phase_ == Phase::DESCEND) {
         if (position <= config::LIFT_SEAT_DETECT_DEG) {
-            // Near the bottom, an arm that has gone still is an arm sitting on its hard stop. This is
-            // the ONLY place "stopped" is read as "seated" -- higher up it is a jam (below).
-            if (std::fabs(velocity_) > config::LIFT_SEAT_STILL_DEG_PER_S) seatStillSince_ = now;
-            else if (now - seatStillSince_ >= static_cast<std::uint32_t>(config::LIFT_SEAT_STILL_MS))
-                enterSeat(now);
+            // Close enough that the arm MIGHT be on its hard stop -- but it might also be stalled a
+            // few degrees short (a cup in the intake, six-bar/chain friction). Hand over to FINAL,
+            // which keeps real downward authority and only declares true SEAT once it actually reaches
+            // LIFT_SEAT_ZERO_DEG, not just "stopped somewhere under here" like the old single-step
+            // version (see "Seating on the hard stop" in config.hpp for why that was the bug).
+            enterFinal(now);
         } else {
             seatStillSince_ = now;
             if (stalled(now, position)) {  // stopped well above the bottom: caught on something
                 blocked_ = true;
                 enterHold(now, position);  // hold where it stopped, never push into the jam
             }
+        }
+    } else if (phase_ == Phase::FINAL) {
+        // True SEAT needs BOTH close enough (LIFT_SEAT_ZERO_DEG, tighter than the 6 deg that gated
+        // entry here) AND still, for LIFT_SEAT_STILL_MS -- that is the actual fix: "slow somewhere
+        // under 6 deg" is no longer good enough on its own to call it seated.
+        bool reachedZero = false;
+        if (std::fabs(velocity_) > config::LIFT_SEAT_STILL_DEG_PER_S) {
+            seatStillSince_ = now;
+        } else if (position <= config::LIFT_SEAT_ZERO_DEG &&
+                  now - seatStillSince_ >= static_cast<std::uint32_t>(config::LIFT_SEAT_STILL_MS)) {
+            reachedZero = true;
+        }
+        if (reachedZero) {
+            enterSeat(now, false);  // the real thing: reached 0 and went still there
+        } else if (now - phaseStart_ >= static_cast<std::uint32_t>(config::LIFT_SEAT_MAX_MS)) {
+            // FINAL's time budget ran out before it ever got there -- a genuine jam, not just
+            // friction. Give up right here rather than grinding forever; LIFT_SEAT_MV still holds it
+            // down so it cannot bounce, and SEAT(short) on the brain says it did not reach 0.
+            enterSeat(now, true);
         }
     }
 
@@ -838,6 +873,17 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
     }
     if (phase_ == Phase::HOLD) {  // the descent was BLOCKED above
         runHold(now, dt, position);
+        return;
+    }
+    if (phase_ == Phase::FINAL) {
+        // Constant slow creep, closed loop on the MEASURED speed exactly like DESCEND, but with its
+        // own cap: LIFT_FINAL_MAX_MV, stronger than SEAT's hold but well under DESCEND's full
+        // LIFT_VEL_MAX_MV, so it can push through light resistance without slamming a real contact.
+        const double maxStep = config::LIFT_DESCENT_RAMP_DEG_PER_S2 * dt;
+        descentRef_ += std::clamp(config::LIFT_FINAL_DEG_PER_S - descentRef_, -maxStep, maxStep);
+        lastVRef_ = -descentRef_;  // signed: down is negative
+        const double mv = runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, config::LIFT_FINAL_MAX_MV);
+        trace(now, 'Z', position, mv, true);
         return;
     }
 
@@ -1095,7 +1141,7 @@ void Lift::startTask() {
         traceTask_ = std::make_unique<pros::Task>(
             [this] {
                 std::printf("LIFT trace: ms phase(D=drive B=brake A=approach H=hold V=descend R=return "
-                            "S=seat P=press r=release U=unstick M=manual h=homing F=fault I=idle) "
+                            "Z=final S=seat P=press r=release U=unstick M=manual h=homing F=fault I=idle) "
                             "pos*10 goal*10 vel(deg/s) out(mV) | L2 only: v/base%% lag*10 effort(mV) "
                             "trg(0=- 1=stall 2=lag 3=effort 4=speed)\n");
                 while (true) {

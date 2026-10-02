@@ -58,23 +58,37 @@
  *             correction, and it is gentle.
  *
  * A DESCENT -- a non-precise goal at or below LIFT_BOTTOM_GOAL_DEG, i.e. L2, B,
- * auton DOWN and R2 in clamped mode -- is DESCEND -> SEAT:
+ * auton DOWN and R2 in clamped mode -- is DESCEND -> FINAL -> SEAT:
  *
  *   DESCEND   the velocity loop tracks a banded speed reference read off the
  *             arm's position: LIFT_DESCENT_TOP_PCT of free speed from the start
  *             height down to the mid boundary, LIFT_DESCENT_MID_PCT through the
  *             middle, then a constant LIFT_DESCENT_SLOW_PCT crawl from
- *             LIFT_DESCENT_SLOW_ZONE_DEG to the stop. The mid boundary is a
- *             FRACTION (LIFT_DESCENT_MID_FRACTION) of the travel between the
- *             start height and the slow zone, so "the middle" is the middle of
- *             this descent whatever height it began at. Band changes are ramps
- *             at LIFT_DESCENT_RAMP_DEG_PER_S2, never stops.
- *   SEAT      the arm has gone still (under LIFT_SEAT_STILL_DEG_PER_S for
- *             LIFT_SEAT_STILL_MS) below LIFT_SEAT_DETECT_DEG, i.e. it is
- *             physically on its hard stop: hold a constant LIFT_SEAT_MV pressed
- *             into it so it cannot bounce back up. It does NOT park a few
- *             degrees above the frame any more. If a lift motor ever reaches
- *             LIFT_SEAT_TEMP_LIMIT_C the seat drops to a plain brake-hold.
+ *             LIFT_DESCENT_SLOW_ZONE_DEG down to LIFT_SEAT_DETECT_DEG. The mid
+ *             boundary is a FRACTION (LIFT_DESCENT_MID_FRACTION) of the travel
+ *             between the start height and the slow zone, so "the middle" is the
+ *             middle of this descent whatever height it began at. Band changes
+ *             are ramps at LIFT_DESCENT_RAMP_DEG_PER_S2, never stops.
+ *   FINAL     below LIFT_SEAT_DETECT_DEG: a dedicated closed-loop push at a
+ *             constant LIFT_FINAL_DEG_PER_S, with up to LIFT_FINAL_MAX_MV of
+ *             downward authority -- more force than SEAT's hold (which only has
+ *             to fight bounce, not resistance) but capped well under DESCEND's
+ *             full 12000 mV so a real hard-stop contact doesn't slam. This is
+ *             the fix for an arm that stalls a few degrees above 0 on a cup
+ *             caught in the intake or plain six-bar/chain friction: the old
+ *             single-step version read that stall as "seated" and left only the
+ *             weak SEAT voltage to finish the job, which it often couldn't.
+ *             Hands over to SEAT once the arm is BOTH within LIFT_SEAT_ZERO_DEG
+ *             of 0 AND still (under LIFT_SEAT_STILL_DEG_PER_S for
+ *             LIFT_SEAT_STILL_MS); if LIFT_SEAT_MAX_MS runs out first (a real
+ *             jam, not just friction) it gives up and seats wherever it
+ *             stopped, shown as SEAT(short) so the driver can tell it did not
+ *             actually reach 0.
+ *   SEAT      hold a constant LIFT_SEAT_MV pressed into the stop so the arm
+ *             cannot bounce back up. It does NOT park a few degrees above the
+ *             frame any more (that was FINAL's whole point). If a lift motor
+ *             ever reaches LIFT_SEAT_TEMP_LIMIT_C the seat drops to a plain
+ *             brake-hold.
  *
  * SCORING WITH L2 is a third kind of move, started by startScore() and run as
  * phases PRESS -> RELEASE -> (UNSTICK) -> the DESCENT above. It is the only
@@ -178,9 +192,11 @@ class Lift {
     };
 
     /** Where a commanded move is (see the class comment). DRIVE/BRAKE/APPROACH/HOLD are a position
-     *  move; DESCEND/SEAT are a trip to the bottom. For a position move the first three are chosen
-     *  fresh from (distance, speed) every tick -- only arrival into HOLD latches. */
-    enum class Phase { DRIVE, BRAKE, APPROACH, HOLD, DESCEND, SEAT, PRESS, RELEASE, UNSTICK };
+     *  move; DESCEND/FINAL/SEAT are a trip to the bottom (FINAL is the dedicated push-to-zero step
+     *  below LIFT_SEAT_DETECT_DEG, see "Seating on the hard stop" in config.hpp). For a position move
+     *  the first three are chosen fresh from (distance, speed) every tick -- only arrival into HOLD
+     *  latches. */
+    enum class Phase { DRIVE, BRAKE, APPROACH, HOLD, DESCEND, FINAL, SEAT, PRESS, RELEASE, UNSTICK };
 
     Lift();
 
@@ -262,7 +278,8 @@ class Lift {
     const char* activePresetName() const;
     /** Which phase the active move is in. Only meaningful while hasActiveTarget() is true. */
     Phase getPhase() const { return phase_; }
-    /** "DRIVE" / "BRAKE" / "APPROACH" / "HOLD" / "DESCEND" / "SEAT", or "" with no active target. */
+    /** "DRIVE" / "BRAKE" / "APPROACH" / "HOLD" / "DESCEND" / "FINAL" / "SEAT" (or "SEAT(short)" if it
+     *  gave up before reaching true 0, see LIFT_SEAT_MAX_MS), or "" with no active target. */
     const char* phaseName() const;
 
     /** Current lift-arm angle in degrees (rotation sensor if fitted, else motor encoders). */
@@ -308,8 +325,15 @@ class Lift {
     /** The hold loop's learned gravity voltage, mV -- what it currently reckons this arm costs to hold
      *  where it is. Carried between moves. */
     double getGravityMv() const { return gravityMv_; }
-    /** True while the arm is pressed down onto its hard stop (phase SEAT). */
+    /** True while the arm is pressed down onto its hard stop (phase SEAT) -- including a SEAT(short)
+     *  that gave up above true 0 after LIFT_SEAT_MAX_MS (see isSeatShort()). It is still "done trying"
+     *  either way, which is what callers that just want "stop waiting" (e.g. main.cpp's L2 auto-
+     *  outtake) should react to. */
     bool isSeated() const { return phase_ == Phase::SEAT; }
+    /** True if the current/last SEAT gave up before reaching LIFT_SEAT_ZERO_DEG (FINAL's time budget,
+     *  LIFT_SEAT_MAX_MS, ran out first) -- shown as SEAT(short) on the brain. Meaningless unless
+     *  isSeated() is also true. */
+    bool isSeatShort() const { return seatShort_; }
 
     // -----------------------------------------------------------------------
     // L2 scoring (see "SCORING WITH L2" in the class comment). Scoring owns the
@@ -377,7 +401,13 @@ class Lift {
     void enterBrake(std::uint32_t now);
     void enterHold(std::uint32_t now, double holdAt);
     void enterDescend(std::uint32_t now, double position, double topPct, double midPct);
-    void enterSeat(std::uint32_t now);
+    /** Hand DESCEND over to FINAL (see the class comment): the dedicated closed-loop push through the
+     *  last stretch to true 0, entered once the arm crosses LIFT_SEAT_DETECT_DEG. */
+    void enterFinal(std::uint32_t now);
+    /** shortSeat = true marks a SEAT that gave up above LIFT_SEAT_ZERO_DEG once FINAL's LIFT_SEAT_MAX_MS
+     *  ran out (SEAT(short) on the brain); false (the default) is every other caller -- homing finding
+     *  the real hard stop, and FINAL actually reaching true 0 and going still. */
+    void enterSeat(std::uint32_t now, bool shortSeat = false);
     /** Hand a running score sequence over to the trip home (freed, or nothing was ever there). */
     void endScore(std::uint32_t now, double position, double topPct, double midPct);
     /** One tick of PRESS / RELEASE / UNSTICK. Writes the motors and traces. */
@@ -459,6 +489,7 @@ class Lift {
     std::uint32_t seatStillSince_ = 0;  // when the arm was last seen moving near the bottom
     bool seatHot_ = false;          // a lift motor passed LIFT_SEAT_TEMP_LIMIT_C: brake-hold instead of pressing
     int seatTempTick_ = 0;          // temperature is only read every 50th SEAT tick
+    bool seatShort_ = false;        // this SEAT gave up above LIFT_SEAT_ZERO_DEG when LIFT_SEAT_MAX_MS ran out
 
     // L2 scoring
     bool score_ = false;                 // a press/sense/release sequence is running

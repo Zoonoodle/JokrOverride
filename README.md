@@ -13,9 +13,10 @@ PROS 4.2.2 · LemLib 0.5.6 · liblvgl 9.2.0
 include/config.hpp            every port, ratio, preset and gain
 include/robot.hpp, src/robot.cpp   chassis (LemLib) + subsystem objects
 include/subsystems/ src/subsystems/
-  lift.*      DR6-4B lift: DRIVE -> BRAKE -> APPROACH -> HOLD position moves, DESCEND -> SEAT trips to
-              the bottom, homing, stall/runaway guards, manual voltage for D-pad Up/Down and R1,
-              a terminal trace, moveTo()/setTarget() shared by driver + auton
+  lift.*      DR6-4B lift: DRIVE -> BRAKE -> APPROACH -> HOLD position moves, DESCEND -> FINAL -> SEAT
+              trips to the bottom (FINAL forces the last few degrees onto the true 0), homing,
+              stall/runaway guards, manual voltage for D-pad Up/Down and R1, a terminal trace,
+              moveTo()/setTarget() shared by driver + auton
   contact_detector.hpp  PURE landing detector for the L2 scorer (no PROS) -- host-tested in test/
   claw.*      pneumatic claw + autoclamp state machine
   intake.*    one-motor roller intake (driver-controlled only)
@@ -60,7 +61,7 @@ allowed to own the lift motors.
 | **D-pad Down** (hold) | lift **down**, full power (same) |
 | let go of Up/Down | lift motors HOLD where they are (no target resumes) |
 | **L1** | intake macro: step up a stack level (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached). If the claw is already `CLAMPED` (L2 just clamped it at the bottom), the first tap skips the clamp wait and rises immediately. **Auto-intake:** an L1 that starts a rise **from the floor** (at the bottom / seated, e.g. after an L2 score or a B stow, or parked at the `INTAKE` handoff after R1) also runs the intake rollers **in** from the press itself -- including during the claw-close wait -- until the arm climbs past `L1_AUTO_INTAKE_UNTIL_DEG` (20°), sweeping the floor while the arm is going up anyway. The brain's `DRV` line shows `INT:AUTO` while it runs. Extra L1 taps during the same rise neither restart nor extend it, and an L1 from a stack level never starts it. It stops early on D-pad, B, L2, clamped-mode R1/R2, or a `BLOCKED`/`FAULT` lift, and after `L1_AUTO_INTAKE_MAX_MS` regardless |
-| **L2** | intake macro, **above the bottom**, holding a pin → **THE SENSING SCORER**. The jaws stay **shut**; the arm presses the pin **down onto the stack** at `L2_SCORE_SPEED_PCT` (60%), watches the rotation sensor, and the moment the measured speed drops below `L2_CONTACT_SPEED_FRAC` of the commanded speed the pin has landed → **release the claw and keep pushing down** so the jaws slide off → confirm the arm runs free again → **run home fast** (`L2_RETURN_SPEED_PCT`, still slowing and seating at the bottom). If the claw stays caught it lifts `L2_UNSTICK_UP_DEG` (20°) and retries, up to `L2_MAX_UNSTICK_TRIES`, then stops and shows `SCORE STUCK`. If it reaches `L2_NO_CONTACT_DEG` with no landing detected there was no stack: it **releases nothing**, seats at the bottom with the pin still clamped, and shows `NO CONTACT`. Pivot stays **OUT** throughout; the D-pad cancels at any stage; L2 pressed mid-sequence is ignored. Resets the level count. **Auto-outtake:** once this descent drops below `L2_OUTTAKE_BELOW_DEG` (40°) the intake rollers run **out** at `L2_OUTTAKE_PCT` (60%) on their own -- through REL/UNSTK/RETURN, whichever phase the arm is in -- so anything still in the intake ejects instead of riding the lift down, stopping the instant the arm seats at the bottom (or the score ends any other way). The brain's `DRV` line shows `INT:OUT` while it runs; `L2_OUTTAKE_MAX_MS` is the safety cutoff. Level 1 (31°) is already under 40°, so scoring from level 1 outtakes from the start of the press. **At the bottom** (seated, or within `LIFT_BOTTOM_GOAL_DEG` of it) and not mid-move: L2 is instead the **clamp trigger** -- not clamped → clamp, clamped → release -- the same toggle A uses, moving neither the lift, the pivot, nor the intake |
+| **L2** | intake macro, **above the bottom**, holding a pin → **THE SENSING SCORER**. The jaws stay **shut**; the arm presses the pin **down onto the stack** at `L2_SCORE_SPEED_PCT` (60%), watches the rotation sensor, and the moment the measured speed drops below `L2_CONTACT_SPEED_FRAC` of the commanded speed the pin has landed → **release the claw and keep pushing down** so the jaws slide off → confirm the arm runs free again → **run home fast** (`L2_RETURN_SPEED_PCT`, still slowing and seating at the bottom). If the claw stays caught it lifts `L2_UNSTICK_UP_DEG` (20°) and retries, up to `L2_MAX_UNSTICK_TRIES`, then stops and shows `SCORE STUCK`. If it reaches `L2_NO_CONTACT_DEG` with no landing detected there was no stack: it **releases nothing**, seats at the bottom with the pin still clamped, and shows `NO CONTACT`. Pivot stays **OUT** throughout; the D-pad cancels at any stage; L2 pressed mid-sequence is ignored. Resets the level count. **Auto-outtake:** once this descent drops below `L2_OUTTAKE_BELOW_DEG` (40°) the intake rollers run **out** at `L2_OUTTAKE_PCT` (60%) on their own -- through REL/UNSTK/RETURN/FINAL, whichever phase the arm is in, including FINAL forcing the last few degrees onto the hard stop -- so anything still in the intake (a cup can be exactly what is blocking the arm from reaching 0) ejects instead of riding along or jamming the final push. Keeps running until the arm is **actually seated** (`lift.isSeated()`, true `SEAT` or `SEAT(short)` alike -- not just near the bottom) plus `L2_OUTTAKE_AFTER_SEAT_MS` (500 ms) more. The brain's `DRV` line shows `INT:OUT` while it runs; `L2_OUTTAKE_MAX_MS` (4000 ms) is the safety cutoff. Level 1 (31°) is already under 40°, so scoring from level 1 outtakes from the start of the press. **At the bottom** (seated, or within `LIFT_BOTTOM_GOAL_DEG` of it) and not mid-move: L2 is instead the **clamp trigger** -- not clamped → clamp, clamped → release -- the same toggle A uses, moving neither the lift, the pivot, nor the intake |
 | **B** | **stow**: pivot **OUT**, lift straight down to `DOWN` and seated, cancel the intake macro. Uses the same fast banded descent as L2's run home (`LIFT_DESCENT_TOP_PCT` / `_MID_PCT`, now 80% / 95%), minus any claw work |
 | **A** | claw clamp / open. The claw is physically **OPEN at power-on** -- it needs air to grip: the `CLAW` line shows `OPEN D[0]` and A closes it. `CLAW_CLOSED_IS_ADI_HIGH` (`true`) says which ADI level is closed; if A *opens* the jaws while the line says `CLAMPED`, flip it |
 | **X** | pivot **OUT** / **BACK** (the brain's `CLAW` line shows `PIV OUT C[0]` / `PIV BACK C[1]`: word, port letter, raw ADI level) |
@@ -206,27 +207,36 @@ slows into the *final* level with the normal braking curve and approach.
   hold *is* the correction, and it is gentle, so there is no `LIFT_REENGAGE_DEG` any more.
 
 ### A descent — a non-precise goal at or below `LIFT_BOTTOM_GOAL_DEG`
-L2's score, B's stow, an auton move to `DOWN`, and R2 in clamped mode. `DESCEND → SEAT`:
+L2's score, B's stow, an auton move to `DOWN`, and R2 in clamped mode. `DESCEND → FINAL → SEAT`:
 
 - **DESCEND.** The velocity loop tracks a speed reference read off the arm's **position**, in three
   bands: `LIFT_DESCENT_TOP_PCT` (80% ≈ 120 deg/s) from the start height down to the mid boundary,
   `LIFT_DESCENT_MID_PCT` (95% ≈ 142 deg/s) through the middle, then a constant
-  `LIFT_DESCENT_SLOW_PCT` (12% ≈ 18 deg/s) from `LIFT_DESCENT_SLOW_ZONE_DEG` (20°) to the stop. The
-  mid boundary is a **fraction** of this descent's fast travel
+  `LIFT_DESCENT_SLOW_PCT` (12% ≈ 18 deg/s) from `LIFT_DESCENT_SLOW_ZONE_DEG` (20°) down to
+  `LIFT_SEAT_DETECT_DEG` (6°). The mid boundary is a **fraction** of this descent's fast travel
   (`SLOW_ZONE + LIFT_DESCENT_MID_FRACTION × (start height − SLOW_ZONE)`), not a fixed height, so "the
   middle" is the middle whether the descent started at level 1 or level 5. Band changes are ramps at
   `LIFT_DESCENT_RAMP_DEG_PER_S2` (800 deg/s²), never stops. It is **closed-loop on the measured arm
   speed**, so gravity plus the pin's weight cannot make it run away. L2's post-score run home uses
   `L2_RETURN_SPEED_PCT` (95%) for both fast bands and is labelled `RETURN` on the brain / `R` in the
-  trace; B's stow and an auton `DOWN` use the 80/95 bands above. All of them keep the slow final zone
-  and the seating, so none of them can slam or bounce.
-- **SEAT.** When the arm has gone still (slower than `LIFT_SEAT_STILL_DEG_PER_S` for
-  `LIFT_SEAT_STILL_MS`) below `LIFT_SEAT_DETECT_DEG`, it is physically on its hard stop: the lift then
-  holds a constant `LIFT_SEAT_MV` (−1200 mV) pressed into it, forever, so it **cannot bounce back up**.
-  It no longer parks a few degrees above the frame. −1200 mV is 10% of full volts, well under an amp
-  per motor, and the frame is carrying the arm -- safe for a whole match. If a lift motor ever reaches
-  `LIFT_SEAT_TEMP_LIMIT_C` the seat drops to a plain brake-hold and the phase reads `SEAT(hot)`.
-  An arm knocked `LIFT_SEAT_UNSEAT_DEG` back up restarts the descent and walks it down again.
+  trace; B's stow and an auton `DOWN` use the 80/95 bands above.
+- **FINAL** (new). Below `LIFT_SEAT_DETECT_DEG` the arm might be on its hard stop, or it might be
+  stalled a few degrees short -- a cup caught in the intake, six-bar/chain friction -- which the old
+  single-step version couldn't tell apart: it read "stopped under 6°" as "seated" and handed over to a
+  hold voltage that was never meant to push through resistance. FINAL fixes that: a dedicated
+  closed-loop push at a constant `LIFT_FINAL_DEG_PER_S` (12 deg/s), with up to `LIFT_FINAL_MAX_MV`
+  (5000 mV) of downward authority -- real force, more than SEAT's hold, but capped well under
+  DESCEND's full 12000 mV so a genuine hard-stop contact doesn't slam. It only hands over to SEAT once
+  the arm is **both** within `LIFT_SEAT_ZERO_DEG` (1°) of 0 **and** still (under
+  `LIFT_SEAT_STILL_DEG_PER_S` for `LIFT_SEAT_STILL_MS`). If `LIFT_SEAT_MAX_MS` (2000 ms) runs out first
+  -- a real jam, not just friction -- it gives up right there and seats wherever it stopped anyway
+  (`SEAT(short)` on the brain, instead of `SEAT`), so it never grinds forever.
+- **SEAT.** Hold a constant `LIFT_SEAT_MV` (−1500 mV) pressed into the stop, forever, so it **cannot
+  bounce back up**. It no longer parks a few degrees above the frame (that was FINAL's whole point).
+  −1500 mV is 12.5% of full volts, still well under an amp per motor, and the frame is carrying the arm
+  -- safe for a whole match. If a lift motor ever reaches `LIFT_SEAT_TEMP_LIMIT_C` the seat drops to a
+  plain brake-hold and the phase reads `SEAT(hot)`. An arm knocked `LIFT_SEAT_UNSEAT_DEG` back up
+  restarts the descent (DESCEND, then FINAL again) and walks it back down.
 
 `R1`/`INTAKE` is not a descent: it is a precise position move, so it keeps its own exact approach and
 never seats.
@@ -338,12 +348,21 @@ assumes the one above is settled. **Start from the values in `config.hpp` -- the
    - any thump at the bottom → raise `LIFT_DESCENT_SLOW_ZONE_DEG` (20 → 28) and/or lower
      `LIFT_DESCENT_SLOW_PCT` (12 → 9)
    - the whole descent is too slow → raise `LIFT_DESCENT_MID_PCT`, lower `LIFT_DESCENT_SLOW_ZONE_DEG`
-8. **Seating.** The last `V` lines must show `pos` reaching ~0 and `vel` going to 0, then `S` lines at
-   `-1200` mV. Push the arm up by hand: it should press straight back down.
-   - still bounces up off the stop → more negative `LIFT_SEAT_MV` (−1500)
-   - `SEAT` appears while the arm is still a few degrees up → lower `LIFT_SEAT_DETECT_DEG` or
-     `LIFT_SEAT_STILL_DEG_PER_S`, or raise `LIFT_SEAT_STILL_MS`
-   - lift motors warming on the `TEMP` line while parked at the bottom → less negative (−800)
+8. **Seating.** Below `LIFT_SEAT_DETECT_DEG` the phase goes `V` → `Z` (`FINAL`, pushing with up to
+   `LIFT_FINAL_MAX_MV`) → `S` (`SEAT`, holding `LIFT_SEAT_MV`). The last `Z` lines must show `pos`
+   reaching `LIFT_SEAT_ZERO_DEG × 10` or less and `vel` going to 0 before the `S` lines start, and the
+   brain's phase must read plain `SEAT`, not `SEAT(short)`. Push the arm up by hand: it should press
+   straight back down.
+   - `LIFT` reads `SEAT(short)` / stops a few degrees short every time → first confirm `ANGLE` reads
+     `HOMED` (an un-homed seed makes "0" a lie), then raise `LIFT_FINAL_MAX_MV` (5000 → 6500), then
+     `LIFT_SEAT_MAX_MS` (2000 → 3000). If a cup in the intake is the actual obstruction, check it is
+     still outtaking (`INT:OUT` on `DRV`) all the way through the `Z` lines -- see `L2_OUTTAKE_*` below.
+   - `FINAL` thumps into the frame → lower `LIFT_FINAL_DEG_PER_S` (12 → 8)
+   - still bounces up off the stop once truly `SEAT`ed → more negative `LIFT_SEAT_MV` (−1500 → −1800)
+   - `SEAT` appears while the arm is still a few degrees up (not `SEAT(short)` -- a real false arrival)
+     → lower `LIFT_SEAT_ZERO_DEG`, lower `LIFT_SEAT_STILL_DEG_PER_S`, or raise `LIFT_SEAT_STILL_MS`
+   - lift motors warming on the `TEMP` line while parked at the bottom → less negative `LIFT_SEAT_MV`
+     (−1500 → −1000)
 9. **Rapid taps.** From the bottom, clamp with `L1`, then double-tap and triple-tap `L1`. The `LIFT`
    line's phase must go `DRIVE` → (maybe `BRAKE`) → `DRIVE` again as each tap lands, and never
    `APPROACH` or `HOLD` at an intermediate level. In the trace there must be no `H` line between taps.
@@ -426,9 +445,12 @@ show `pos` holding within a degree with no sign change in `vel`. Any oscillation
 | The last couple of degrees take too long | raise `LIFT_APPROACH_KP_PER_S`, then `LIFT_APPROACH_DEG_PER_S` |
 | L2's descent thumps into the bottom | raise `LIFT_DESCENT_SLOW_ZONE_DEG`, lower `LIFT_DESCENT_SLOW_PCT` |
 | L2's descent is too slow overall | raise `LIFT_DESCENT_MID_PCT`, lower `LIFT_DESCENT_SLOW_ZONE_DEG` |
-| The arm bounces back up off the bottom after L2 | more negative `LIFT_SEAT_MV` |
+| `LIFT` reads `SEAT(short)` / stops a few degrees short of 0 | check `ANGLE` reads `HOMED` first, then raise `LIFT_FINAL_MAX_MV`, then `LIFT_SEAT_MAX_MS` -- see "Seating" in step 8 above |
+| `FINAL` (the `Z` phase) thumps into the frame | lower `LIFT_FINAL_DEG_PER_S` |
+| The arm bounces back up off the bottom after a true `SEAT` | more negative `LIFT_SEAT_MV` |
 | Lift motors warm while parked at the bottom | less negative `LIFT_SEAT_MV`; `SEAT(hot)` on the brain means `LIFT_SEAT_TEMP_LIMIT_C` already cut it |
-| `SEAT` appears with the arm still a few degrees up | lower `LIFT_SEAT_DETECT_DEG` / `LIFT_SEAT_STILL_DEG_PER_S`, or raise `LIFT_SEAT_STILL_MS` |
+| `SEAT` (not `SEAT(short)`) appears with the arm still a few degrees up -- a real false arrival | lower `LIFT_SEAT_ZERO_DEG` / `LIFT_SEAT_STILL_DEG_PER_S`, or raise `LIFT_SEAT_STILL_MS` |
+| L2's auto-outtake (`INT:OUT`) stops before the arm is fully down | it now runs until `lift.isSeated()` (true or short) plus `L2_OUTTAKE_AFTER_SEAT_MS`, not a position threshold -- if it still cuts off early, raise `L2_OUTTAKE_MAX_MS` |
 | Lag between L1's *first* tap and the arm moving | that is `CLAW_CLOSE_TIME_MS` -- the jaws must shut before the arm pulls away |
 | L2 releases the pin in mid-air / crushes the stack / never detects contact | see "Tuning the L2 scorer" above -- the `aux` column of the trace is the number to read |
 | `BLOCKED` on a normal move | the arm made less than `LIFT_STALL_DEG` of progress in `LIFT_STALL_MS` while a real speed was commanded -- look for a jam or a preset above the real top before raising `LIFT_STALL_MS`. The lift holds **where it stopped**, not at the goal, so it never pushes into the jam |
@@ -505,7 +527,7 @@ below alongside the existing sensor readouts. A sensor that isn't plugged in sho
 | ROT | lift rotation sensor vs motor encoders. Both must go + when the lift goes up |
 | ANGLE | the rotation sensor's live raw absolute angle, the startup seed, and the homing state (`HOMING` / `HOMED @ n` / `HOME FAIL @ n`) |
 | CLAW | claw state (`OPEN`/`ARMED`/`CLAMPED`/`RELEASED`) and pivot `PIV OUT` / `PIV BACK`, **each with its ADI port letter and raw level** (`CLAW OPEN D[0]  PIV OUT C[0]` at power-on) so A / X each confirm one polarity constant; then intake-macro state, stack level, and `R:INTAKE`/`R:LIFT`/`R:wait` -- which mode R1/R2 are in |
-| LIFT (position line) | position → target (or `none`), the active named preset (or `custom`), the phase (`DRIVE`/`BRAKE`/`APPROACH`/`HOLD`/`DESCEND`/`RETURN`/`SEAT`/`PRESS`/`REL`/`UNSTK`), and `FAULT`/`SCORE STUCK`/`NO CONTACT`/`BLOCKED`/`SETTLED` |
+| LIFT (position line) | position → target (or `none`), the active named preset (or `custom`), the phase (`DRIVE`/`BRAKE`/`APPROACH`/`HOLD`/`DESCEND`/`RETURN`/`FINAL`/`SEAT`/`SEAT(short)`/`PRESS`/`REL`/`UNSTK`), and `FAULT`/`SCORE STUCK`/`NO CONTACT`/`BLOCKED`/`SETTLED` |
 | LIFT (err/vel/out line) | error in lift degrees, measured arm speed in deg/s, and what was sent to the motors in mV |
 | LIFT (ref line) | the speed reference the velocity loop is tracking this tick (0 in `HOLD`/`SEAT`) and the hold loop's learned gravity voltage in mV -- **or, during an L2 score, all three contact signals live**: `L2 lag <deg> eff <mV> v/b <%>`. Then `DIST`: claw distance sensor mm and `PIN` when inside `CLAW_DETECT_MM` |
 | TUNE | `LIFT_DECEL_DEG_PER_S2`, the approach zone / speed, `LIFT_HOLD_KD` and `LIFT_TOLERANCE_DEG` read straight from `config.hpp`, so you can see which build is on the brain while iterating |

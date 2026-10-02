@@ -251,26 +251,50 @@ inline constexpr double LIFT_DESCENT_SLOW_ZONE_DEG = 20.0;   // TUNE: slow zone 
 inline constexpr double LIFT_DESCENT_MID_FRACTION = 0.5;     // TUNE: 0.5 = the mid band is the lower half of the fast travel
 inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 800.0;// TUNE: how quickly the reference may change between bands
 
-// --- Seating on the hard stop (phase SEAT) ---------------------------------
+// --- Seating on the hard stop (phases FINAL, then SEAT) ---------------------
 // The point of the slow final descent is that the arm does not STOP above the frame -- it keeps
 // walking down until it physically cannot, and then stays pressed there so it cannot bounce back up.
-// "Physically cannot" = the arm is below LIFT_SEAT_DETECT_DEG and has moved slower than
-// LIFT_SEAT_STILL_DEG_PER_S for LIFT_SEAT_STILL_MS. After that the lift holds LIFT_SEAT_MV forever.
-// HEAT: -1200 mV is 10% of full volts. A stalled V5 motor at 10% draws well under an amp (the winding
-// is about 1.4 ohm), roughly a watt per motor, and the arm is resting on the frame so the seat voltage
-// is only fighting bounce, not holding the arm up. That is safe for a whole match -- but watch the
+//
+// TWO STEPS, not one -- this used to be a single check ("stopped under LIFT_SEAT_DETECT_DEG" ==
+// "seated") and that was the bug: a cup caught in the intake, or plain six-bar/chain friction, can
+// stall the arm a few degrees above the true hard stop, read as "stopped", and get declared SEATed
+// right there -- after which only LIFT_SEAT_MV (a HOLD voltage, meant to fight bounce, not resistance)
+// was ever applied again, so the arm simply parked short of 0 forever.
+// Below LIFT_SEAT_DETECT_DEG the arm now hands over from the ordinary DESCEND bands into FINAL: a
+// dedicated closed-loop push at a constant LIFT_FINAL_DEG_PER_S, with up to LIFT_FINAL_MAX_MV of
+// downward authority -- more force than the SEAT hold, less than DESCEND's full 12000 mV so a real
+// hard-stop contact doesn't slam -- specifically to push through that last bit of resistance. Only
+// once the arm is BOTH within LIFT_SEAT_ZERO_DEG of 0 AND still (under LIFT_SEAT_STILL_DEG_PER_S for
+// LIFT_SEAT_STILL_MS) does it hand over to true SEAT.
+// TIME BUDGET: FINAL gets up to LIFT_SEAT_MAX_MS of real pushing. If it still has not reached
+// LIFT_SEAT_ZERO_DEG by then (a genuine jam, not just friction), it gives up and seats wherever it
+// stopped -- LIFT_SEAT_MV still holds it down so it cannot bounce -- and the brain shows `SEAT(short)`
+// instead of `SEAT`, so the driver can tell it did not actually reach 0.
+// After a true SEAT the lift holds LIFT_SEAT_MV forever (or until something physically disturbs it,
+// see LIFT_SEAT_UNSEAT_DEG below).
+// HEAT: -1500 mV is 12.5% of full volts -- a stalled V5 motor there still draws well under an amp (the
+// winding is about 1.4 ohm), a bit over a watt per motor, and the arm is resting on the frame so the
+// seat voltage is only fighting bounce, not holding the arm up. Safe for a whole match -- but watch the
 // brain's TEMP line the first time, and LIFT_SEAT_TEMP_LIMIT_C drops the seat to a plain brake-hold if
 // a lift motor ever does get that hot.
-//   Bounces back up off the stop: raise the magnitude of LIFT_SEAT_MV (more negative, e.g. -1500).
-//   Motors warm up while parked at the bottom: lower the magnitude (e.g. -800).
-//   Declares itself seated while still a few degrees up: lower LIFT_SEAT_DETECT_DEG or
+//   Still stops short of 0 / shows SEAT(short) every time: raise LIFT_FINAL_MAX_MV first (5000 -> 6500),
+//     then LIFT_SEAT_MAX_MS. Check the brain's ANGLE line reads HOMED first -- "0" is only true against
+//     a homed zero; an un-homed seed can read short even when the arm is physically all the way down.
+//   Thumps into the frame during FINAL: lower LIFT_FINAL_DEG_PER_S.
+//   Bounces back up off the stop once truly seated: raise the magnitude of LIFT_SEAT_MV further (-1800).
+//   Motors warm up while parked at the bottom: lower LIFT_SEAT_MV's magnitude (e.g. -1000).
+//   Declares true SEAT while still visibly short: lower LIFT_SEAT_ZERO_DEG, lower
 //     LIFT_SEAT_STILL_DEG_PER_S, or raise LIFT_SEAT_STILL_MS.
-inline constexpr float LIFT_SEAT_MV = -1200.0f;              // TUNE: constant downward seating voltage
-inline constexpr double LIFT_SEAT_DETECT_DEG = 6.0;          // TUNE: only this close to 0 may "stopped" mean "seated"
+inline constexpr float LIFT_SEAT_MV = -1500.0f;              // TUNE: constant downward seating voltage
+inline constexpr double LIFT_SEAT_DETECT_DEG = 6.0;          // TUNE: this close to 0, hand DESCEND over to FINAL
+inline constexpr double LIFT_FINAL_DEG_PER_S = 12.0;         // TUNE: constant creep speed for the last stretch
+inline constexpr float LIFT_FINAL_MAX_MV = 5000.0f;          // TUNE: magnitude, downward authority during FINAL
+inline constexpr double LIFT_SEAT_ZERO_DEG = 1.0;            // TUNE: only this close to 0 may FINAL call it seated
+inline constexpr int LIFT_SEAT_MAX_MS = 2000;                // TUNE: FINAL's time budget before giving up in place
 inline constexpr double LIFT_SEAT_STILL_DEG_PER_S = 4.0;     // TUNE
 inline constexpr int LIFT_SEAT_STILL_MS = 150;               // TUNE
 // If something knocks a seated arm this far back up above LIFT_SEAT_DETECT_DEG, the descent restarts
-// and walks it down again rather than leaving it hanging.
+// (DESCEND, then FINAL again) and walks it back down rather than leaving it hanging.
 inline constexpr double LIFT_SEAT_UNSEAT_DEG = 4.0;          // TUNE
 inline constexpr double LIFT_SEAT_TEMP_LIMIT_C = 50.0;       // safety net, not a tuning knob
 
@@ -332,8 +356,12 @@ inline constexpr double LIFT_VEL_FILTER = 0.8;
 //             voltage over to the next move, so no move ever starts by guessing it.
 //
 // A DESCENT (a non-precise goal at or below LIFT_BOTTOM_GOAL_DEG: L2, B, auton DOWN, R2 in clamped
-// mode) is DESCEND -> SEAT: the three speed bands above, then a constant LIFT_SEAT_MV pressed into the
-// hard stop. It does not stop above the frame and it does not bounce.
+// mode) is DESCEND -> FINAL -> SEAT: the three speed bands above, then (below LIFT_SEAT_DETECT_DEG) a
+// dedicated closed-loop push at LIFT_FINAL_DEG_PER_S with up to LIFT_FINAL_MAX_MV of authority -- more
+// force than the seat hold, enough to push through a cup or friction a few degrees short of 0 -- for up
+// to LIFT_SEAT_MAX_MS, and only then a constant LIFT_SEAT_MV pressed into the hard stop. It does not
+// stop above the frame and it does not bounce; see "Seating on the hard stop" below for why the old
+// single-step version could park short.
 //
 // THE MANUAL INPUT (D-pad Up/Down, and R1 in clamped mode) is plain voltage straight into the same
 // loop, ahead of everything else; it cancels any target and any homing instantly, and letting go
@@ -382,8 +410,10 @@ inline constexpr double LIFT_FAULT_DEG = 8.0;                // TUNE
 // ---------------------------------------------------------------------------
 // VS Code -> PROS -> "Brain Terminal" (or `pros terminal`), press a lift button, paste the lines back.
 // Columns: `LIFT <ms> <phase> <pos*10> <goal*10> <vel deg/s> <out mV>`; phase is D=DRIVE, B=BRAKE,
-// A=APPROACH (the final crawl), H=HOLD, V=DESCEND (a banded trip to the bottom), S=SEAT (pressed onto
-// the hard stop), M=manual (D-pad, or R1 in clamped mode), h=homing, F=fault, I=idle. Integers only (no float formatting on the
+// A=APPROACH (the final crawl), H=HOLD, V=DESCEND (a banded trip to the bottom), R=RETURN (L2's fast
+// run home, same bands as V), Z=FINAL (the push-to-0 step below LIFT_SEAT_DETECT_DEG), S=SEAT (pressed
+// onto the hard stop, or holding short -- see LIFT_SEAT_MAX_MS), M=manual (D-pad, or R1 in clamped
+// mode), h=homing, F=fault, I=idle. Integers only (no float formatting on the
 // control task), sampled every LIFT_TRACE_EVERY_TICKS, written from a separate low-priority task that
 // drains a ring buffer -- the 10 ms control loop never calls printf. Keeps going LIFT_TRACE_TAIL_MS
 // after the arm stops so the hold is visible too. Set false to silence it entirely (no task started).
@@ -485,8 +515,12 @@ inline constexpr int L1_AUTO_INTAKE_MAX_MS = 1500;           // TUNE
 // AUTO-OUTTAKE ON L2 SCORE. While an L2 score descent is running (Scoring::isScoreDescent(): RELEASING
 // with scoreToHome_ set -- the sensing scorer, not L2's at-the-bottom clamp toggle) and the arm is
 // below this height, run the rollers OUT at L2_OUTTAKE_PCT so anything still in the intake ejects
-// instead of riding the lift down. Covers the whole trip through PRESS / REL / UNSTK / RETURN, not
-// just the final run home -- whichever phase the arm happens to be under this height in.
+// instead of riding the lift down. Covers the whole trip through PRESS / REL / UNSTK / RETURN / FINAL,
+// not just the final run home -- whichever phase the arm happens to be under this height in -- and
+// keeps running through the WHOLE slow final descent (DESCEND's slow band, then FINAL pushing for true
+// 0, see the lift's "Seating on the hard stop" above) rather than cutting off at LIFT_BOTTOM_GOAL_DEG:
+// a cup sitting in the intake can be exactly what is blocking the arm from reaching the bottom, so the
+// rollers need to still be clearing it while FINAL is forcing the last few degrees.
 //   NOTE: stack level 1 (31.0 deg) is already below this, so scoring at level 1 outtakes from the
 //   start of the press, not partway down. That is this constant as specified, not a bug.
 //   Pin/cup gets knocked loose too early: lower it. Rollers start too late to clear the handoff
@@ -495,9 +529,15 @@ inline constexpr double L2_OUTTAKE_BELOW_DEG = 40.0;         // TUNE: arm degree
 // % of full intake power (config::INTAKE_MV) the rollers run OUT at during the above. Lower than
 // R2's full-power outtake on purpose -- this runs unattended during a score, not under driver thumb.
 inline constexpr double L2_OUTTAKE_PCT = 60.0;               // TUNE: % of INTAKE_MV
+// Stop condition is now "actually SEATed" (lift.isSeated(), true SEAT or SEAT(short) alike), not a
+// position threshold -- see main.cpp -- plus this much extra afterward, so a cup that only clears once
+// the arm stops pressing on it still gets ejected rather than left riding along at the very end.
+inline constexpr int L2_OUTTAKE_AFTER_SEAT_MS = 500;         // TUNE
 // Safety net: the rollers stop after this long no matter what, so a score that stalls while under
 // L2_OUTTAKE_BELOW_DEG (BLOCKED, FAULT, stuck claw) can't leave them spinning for the rest of the match.
-inline constexpr int L2_OUTTAKE_MAX_MS = 2000;               // TUNE
+// Sized for the longer worst case now: DESCEND's slow band + FINAL's full LIFT_SEAT_MAX_MS budget +
+// L2_OUTTAKE_AFTER_SEAT_MS, with margin.
+inline constexpr int L2_OUTTAKE_MAX_MS = 4000;               // TUNE
 
 // ---------------------------------------------------------------------------
 // Pivot + claw timing. See include/subsystems/scoring.hpp.

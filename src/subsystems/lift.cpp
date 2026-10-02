@@ -74,7 +74,7 @@ void Lift::zero() {
     gravityMv_ = 0.0;
     descendHeld_ = descendOwned_ = descendRequest_ = false;
     seatHot_ = false;
-    score_ = returnFast_ = scoreStuck_ = releasedByHeight_ = false;
+    score_ = returnFast_ = scoreStuck_ = releasedByTravel_ = releasedByFloor_ = false;
     clawReleaseWanted_ = clawReleased_ = false;
     contact_.reset();
     contactTrigger_ = ContactDetector::Trigger::NONE;
@@ -288,7 +288,8 @@ void Lift::setTarget(double degrees, bool precise) {
     score_ = false;
     clawReleaseWanted_ = false;
     scoreStuck_ = false;
-    releasedByHeight_ = false;
+    releasedByTravel_ = false;
+    releasedByFloor_ = false;
     returnFast_ = false;
 
     const bool flying = active_ && !descent_ && !faulted_ && !blocked_ && phase_ != Phase::HOLD;
@@ -381,8 +382,11 @@ const char* Lift::phaseName() const {
         case Phase::PRESS: return "PRESS";
         case Phase::RELEASE:
             // Which signal fired is the first thing worth knowing when tuning, so it goes on the line.
-            // REL(32) means the detector never fired at all -- L2_AUTO_RELEASE_DEG forced it.
-            if (releasedByHeight_) return "REL(32)";
+            // REL(32) means the detector never fired at all and L2_AUTO_RELEASE_DEG's travel rule
+            // forced it; REL(floor) means the start was too low for that travel to ever complete and
+            // L2_RELEASE_FLOOR_DEG forced it instead.
+            if (releasedByTravel_) return "REL(32)";
+            if (releasedByFloor_) return "REL(floor)";
             switch (contactTrigger_) {
                 case ContactDetector::Trigger::STALL: return "REL(stall)";
                 case ContactDetector::Trigger::LAG: return "REL(lag)";
@@ -600,7 +604,8 @@ void Lift::startScore() {
     score_ = true;
     returnFast_ = false;
     scoreStuck_ = false;
-    releasedByHeight_ = false;
+    releasedByTravel_ = false;
+    releasedByFloor_ = false;
     clawReleaseWanted_ = false;
     clawReleased_ = false;
     contact_.reset();
@@ -614,6 +619,8 @@ void Lift::startScore() {
     phaseStart_ = pros::millis();
     stallStart_ = 0;
     descentStart_ = getPosition();  // the runaway guard's reference for the whole sequence
+    scoreStartPos_ = descentStart_;  // FIXED for the whole score -- the origin for L2_AUTO_RELEASE_DEG's
+                                     // relative travel rule. Unlike descentStart_, UNSTICK never moves it.
 }
 
 void Lift::clawReleaseDone() {
@@ -697,7 +704,8 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             config::L2_CONTACT_OUTPUT_TAU_MS,    config::L2_CONTACT_LAG_DEG,
             config::L2_CONTACT_LAG_LEAK_MS,      config::L2_CONTACT_EFFORT_MV,
             config::L2_CONTACT_SPEED_FRAC,       config::L2_CONTACT_FREEZE_FRAC,
-            config::L2_CONTACT_STALL_DEG_PER_S,
+            config::L2_CONTACT_STALL_DEG_PER_S,  config::L2_CONTACT_ARM_TRAVEL_DEG,
+            config::L2_CONTACT_NOSTART_MS,
         };
         const ContactDetector::Trigger fired = contact_.step(dt, descendSpeed, lastOutput_, cfg);
         aux.ratioPct = static_cast<int>(contact_.speedRatio() * 100.0);
@@ -705,34 +713,41 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         aux.effortMv = static_cast<int>(contact_.effortMv());
         aux.trigger = ContactDetector::triggerCode(contact_.firedTrigger());
 
-        // GUARANTEED RELEASE HEIGHT: the detector gets first say (checked above, including on this very
-        // tick), but if it has not fired by the time the arm is at or below L2_AUTO_RELEASE_DEG, release
-        // anyway -- there is no more "press to the bottom with nothing released" outcome. If the arm is
-        // already at or below this height the moment PRESS starts (stack level 1, 31.0 deg), this fires
+        // GUARANTEED RELEASE, BY RELATIVE TRAVEL: the detector gets first say (checked above, including
+        // on this very tick), but if it has not fired once the arm has travelled L2_AUTO_RELEASE_DEG
+        // DOWN FROM scoreStartPos_ (fixed at the start of this score, not the live position), release
+        // anyway -- there is no more "press to the bottom with nothing released" outcome. This is
+        // RELATIVE travel, not an absolute reading: a start too low for that much travel to ever happen
+        // before the floor (level 1, 31.0 deg) falls back to the same L2_RELEASE_FLOOR_DEG that
+        // RELEASE's own safety net below uses, so it still gets real sensing time rather than releasing
         // on the very first tick.
-        const bool heightRelease = fired == ContactDetector::Trigger::NONE &&
-                                   position <= config::L2_AUTO_RELEASE_DEG;
-        if (fired != ContactDetector::Trigger::NONE || heightRelease) {
-            // CONTACT (detected, or forced by height) this tick. Ask Scoring for the jaws (it owns the
-            // claw) and keep pushing down so they slide off. Scoring polls needsClawRelease() in the
-            // same 10 ms driver loop, so the cylinder is commanded within a tick -- no handshake to wait
-            // on.
+        const double traveled = scoreStartPos_ - position;
+        const bool travelRelease =
+            fired == ContactDetector::Trigger::NONE && traveled >= config::L2_AUTO_RELEASE_DEG;
+        const bool floorRelease = fired == ContactDetector::Trigger::NONE && !travelRelease &&
+                                  position <= config::L2_RELEASE_FLOOR_DEG;
+        if (fired != ContactDetector::Trigger::NONE || travelRelease || floorRelease) {
+            // CONTACT (detected, or forced by travel/floor) this tick. Ask Scoring for the jaws (it
+            // owns the claw) and keep pushing down so they slide off. Scoring polls needsClawRelease()
+            // in the same 10 ms driver loop, so the cylinder is commanded within a tick -- no handshake
+            // to wait on.
             clawReleaseWanted_ = true;
             clawReleased_ = false;
-            contactTrigger_ = fired;  // NONE when it was the height rule; see releasedByHeight_
-            releasedByHeight_ = heightRelease;
+            contactTrigger_ = fired;  // NONE for either forced path; see releasedByTravel_/releasedByFloor_
+            releasedByTravel_ = travelRelease;
+            releasedByFloor_ = floorRelease;
             phase_ = Phase::RELEASE;
             phaseStart_ = now;
             freeSince_ = 0;
             stuckSince_ = 0;
-            aux.trigger = heightRelease ? 5 : ContactDetector::triggerCode(fired);
+            aux.trigger = travelRelease ? 5 : (floorRelease ? 6 : ContactDetector::triggerCode(fired));
         }
     } else {  // Phase::RELEASE
         // Carry the detector's last readings so the r lines show what fired and what it saw.
         aux.ratioPct = static_cast<int>(contact_.speedRatio() * 100.0);
         aux.lag10 = static_cast<int>(contact_.lagDeg() * 10.0);
         aux.effortMv = static_cast<int>(contact_.effortMv());
-        aux.trigger = releasedByHeight_ ? 5 : ContactDetector::triggerCode(contactTrigger_);
+        aux.trigger = releasedByTravel_ ? 5 : (releasedByFloor_ ? 6 : ContactDetector::triggerCode(contactTrigger_));
 
         // Don't judge anything until the jaws have actually had time to open. If nobody ever
         // acknowledges the request (no Scoring::update() running, e.g. a bare auton), carry on after
@@ -752,10 +767,15 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             freeSince_ = 0;
             if (stuckSince_ == 0) stuckSince_ = now;
         }
-        if (position <= config::L2_RELEASE_FLOOR_DEG) {
-            // Safety floor for THIS phase only (separate from L2_AUTO_RELEASE_DEG above, and lower): the
-            // jaws haven't resolved free-or-stuck yet but the arm is nearly at the bottom anyway -- stop
-            // treating this as a press and hand over to the fast run-home descent right here.
+        if (clawReleased_ && position <= config::L2_RELEASE_FLOOR_DEG) {
+            // Safety floor for THIS phase (separate job from the travel/floor release rules in PRESS,
+            // same constant on purpose -- see config.hpp): the jaws haven't resolved free-or-stuck yet
+            // but the arm is nearly at the bottom anyway -- stop treating this as a press and hand over
+            // to the fast run-home descent right here. Gated on clawReleased_ (acknowledged, or
+            // L2_RELEASE_ACK_MS has elapsed) so a PRESS-side floor release landing exactly ON this same
+            // height can never race Scoring out of ever seeing needsClawRelease() -- endScore() clears
+            // clawReleaseWanted_, and without this gate that could happen before Scoring's own 10 ms
+            // loop ever polled it.
             endScore(now, position);  // already home
             return;
         }

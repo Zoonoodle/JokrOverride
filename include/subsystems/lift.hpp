@@ -115,23 +115,28 @@
  *             AGREEMENT in contact_detector.hpp, the fix for this six-bar's
  *             gravity torque swinging the loop's speed/effort fast enough, as
  *             the arm passes vertical, to false-fire a single signal in plain
- *             free air. GUARANTEED RELEASE: if the detector has not fired by the
- *             time the arm crosses down through L2_AUTO_RELEASE_DEG, it releases
- *             anyway, right there, exactly as if contact had been detected --
- *             there is no longer a "press all the way down with nothing
- *             released" outcome. If the arm is already at or below
- *             L2_AUTO_RELEASE_DEG the moment PRESS starts, it releases on the
- *             very first tick.
- *   RELEASE   contact found (by the detector, or by crossing L2_AUTO_RELEASE_DEG):
- *             needsClawRelease() goes true for Scoring to act on IN THE SAME TICK
- *             the trigger fires, and the arm KEEPS pressing down at the same
- *             speed so the jaws slide off the pin. Once the jaws have had
+ *             free air. GUARANTEED RELEASE: if the detector has not fired once the
+ *             arm has travelled L2_AUTO_RELEASE_DEG DOWN FROM scoreStartPos_ (the
+ *             position when startScore() ran, fixed for the whole sequence -- a
+ *             RELATIVE travel budget, not an absolute reading, so every score gets
+ *             the same chance to be detected whatever height it starts from), it
+ *             releases anyway, right there, as REL(32) -- there is no longer a
+ *             "press all the way down with nothing released" outcome. A start too
+ *             low for that much travel to ever happen before the floor (level 1,
+ *             31.0) instead falls back to releasing at L2_RELEASE_FLOOR_DEG, as
+ *             REL(floor) -- see that constant in config.hpp for why it is shared
+ *             with RELEASE's own safety net below.
+ *   RELEASE   contact found (by the detector, or forced by the travel/floor rules
+ *             above): needsClawRelease() goes true for Scoring to act on IN THE
+ *             SAME TICK the trigger fires, and the arm KEEPS pressing down at the
+ *             same speed so the jaws slide off the pin. Once the jaws have had
  *             CLAW_OPEN_TIME_MS to open, a plain speed test decides (with the
  *             jaws open the arm either moves or it does not): clearly moving for
  *             L2_FREE_MS -> free, go home; still stopped for L2_STUCK_MS -> the
  *             claw is hooked on the pin -> UNSTICK. If the arm reaches
- *             L2_RELEASE_FLOOR_DEG before either resolves, it hands over to the
- *             fast run-home descent right there rather than keep pressing.
+ *             L2_RELEASE_FLOOR_DEG before either resolves (and the claw-open
+ *             request has had a chance to land, see clawReleased_), it hands over
+ *             to the fast run-home descent right there rather than keep pressing.
  *   UNSTICK   lift L2_UNSTICK_UP_DEG with the claw open, then press again. At
  *             most L2_MAX_UNSTICK_TRIES times; after that it stops, holds where
  *             it is and reports SCORE STUCK rather than grinding.
@@ -463,7 +468,7 @@ class Lift {
         int ratioPct;   // measured / baseline speed, percent
         int lag10;      // accumulated position shortfall, arm deg x10
         int effortMv;   // extra downward push over the free-descent baseline
-        int trigger;    // 0 none, 1 stall, 2 lag, 3 effort, 4 speed, 5 height (latched once fired)
+        int trigger;    // 0 none, 1 stall, 2 lag, 3 effort, 4 speed, 5 travel(32), 6 floor (latched once fired)
     };
     void trace(std::uint32_t now, char phase, double position, double mv, bool moving, const TraceAux& aux = TraceAux{});
     void traceDrain();
@@ -508,12 +513,17 @@ class Lift {
     bool score_ = false;                 // a press/sense/release sequence is running
     bool returnFast_ = false;            // this DESCEND is a post-score run home (for the phase name)
     bool scoreStuck_ = false;            // gave up: claw still caught after every unstick try
-    bool releasedByHeight_ = false;      // this RELEASE was forced by L2_AUTO_RELEASE_DEG, not detected
+    double scoreStartPos_ = 0.0;         // position when startScore() ran -- fixed for the whole score;
+                                          // the origin for L2_AUTO_RELEASE_DEG's RELATIVE travel rule.
+                                          // NOT the same as descentStart_, which UNSTICK re-baselines.
+    bool releasedByTravel_ = false;      // this RELEASE was forced by L2_AUTO_RELEASE_DEG's travel rule
+    bool releasedByFloor_ = false;       // this RELEASE was forced by L2_RELEASE_FLOOR_DEG (low start)
     bool clawReleaseWanted_ = false;     // the lift is asking Scoring to open the jaws
     bool clawReleased_ = false;          // Scoring acknowledged (clawReleaseDone())
     std::uint32_t clawReleasedAt_ = 0;
     ContactDetector contact_;            // the landing detector, PRESS only (pure, see its header)
-    ContactDetector::Trigger contactTrigger_ = ContactDetector::Trigger::NONE;  // which signal fired (NONE if releasedByHeight_)
+    ContactDetector::Trigger contactTrigger_ = ContactDetector::Trigger::NONE;  // which signal fired (NONE if
+                                                                                 // releasedByTravel_/releasedByFloor_)
     std::uint32_t freeSince_ = 0;        // when the arm was first seen clearly moving after the release
     std::uint32_t stuckSince_ = 0;       // when it was first seen stopped after the release
     double pressRef_ = 0.0;              // ramped press/unstick speed reference, unsigned deg/s

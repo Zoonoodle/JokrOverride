@@ -52,6 +52,8 @@ ContactDetector::Config realConfig() {
         /*speedFrac*/ 0.55,
         /*freezeFrac*/ 0.82,
         /*stallDegPerS*/ 6.0,
+        /*armTravelDeg*/ 3.5,
+        /*noStartMs*/ 350.0,
     };
 }
 
@@ -195,7 +197,8 @@ void report(const Case& c) {
 
 int main() {
     std::printf("ContactDetector — synthetic 10 ms traces (lag 2.2 deg leak 200 ms, effort 1800 mV,\n");
-    std::printf("                  frac 0.55, stall 6 deg/s, settle 200 ms, confirm 30 ms, AGREEMENT >=2)\n\n");
+    std::printf("                  frac 0.55, stall 6 deg/s, settle 200 ms, confirm 30 ms, AGREEMENT >=2,\n");
+    std::printf("                  arm travel 3.5 deg, no-start 350 ms)\n\n");
     std::printf("%-42s %-9s %-7s %-9s   %-34s %s\n", "scenario", "result", "trigger", "latency", "at fire",
                 "verdict");
     std::printf("%s\n", std::string(118, '-').c_str());
@@ -251,12 +254,16 @@ int main() {
         report(c);
     }
     // 7. A pin ALREADY resting on the stack when L2 is pressed: the arm never gets going at all.
-    //    Only the absolute stall trigger can see this, and it must not need the baseline.
+    //    Only the absolute stall trigger can see this, and it must not need the baseline. SPLIT STALL
+    //    (2026-10-02): the arm never arms_ here (it never clears stallDegPerS), so this now takes the
+    //    much longer noStartMs window (350 ms) instead of the fast confirmMs -- the deliberate trade
+    //    that lets a loaded-but-moving arm prove it isn't resting before STALL gives up on it. See the
+    //    "loaded claw" scenarios below for why.
     {
         Noise n;
         std::vector<Sample> t;
         for (int i = 0; i < 100; ++i) t.push_back({std::max(0.0, 1.0 + n.next(1.5)), -4500.0 + n.next(250.0)});
-        Case c{"pin already resting: never moves", t, true, 0, 120.0};
+        Case c{"pin already resting: never moves", t, true, 0, 420.0};
         report(c);
     }
     // 8. A slow, genuine drift in what a free descent costs (gravity torque changing with angle):
@@ -314,6 +321,51 @@ int main() {
     {
         Noise n;
         Case c{"spin-up from HOLD (residual speed, not 0)", spinUpFromHold(55.0, -1500.0, 30, n), false, -1, 0.0};
+        report(c);
+    }
+    // 13-16. LOADED CLAW (pin + cup): the user's field report -- empty claw was correct both ways, but
+    // holding a pin+cup it auto-released almost immediately, every time, over bare floor. The weight
+    // adds directly to the gravity resistance over the part of the arc where this six-bar's torque
+    // already resists descending, and L2_PRESS_MAX_MV caps how hard the loop may push back -- so a
+    // loaded arm can sit under stallDegPerS for a lot longer than an empty one while it is still
+    // perfectly free, which is exactly what the OLD fixed-time STALL window read as "resting on a
+    // stack". ARM ON MOTION (armTravelDeg) + SPLIT STALL (noStartMs) are the fix; these four scenarios
+    // are what would have caught it before it ever reached the robot.
+    //
+    // 13. Loaded slow spin-up: only reaches ~45 deg/s, and not until ~200-250 ms in (an unloaded press
+    //     is at cruise within ~70 ms -- see freeDescent's default 800 deg/s^2). Must NOT fire.
+    {
+        Noise n;
+        Case c{"loaded slow spin-up (45 deg/s by ~200 ms)", freeDescent(45.0, -3500.0, 200, n, 200.0), false, -1,
+               0.0};
+        report(c);
+    }
+    // 14. Loaded free descent with a much higher EFFORT baseline (-4500 mV just to cruise, vs -1500 for
+    //     an empty claw) but otherwise ordinary and steady. EFFORT measures DEVIATION from the learned
+    //     baseline, not the raw mV, so a high but steady cost must not fire on its own.
+    {
+        Noise n;
+        Case c{"loaded free descent, high effort baseline", freeDescent(70.0, -4500.0, 200, n), false, -1, 0.0};
+        report(c);
+    }
+    // 15. Loaded LANDING: the same slow loaded spin-up as #13, then a real (if not especially hard)
+    //     landing. Must still fire, and in reasonable time -- the fix must not cost real detections.
+    {
+        Noise n;
+        std::vector<Sample> t = freeDescent(45.0, -3500.0, 60, n, 200.0);
+        const int landing = static_cast<int>(t.size());
+        appendLanding(t, 45.0, -3500.0, 10.0, 80.0, 2200.0, 150.0, 150, n);
+        Case c{"loaded landing after slow spin-up", t, true, landing, 500.0};
+        report(c);
+    }
+    // 16. Loaded, NEVER starts -- a pin+cup held against something immovable from the first tick
+    //     (distinct from #7's unloaded resting case only in the effort baseline it pushes at). Must
+    //     still fire eventually -- noStartMs is a delay, never a disable -- just not before it.
+    {
+        Noise n;
+        std::vector<Sample> t;
+        for (int i = 0; i < 100; ++i) t.push_back({std::max(0.0, 1.0 + n.next(1.5)), -5000.0 + n.next(250.0)});
+        Case c{"loaded, never starts (held against something)", t, true, 0, 420.0};
         report(c);
     }
 

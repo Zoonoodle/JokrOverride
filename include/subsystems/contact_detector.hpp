@@ -71,6 +71,28 @@
  * threshold never opens a candidate at all; a real landing moves the position-shortfall, the motor
  * effort and the speed ratio together, so two-of-three is typically true almost immediately. See the
  * host test's gravity-swing scenarios for exactly this.
+ *
+ * ARM ON MOTION, AND SPLIT STALL, added 2026-10-02 after the robot auto-released almost immediately
+ * EVERY time it held a pin+cup over bare floor (empty claw was fine in both directions -- correct
+ * no-fire in the air, correct fire on real resistance). ROOT CAUSE: STALL is deliberately exempt from
+ * AGREEMENT and from waiting for `armed_` -- it is the one signal meant to catch a pin already resting
+ * on the stack the instant L2 is pressed, with no baseline at all. But "measured < stallDegPerS" cannot
+ * tell "resting on something" apart from "a loaded arm that simply hasn't out-run gravity yet": over
+ * much of this six-bar's arc gravity resists the descent, L2_PRESS_MAX_MV caps how hard the loop may
+ * push back, and the extra weight of a pin+cup can keep a perfectly free-hanging arm under
+ * stallDegPerS for longer than the old ignoreMs+confirmMs window -- so it fired almost on arrival,
+ * every time, with nothing under the arm. Two fixes:
+ *   ARM ON MOTION, NOT JUST TIME. `armed_` now also requires the arm to have actually TRAVELLED
+ *   `armTravelDeg` since the press started (self-integrated from `measured`, so the class stays pure --
+ *   no position input needed), not merely that `settleMs` elapsed and the instantaneous speed cleared
+ *   the stall floor for one sample. A baseline snapshotted from a real stretch of motion is trustworthy;
+ *   one snapshotted from a lucky instant is not.
+ *   SPLIT STALL. Once the arm has been armed_ at any point this press, a LATER drop below the floor is
+ *   "it moved, then stopped" -- genuinely unambiguous, confirmed fast (the ordinary ignoreMs+confirmMs).
+ *   Until armed_ has EVER been true, a drop below the floor is "never really got moving", which gets a
+ *   much longer `noStartMs` window before it counts as STALL -- long enough for a loaded arm fighting
+ *   gravity to prove it is actually accelerating (even slowly) rather than resting on something. A pin
+ *   genuinely already on the stack still fires, just `noStartMs` later than before.
  */
 
 #include <algorithm>
@@ -96,10 +118,13 @@ class ContactDetector {
         double speedFrac;      // measured < this fraction of the baseline speed -> SPEED trigger
         double freezeFrac;     // measured < this fraction of the baseline -> stop LEARNING (see below)
         double stallDegPerS;   // absolute near-stop, needs no baseline
+        double armTravelDeg;   // ARM ON MOTION: cumulative travel required (with settleMs) before arming
+        double noStartMs;      // STALL's window when the arm has NEVER armed_ (see class comment)
     };
 
     void reset() {
         elapsedMs_ = 0.0;
+        traveled_ = 0.0;
         armed_ = false;
         baseSpeed_ = 0.0;
         baseMv_ = 0.0;
@@ -128,6 +153,7 @@ class ContactDetector {
         if (dt <= 0.0) dt = 0.01;
         const double ms = dt * 1000.0;
         elapsedMs_ += ms;
+        traveled_ += measured * dt;  // ARM ON MOTION: self-integrated, no position input needed
 
         // Low-pass the motor output: it is KP * error plus an integral, so it is the noisiest input
         // here, and the effort signal is a comparison of two slow averages.
@@ -145,9 +171,11 @@ class ContactDetector {
 
         if (!armed_) {
             // Spin-up: learn, don't judge (beyond the absolute stop above). Arming needs the settle
-            // time AND an arm that is actually descending, so a stuck arm never baselines at zero --
-            // if it is stuck, the STALL trigger is what fires, not a bogus baseline.
-            if (elapsedMs_ >= cfg.settleMs && measured >= cfg.stallDegPerS) {
+            // time, an arm that is actually descending, AND (ARM ON MOTION) real cumulative travel --
+            // not just one lucky instantaneous sample -- so a stuck arm never baselines at zero, and a
+            // loaded arm that is only slowly accelerating doesn't get a baseline snapshotted too early
+            // either. If it is stuck, the STALL trigger is what fires, not a bogus baseline.
+            if (elapsedMs_ >= cfg.settleMs && measured >= cfg.stallDegPerS && traveled_ >= cfg.armTravelDeg) {
                 armed_ = true;
                 baseSpeed_ = measured;
                 baseMv_ = outFilt_;
@@ -197,7 +225,11 @@ class ContactDetector {
             } else {
                 candidateMs_ += ms;
             }
-            if (elapsedMs_ >= cfg.ignoreMs && candidateMs_ >= cfg.confirmMs) {
+            // SPLIT STALL (see class comment): "never got moving" needs the much longer noStartMs
+            // window; everything else (including a STALL that comes AFTER the arm was once armed_,
+            // i.e. it moved and then genuinely stopped) keeps the ordinary fast confirmMs.
+            const double neededMs = (pending_ == Trigger::STALL && !armed_) ? cfg.noStartMs : cfg.confirmMs;
+            if (elapsedMs_ >= cfg.ignoreMs && candidateMs_ >= neededMs) {
                 fired_ = pending_;
                 return fired_;
             }
@@ -247,6 +279,7 @@ class ContactDetector {
 
   private:
     double elapsedMs_ = 0.0;
+    double traveled_ = 0.0;  // ARM ON MOTION: cumulative distance since reset(), self-integrated
     bool armed_ = false;
     double baseSpeed_ = 0.0;
     double baseMv_ = 0.0;

@@ -52,11 +52,15 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *               DOWN onto the stack with the claw still SHUT at L2_SCORE_SPEED_PCT, watches the
  *               rotation sensor for the landing (at least two of LAG/EFFORT/SPEED must agree -- see
  *               contact_detector.hpp -- a lone signal is no longer enough since this six-bar's gravity
- *               torque swing can false-fire one on its own). GUARANTEED RELEASE: if nothing is detected
- *               by the time the arm crosses L2_AUTO_RELEASE_DEG (32 deg) it releases anyway, right
- *               there (shown as REL(32)) -- there is no more "pressed all the way down with nothing
- *               released". Level 1 (31 deg) is already below this, so L2 at level 1 releases on the
- *               very first tick, with no press-and-sense feel at all. Either way: releases the claw
+ *               torque swing can false-fire one on its own; a loaded arm also gets ARM ON MOTION +
+ *               SPLIT STALL so it isn't misread as already resting on something while it is still just
+ *               slowly out-running gravity under load). GUARANTEED RELEASE: if nothing is detected once
+ *               the arm has travelled L2_AUTO_RELEASE_DEG (32 deg) DOWN FROM where L2 was first pressed
+ *               (RELATIVE travel, not an absolute reading), it releases anyway, right there (shown as
+ *               REL(32)) -- there is no more "pressed all the way down with nothing released". A start
+ *               too low for that much travel before the floor (level 1, 31 deg) instead falls back to
+ *               releasing at L2_RELEASE_FLOOR_DEG (shown as REL(floor)), so level 1 still gets real
+ *               sensing time rather than releasing on the first tick. Either way: releases the claw
  *               and keeps pushing so the jaws slide off, checks the arm is really free (lifting
  *               L2_UNSTICK_UP_DEG and retrying if the claw is caught), then runs home fast, forces the
  *               last few degrees onto the hard stop (Lift's FINAL phase -- see lift.hpp -- so a cup or

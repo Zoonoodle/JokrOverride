@@ -117,27 +117,41 @@ through, then judges once by position — within `LIFT_SEAT_ZERO_DEG` of 0 is pl
 give up after a budget), which `LIFT_SEAT_MAX_MS`/`LIFT_SEAT_STILL_*` belonged to and are now gone. →
 SEAT (a constant `LIFT_SEAT_MV`, −1500 pressed into the hard stop, so it does not park above the frame
 and cannot bounce). An **L2 score** is
-a third kind: `Lift::startScore()` → PRESS (push the pin onto the stack with the jaws **shut**, capped
-at `L2_PRESS_MAX_MV`) → contact, decided by `subsystems::ContactDetector` **OR** forced by
-`L2_AUTO_RELEASE_DEG` (32°, 2026-10-02) the moment PRESS crosses that height with nothing detected —
-there is no more "pressed to the bottom with nothing released"; level 1 (31°) is already below it, so
-L2 at level 1 releases on the first tick → REL (the lift raises `needsClawRelease()`, shown as `REL(32)`
-if the height rule fired it; **Scoring** opens the claw, the lift never touches a cylinder) → the freed
-check → UNSTK up `L2_UNSTICK_UP_DEG` and retry if the claw is caught → the descent above at
-`L2_RETURN_SPEED_PCT`. **The detector's rule, learned the hard way:** never threshold against the
-*nominal command* — the first version did, and could never fire, because this six-bar often cannot make
-the commanded descent speed at all (the arm swings up and *back*, so gravity resists the descent over
-much of the arc and the press cap limits the push). Every signal is measured against a **learned
+a third kind: `Lift::startScore()` (records `scoreStartPos_`, the arm's position right then, fixed for
+the whole score) → PRESS (push the pin onto the stack with the jaws **shut**, capped at
+`L2_PRESS_MAX_MV`, 7000 mV — raised from 5000, see loaded-claw note below) → contact, decided by
+`subsystems::ContactDetector` **OR** forced by `L2_AUTO_RELEASE_DEG` (32°, corrected 2026-10-02 to be
+**RELATIVE travel from `scoreStartPos_`, NOT an absolute reading** — the first version wrongly compared
+the live position against 32 directly) the moment PRESS has travelled that far down with nothing
+detected — there is no more "pressed to the bottom with nothing released". A start too low for 32° of
+travel to complete before the floor (level 1, 31°) falls back to `L2_RELEASE_FLOOR_DEG` (10°) instead,
+so level 1 still gets ~21° of real sensing rather than releasing on the first tick → REL (the lift
+raises `needsClawRelease()`, shown as `REL(32)` for the travel rule or `REL(floor)` for the low-start
+fallback; **Scoring** opens the claw, the lift never touches a cylinder) → the freed check (gated on
+`clawReleased_` before honoring `L2_RELEASE_FLOOR_DEG`'s own safety-net role here too, so a PRESS-side
+floor release landing exactly on that height can never race Scoring out of ever seeing
+`needsClawRelease()`) → UNSTK up `L2_UNSTICK_UP_DEG` and retry if the claw is caught → the descent
+above at `L2_RETURN_SPEED_PCT`. **The detector's rule, learned the hard way:** never threshold against
+the *nominal command* — the first version did, and could never fire, because this six-bar often cannot
+make the commanded descent speed at all (the arm swings up and *back*, so gravity resists the descent
+over much of the arc and the press cap limits the push). Every signal is measured against a **learned
 baseline of what the arm was actually doing a moment ago**: a leaky integral of the position shortfall
 (`LAG`), the loop's effort over the free-descent baseline (`EFFORT`), and a speed-ratio / near-stop
 backstop. The baselines track slow gravity drift but **freeze** below `L2_CONTACT_FREEZE_FRAC` so they
 cannot follow a gentle landing down and mask it. **AGREEMENT (2026-10-02):** a lone `LAG`/`EFFORT`/
 `SPEED` signal is no longer enough — at least two of the three must be over threshold on the *same*
-tick (`STALL` is exempt). Fix for the robot false-firing in plain free descent: this six-bar's gravity
-torque swings up and back past vertical fast enough to move one signal alone, with nothing under the
-arm at all. Since `L2_AUTO_RELEASE_DEG` now guarantees a release regardless, the detector is allowed to
-be the more conservative side of that trade. Out of unstick tries → `SCORE STUCK`, holds where it is,
-never grinds. Nothing re-drives
+tick (`STALL` is exempt). Fix for the robot false-firing in plain free descent with an **empty** claw:
+this six-bar's gravity torque swings up and back past vertical fast enough to move one signal alone,
+with nothing under the arm at all. **ARM ON MOTION + SPLIT STALL (2026-10-02):** a second, different
+false-fire — a **loaded** claw (pin + cup) auto-released almost immediately, every time, because the
+load adds to that same gravity resistance and the one signal exempt from AGREEMENT (`STALL`, so a
+resting pin is still caught) read a loaded-but-still-free arm's slow start as resting on something.
+`armed_` now also needs `L2_CONTACT_ARM_TRAVEL_DEG` of real cumulative travel (self-integrated inside
+the pure detector), and STALL splits: unambiguous once the arm has armed_ at all (fast confirm), but a
+STALL before it has EVER armed_ waits the much longer `L2_CONTACT_NOSTART_MS`. Since
+`L2_AUTO_RELEASE_DEG` now guarantees a release regardless, the detector is allowed to be the more
+conservative side of every one of these trades. Out of unstick tries → `SCORE STUCK`, holds where it
+is, never grinds. Nothing re-drives
 or re-chases: the hold *is* the correction. Four earlier designs are in `git log` and must not come
 back: `d2978c7` (jumped setpoint, high kP), `6b8165c` (trapezoid + leash + fixed `LIFT_KG`), `3723ef2`
 (`LIFT_BRAKE_DECEL_DEG_PER_S2 = 2000` asked for more braking than the arm can do, and handing a

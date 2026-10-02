@@ -634,11 +634,21 @@ inline constexpr int CLAW_OPEN_TIME_MS = 200;                // TUNE: never meas
 inline constexpr double L2_SCORE_SPEED_PCT = 60.0;           // TUNE: ~90 deg/s
 // Most the loop may push DOWNWARD (magnitude, mV) while pressing. This is the crush limit: the
 // velocity loop has 12000 mV of authority and an integral that winds up, so without a cap it would
-// keep increasing the push until it moved -- i.e. flatten the stack. 5000 mV through the 4:1 is about
-// 40% of stall torque: firm enough to seat a pin, not enough to crumple a tower.
-//   The stack gets pushed over / the cup crumples: LOWER it (3500).
-//   The pin does not seat fully before the release: raise it (6500).
-inline constexpr float L2_PRESS_MAX_MV = 5000.0f;            // TUNE: magnitude, downward
+// keep increasing the push until it moved -- i.e. flatten the stack. 7000 mV through the 4:1 is about
+// 56% of stall torque: firm enough to seat a pin, not enough to crumple a tower.
+// RAISED 5000 -> 7000 (2026-10-02): holding a pin+cup, this six-bar can need real authority just to
+// keep descending at the commanded speed over the part of the arc where gravity resists most -- the
+// extra weight adds directly to that resistance. At 5000 mV a loaded arm could saturate the velocity
+// loop and settle into a steady creep under STALL's absolute floor (config::L2_CONTACT_STALL_DEG_PER_S)
+// with NOTHING under the arm, which is most of why a loaded claw auto-released almost immediately every
+// time (see "ARM ON MOTION, AND SPLIT STALL" in contact_detector.hpp for the other half of that fix).
+// 7000 is still well short of the full 12000 the loop could use outside a score, so a real hard-stack
+// contact still can't get the crush authority of an ordinary move.
+//   The stack gets pushed over / the cup crumples: LOWER it (5500).
+//   The pin does not seat fully before the release: raise it (8000).
+//   A loaded arm still creeps under L2_CONTACT_STALL_DEG_PER_S with nothing under it: raise this
+//   further, or raise L2_CONTACT_NOSTART_MS so it has longer to prove it is still accelerating.
+inline constexpr float L2_PRESS_MAX_MV = 7000.0f;            // TUNE: magnitude, downward (was 5000)
 // CONTACT DETECTION. Implemented by subsystems::ContactDetector (include/subsystems/contact_detector.hpp),
 // which is a PURE class with host-side tests in test/ -- run test/run.sh on the Mac after changing any
 // of these, it proves the thresholds against synthetic landings before anything is uploaded.
@@ -699,10 +709,34 @@ inline constexpr double L2_CONTACT_EFFORT_MV = 1800.0;       // TUNE: extra down
 inline constexpr double L2_CONTACT_SPEED_FRAC = 0.55;        // TUNE: measured / baseline that counts as contact (was 0.70)
 inline constexpr double L2_CONTACT_STALL_DEG_PER_S = 6.0;    // TUNE: absolute near-stop, needs no baseline, no AGREEMENT
 inline constexpr int L2_CONTACT_MS = 30;                     // TUNE: confirm window (was 20 -- see AGREEMENT below)
+// ARM ON MOTION, added 2026-10-02 (see contact_detector.hpp): arming now also needs this much
+// cumulative travel since the press started, not just a lucky instantaneous sample over
+// L2_CONTACT_STALL_DEG_PER_S once L2_CONTACT_SETTLE_MS has elapsed. This is what stops a loaded arm's
+// slow, still-accelerating start from snapshotting a baseline too early.
+//   Baseline looks wrong / fires early on a loaded press: raise this (3.5 -> 5.0).
+//   Takes too long to arm on a normal unloaded press: lower it, but not below a degree or two -- it
+//   needs to be more than sensor noise could ever integrate into over L2_CONTACT_SETTLE_MS.
+inline constexpr double L2_CONTACT_ARM_TRAVEL_DEG = 3.5;     // TUNE: arm degrees, cumulative since PRESS started
 // How long the press gets to reach a steady descent speed before the baseline is snapshotted and the
 // baseline-relative signals come alive. The absolute near-stop is live before this (after the dead
 // time below), so a pin that is already resting is still caught immediately.
 inline constexpr int L2_CONTACT_SETTLE_MS = 200;             // TUNE
+// SPLIT STALL's "never really started" window, added 2026-10-02: a pin+cup's weight can keep a
+// perfectly free arm under L2_CONTACT_STALL_DEG_PER_S for longer than the ordinary ignoreMs+confirmMs
+// (L2_CONTACT_IGNORE_MS + L2_CONTACT_MS) while it fights gravity on the way to actually arming -- that
+// was most of why a loaded claw auto-released almost immediately. Once the arm HAS armed_ at any point
+// this press, a later stop is unambiguous and still confirms at the fast ignoreMs+confirmMs; only a
+// STALL that has never seen the arm arm_ waits this long. See contact_detector.hpp's "ARM ON MOTION,
+// AND SPLIT STALL".
+//   A genuinely empty floor still auto-releases almost instantly: that is now L2_CONTACT_MS/IGNORE_MS
+//     (fast path) if it never looked like it might be loaded, which is correct -- this window only
+//     matters once the arm starts out moving slowly.
+//   A loaded claw over bare floor still reads as resting before L2_AUTO_RELEASE_DEG: raise this
+//     further (350 -> 500), and/or raise L2_PRESS_MAX_MV so the loaded arm can actually clear
+//     L2_CONTACT_STALL_DEG_PER_S sooner.
+//   A real resting pin now takes noticeably longer to confirm: that trade is intentional -- see the
+//     class comment in contact_detector.hpp. L2_AUTO_RELEASE_DEG's travel rule is the backstop either way.
+inline constexpr int L2_CONTACT_NOSTART_MS = 350;            // TUNE: ms, STALL's window while never armed_
 // Baseline EMA time constants. The baselines must track the slow, genuine sag in a free descent's
 // speed and cost as the gravity torque changes with angle -- otherwise LAG drifts into a false
 // trigger -- but they FREEZE as soon as the arm is below L2_CONTACT_FREEZE_FRAC of the baseline, so
@@ -738,28 +772,42 @@ inline constexpr double L2_UNSTICK_UP_DEG = 20.0;            // TUNE: arm degree
 inline constexpr double L2_UNSTICK_SPEED_PCT = 40.0;         // TUNE: ~60 deg/s, it is only a short hop
 inline constexpr int L2_UNSTICK_TIMEOUT_MS = 1200;           // safety net: don't grind upward either
 inline constexpr int L2_MAX_UNSTICK_TRIES = 2;               // TUNE
-// GUARANTEED RELEASE HEIGHT (2026-10-02, replaces L2_NO_CONTACT_DEG and the old "NO CONTACT: keep the
-// pin, seat with it still clamped" behaviour). The detector is a real sensor reading a real stack, but
-// it is not the only thing allowed to decide the pin has to come off any more: the moment PRESS crosses
-// down through this height WITHOUT a detection, it releases anyway, exactly as if the detector had
-// fired (claw opens, keep pushing so the jaws slide off, same freed/UNSTK handling, same fast run
-// home). If the detector fires ABOVE this height first, that still wins and releases immediately -- this
-// is strictly a floor under it, never a delay. Below any plausible landing height would defeat the
-// point (it has to be ABOVE the lowest real stack), and level 1 (31.0) is barely above it on purpose:
-// L2 pressed with the arm already at or below this height releases on the very first PRESS tick, i.e.
-// scoring level 1 no longer has a press-and-sense feel at all, it just lets go immediately. Flagged for
-// the user to confirm.
+// GUARANTEED RELEASE, BY RELATIVE TRAVEL (2026-10-02, replaces L2_NO_CONTACT_DEG and the old
+// "NO CONTACT: keep the pin, seat with it still clamped" behaviour; corrected 2026-10-02 from an
+// earlier, WRONG absolute-height version -- the user's own words: "i dnt mean the actual 32 degree
+// reading, but 32 degrees relative down from the starting position it was at when we first clicked
+// L2"). The detector is a real sensor reading a real stack, but it is not the only thing allowed to
+// decide the pin has to come off any more: once PRESS has travelled this many degrees DOWN FROM
+// Lift::scoreStartPos_ -- the position captured the instant startScore() ran, fixed for the whole
+// sequence -- without a detection, it releases anyway, exactly as if the detector had fired (claw
+// opens, keep pushing so the jaws slide off, same freed/UNSTK handling, same fast run home). Shown as
+// REL(32) on the brain/trace. If the detector fires first, that still wins and releases immediately --
+// this is strictly a floor under it, never a delay.
+// RELATIVE, NOT ABSOLUTE, because the whole point is "give the detector this much of THIS press to
+// prove itself", the same travel budget whether scoring starts at level 1 (31.0) or level 5 (106.9).
+// An absolute reading has no such thing to offer a press that starts below 32 in the first place --
+// see L2_RELEASE_FLOOR_DEG below for that case.
 //   Pin dropped from a bit too high / too early on a real stack: raise it only a little -- raising it a
 //     lot just turns more of the press into a guaranteed-release, no-sensing region.
 //   Height rule fires before a real landing that the detector should have caught: that is a tuning
 //     problem in the CONTACT_* block above, not this constant -- the detector is supposed to win first.
-inline constexpr double L2_AUTO_RELEASE_DEG = 32.0;          // TUNE: arm degrees
-// Safety floor for the RELEASE phase only (separate from the auto-release height above, and much
-// lower): if the jaws still haven't resolved free-or-stuck by the time the arm has pressed down to
-// this height -- a slow claw-open, a borderline UNSTICK retry -- stop treating this as a press and hand
-// over to the fast run-home descent right there, instead of grinding further down with
-// L2_PRESS_MAX_MV's authority. Below any plausible landing height and below L2_AUTO_RELEASE_DEG, so it
-// can only ever matter once a release (by either path) has already happened.
+inline constexpr double L2_AUTO_RELEASE_DEG = 32.0;          // TUNE: arm degrees, RELATIVE travel from the L2 start
+// TWO JOBS, both "we're close enough to the bottom, stop being delicate about it", at the same height
+// on purpose:
+//   1. PRESS fallback for a start too low for L2_AUTO_RELEASE_DEG's travel to ever complete before the
+//      floor (level 1, 31.0, can only travel ~21-31 deg before 0 depending on exactly where it seats --
+//      never the full 32). If nothing is detected and the travel rule can't apply, release here instead,
+//      shown as REL(floor) -- so level 1 still gets roughly 21 deg of real sensing before it gives up,
+//      rather than the old (wrong) behaviour of releasing on the very first PRESS tick.
+//   2. RELEASE-phase safety net (the original role): if the jaws still haven't resolved free-or-stuck
+//      by the time the arm has pressed down to this height -- a slow claw-open, a borderline UNSTICK
+//      retry -- stop treating this as a press and hand over to the fast run-home descent right there,
+//      instead of grinding further down with L2_PRESS_MAX_MV's authority. This check is gated on
+//      clawReleased_ (the claw-open request has been acknowledged, or L2_RELEASE_ACK_MS has elapsed) so
+//      a PRESS-fallback release landing exactly ON this floor can never race Scoring out of ever seeing
+//      needsClawRelease() -- see Lift::updateScore().
+// Below any plausible landing height and below L2_AUTO_RELEASE_DEG either way, so it can only ever
+// matter once a release (by any path) has already happened or the travel rule structurally cannot.
 inline constexpr double L2_RELEASE_FLOOR_DEG = 10.0;         // TUNE: arm degrees
 // The run home once the claw is free: % of free speed for the top and middle bands of the ordinary
 // descent (the slow final zone and the SEAT are unchanged, so it still cannot slam or bounce).

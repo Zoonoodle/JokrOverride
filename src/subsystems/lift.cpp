@@ -269,6 +269,22 @@ void Lift::setTarget(double degrees, bool precise) {
     }
 
     if (active_ && clamped == goal_ && wantPrecise == precise_ && !faulted_ && !blocked_) return;  // same move, already running
+
+    // Is this a RETARGET of a move that is already flying, rather than a brand-new move? A position
+    // move already in DRIVE / BRAKE / APPROACH, not faulted or blocked, with the same precision, and a
+    // new goal that is still a position move: then the ONLY things that have to change are the goal
+    // and the runaway guard's reference. Phase, the velocity loop's integral, the approach clock and
+    // the stall window are all left exactly as they are, and update()'s per-tick phase choice picks up
+    // the new distance on the very next tick. That is what makes two or three quick L1 taps merge into
+    // one continuous rise instead of each tap restarting the move from scratch.
+    const bool flying = active_ && !descent_ && !faulted_ && !blocked_ && phase_ != Phase::HOLD;
+    const bool newIsDescent = !wantPrecise && clamped <= config::LIFT_BOTTOM_GOAL_DEG;
+    if (flying && wantPrecise == precise_ && !newIsDescent) {
+        goal_ = clamped;
+        minDist_ = std::fabs(goal_ - getPosition());
+        return;
+    }
+
     active_ = true;
     descendOwned_ = fromR2;
     // A deliberate new command clears a latched runaway fault or a stall: the guards' job is to stop
@@ -373,14 +389,20 @@ double Lift::speedProfile(double dist, double dir) const {
     //   cap   -- the cruise speed cap for this direction.
     //   curve -- the stopping-distance relation v = sqrt(2 a d), aiming to reach the final-approach
     //            speed (not zero) LIFT_APPROACH_ZONE_DEG before the goal.
-    //   close -- the final approach: a position P loop in speed units, capped at the crawl speed, so
-    //            the reference tapers to nothing at the goal and the arm is practically stopped when
-    //            the hold takes it. max(curve, close) is what makes `close` only bite near the end.
+    //   close -- the final approach: a position P loop in speed units, clamped between the crawl's
+    //            floor and ceiling, so the arm walks the last few degrees in at a controlled speed and
+    //            is practically stopped when the hold takes it. max(curve, close) is what makes
+    //            `close` only bite near the end.
+    // The FLOOR (LIFT_APPROACH_MIN_DEG_PER_S) is deliberate: kP * dist on its own decays
+    // exponentially, so the arm approaches the goal ever more slowly and the last couple of degrees
+    // dominate the move's duration. The floor makes the tail a constant walk-in instead, and
+    // LIFT_STOPPED_DEG_PER_S sits above the floor so arrival still latches (see config.hpp).
     const double cap = config::LIFT_FREE_SPEED_DEG_PER_S *
                        (dir >= 0.0 ? config::LIFT_UP_SPEED_PCT : config::LIFT_DOWN_SPEED_PCT) / 100.0;
     const double curve =
         std::sqrt(2.0 * config::LIFT_DECEL_DEG_PER_S2 * std::max(dist - config::LIFT_APPROACH_ZONE_DEG, 0.0));
-    const double close = std::min(config::LIFT_APPROACH_KP_PER_S * dist, config::LIFT_APPROACH_DEG_PER_S);
+    const double close = std::clamp(config::LIFT_APPROACH_KP_PER_S * dist,
+                                    config::LIFT_APPROACH_MIN_DEG_PER_S, config::LIFT_APPROACH_DEG_PER_S);
     return std::min(cap, std::max(curve, close));
 }
 
@@ -396,9 +418,11 @@ double Lift::descentSpeed(double position) const {
 void Lift::enterDrive(std::uint32_t now, double position) {
     phase_ = Phase::DRIVE;
     phaseStart_ = now;
-    dir0_ = goal_ >= position ? 1.0 : -1.0;
     minDist_ = std::fabs(goal_ - position);
     stallStart_ = 0;
+    // A brand-new move starts the velocity loop from scratch; enterBrake() primes it properly at the
+    // DRIVE -> BRAKE handover. (A RETARGET of a move already in flight does NOT come through here --
+    // see setTarget() -- precisely so that it keeps the integral it has already learned.)
     velI_ = 0.0;
 }
 
@@ -673,7 +697,9 @@ void Lift::update() {
         return;
     }
 
-    // 6) A position move. Everything below is a function of where the arm is and how fast it is going.
+    // 6) A position move. Everything below is a pure function of where the arm is, where the goal is
+    //    and how fast the arm is going THIS TICK -- which is the whole trick behind a fluid retarget:
+    //    moving the goal mid-move is enough on its own, nothing has to be stopped and restarted.
     const double gap = goal_ - position;
     const double dist = std::fabs(gap);
     const double dir = gap >= 0.0 ? 1.0 : -1.0;
@@ -681,61 +707,84 @@ void Lift::update() {
     const double vMag = speedProfile(dist, dir);
     lastVRef_ = dir * vMag;
 
-    // DRIVE: full voltage toward the goal until the arm is up to the profile's speed.
-    if (phase_ == Phase::DRIVE) {
-        // Runaway guard: full voltage toward the goal and the gap GREW. Sensor or motors reversed.
-        minDist_ = std::min(minDist_, dist);
-        if (dist - minDist_ > config::LIFT_FAULT_DEG) {
-            faulted_ = true;
-            motors_.brake();
-            lastOutput_ = 0.0;
-            trace(now, 'F', position, 0.0, true);
-            return;
-        }
-        if (stalled(now, position)) {
-            blocked_ = true;  // can't get there: hold where it stopped (cleared by the next new target)
-            enterHold(now, position);
-        } else if (velocity_ * dir >= vMag || dist <= config::LIFT_APPROACH_ZONE_DEG) {
-            enterBrake(now);
-        } else {
-            const double mv = dir * config::LIFT_MAX_MV;
-            motors_.move_voltage(static_cast<int>(mv));
-            lastOutput_ = mv;
-            trace(now, 'D', position, mv, true);
-            return;
-        }
-    }
-
-    // BRAKE / APPROACH: the velocity loop tracks the profile all the way in. The profile already
-    // tapers to nothing at the goal, so there is no separate "stop" step and nothing to chase: a
-    // small overshoot just makes dir flip and the taper walks it back at a few deg/s.
-    if (phase_ == Phase::BRAKE || phase_ == Phase::APPROACH) {
-        const bool approaching = dist <= config::LIFT_APPROACH_ZONE_DEG;
-        if (approaching && phase_ != Phase::APPROACH) {
-            phase_ = Phase::APPROACH;
-            phaseStart_ = now;
-        }
+    if (phase_ != Phase::HOLD) {
+        // Arrival LATCHES into HOLD -- that is the only part of a move that is a one-way door.
         const bool arrived = dist <= arrivalTolerance() && std::fabs(velocity_) <= config::LIFT_STOPPED_DEG_PER_S;
         // The crawl can't go on forever (arm fighting something, loop badly tuned): hand over to the
         // hold, whose position term then pulls in whatever is left, gently.
-        const bool timedOut =
-            approaching && now - phaseStart_ >= static_cast<std::uint32_t>(config::LIFT_APPROACH_TIMEOUT_MS);
+        const bool timedOut = phase_ == Phase::APPROACH &&
+                              now - phaseStart_ >= static_cast<std::uint32_t>(config::LIFT_APPROACH_TIMEOUT_MS);
         if (arrived || timedOut) {
             enterHold(now, goal_);
-        } else if (vMag < 5.0) {
-            // The reference has tapered below the stall guard's floor: slow progress is the plan down
-            // here, not a jam, so don't measure it (and clear the window so it can't trip later).
-            stallStart_ = 0;
-            const double mv = runVelocityLoop(lastVRef_, dt);
-            trace(now, 'A', position, mv, true);
-            return;
-        } else if (stalled(now, position)) {
-            blocked_ = true;
-            enterHold(now, position);
         } else {
-            const double mv = runVelocityLoop(lastVRef_, dt);
-            trace(now, approaching ? 'A' : 'B', position, mv, true);
-            return;
+            // Runaway guard: we are pushing toward the goal, so the gap can only shrink. If it GROWS
+            // by LIFT_FAULT_DEG the sensor or the motors are reversed.
+            minDist_ = std::min(minDist_, dist);
+            if (dist - minDist_ > config::LIFT_FAULT_DEG) {
+                faulted_ = true;
+                motors_.brake();
+                lastOutput_ = 0.0;
+                trace(now, 'F', position, 0.0, true);
+                return;
+            }
+
+            // WHICH PHASE, decided fresh every tick from (distance, speed) rather than latched:
+            //   APPROACH  inside the approach zone, whatever the arm is doing.
+            //   DRIVE     the arm is slower than the profile allows, so full voltage is the answer.
+            //   BRAKE     the arm is at (or above) the profile, so the velocity loop tracks it down.
+            // The only state here is the previous phase, used purely for hysteresis: DRIVE ends the
+            // moment the arm reaches the profile, and is only re-entered once it has fallen
+            // LIFT_DRIVE_RESUME_DEG_PER_S below it, so the two can't flicker at the boundary.
+            //
+            // This is what replaced a latching DRIVE -> BRAKE -> APPROACH state machine, and it is why
+            // rapid L1 taps now merge: when Scoring moves the goal up a level mid-rise, the next tick
+            // simply sees a bigger distance, a profile that allows more speed, and therefore DRIVE
+            // again -- with the velocity loop's integral, the stall window and the approach clock all
+            // untouched. The old code had to call enterDrive() for a retarget, which wiped velI_ and
+            // reset the clocks, and its APPROACH phase had no way back out at all (it was only ever
+            // entered, never left), so a retarget from the crawl depended on that restart to escape.
+            const Phase was = phase_;
+            const double vAlong = velocity_ * dir;  // + = already heading toward the goal
+            // An arm travelling AWAY from the goal faster than the hysteresis band is a real
+            // reversal (a goal set below a rising arm). Let the velocity loop turn it around under
+            // the braking profile rather than slamming full voltage against 150 deg/s of momentum.
+            const bool reversing = vAlong < -config::LIFT_DRIVE_RESUME_DEG_PER_S;
+            if (dist <= config::LIFT_APPROACH_ZONE_DEG || reversing) {
+                phase_ = dist <= config::LIFT_APPROACH_ZONE_DEG ? Phase::APPROACH : Phase::BRAKE;
+            } else if (was == Phase::DRIVE) {
+                phase_ = vAlong >= vMag ? Phase::BRAKE : Phase::DRIVE;
+            } else {
+                phase_ = vAlong < vMag - config::LIFT_DRIVE_RESUME_DEG_PER_S ? Phase::DRIVE : Phase::BRAKE;
+            }
+            if (phase_ != was) {
+                phaseStart_ = now;
+                stallStart_ = 0;  // a phase change is progress; don't carry a stale stall window in
+                // DRIVE -> BRAKE is the one handover that needs the velocity loop primed.
+                if (phase_ == Phase::BRAKE && was == Phase::DRIVE) enterBrake(now);
+            }
+
+            // The stall guard only measures ticks that really want motion (see config.hpp). Below
+            // 5 deg/s of reference, slow progress is the plan, not a jam.
+            const bool watchStall = phase_ == Phase::DRIVE || vMag >= 5.0;
+            if (!watchStall) {
+                stallStart_ = 0;
+            } else if (stalled(now, position)) {
+                blocked_ = true;              // can't get there: hold where it stopped, never push into
+                enterHold(now, position);     // whatever it is caught on (cleared by the next target)
+            }
+
+            if (phase_ == Phase::DRIVE && !blocked_) {
+                const double mv = dir * config::LIFT_MAX_MV;
+                motors_.move_voltage(static_cast<int>(mv));
+                lastOutput_ = mv;
+                trace(now, 'D', position, mv, true);
+                return;
+            }
+            if (!blocked_) {
+                const double mv = runVelocityLoop(lastVRef_, dt);
+                trace(now, phase_ == Phase::APPROACH ? 'A' : 'B', position, mv, true);
+                return;
+            }
         }
     }
 

@@ -93,9 +93,14 @@ check", "Lift speed and motion", "Tuning the lift", "Capturing a trace", "Tuning
 the single 10 ms `Lift::update()`. A **position move** (everything except a trip to the bottom) is
 DRIVE (full ±12000 mV off the line, like the D-pad) → BRAKE (a velocity loop tracks
 `min(cruise cap, sqrt(2·LIFT_DECEL_DEG_PER_S2·d))`) → APPROACH (inside `LIFT_APPROACH_ZONE_DEG` the
-reference becomes `LIFT_APPROACH_KP_PER_S × degrees left`, capped at `LIFT_APPROACH_DEG_PER_S`, so the
-arm is crawling before it stops) → HOLD (a **damped** position hold: `LIFT_HOLD_KP` + an integral that
-learns gravity + `LIFT_HOLD_KD` × speed, seeded from the velocity loop's own integral). A **descent**
+reference becomes `LIFT_APPROACH_KP_PER_S × degrees left`, clamped between
+`LIFT_APPROACH_MIN_DEG_PER_S` and `LIFT_APPROACH_DEG_PER_S` — the floor is load-bearing, without it
+the tail decays exponentially and dominates the move) → HOLD (a **damped** position hold:
+`LIFT_HOLD_KP` + an integral that learns gravity + `LIFT_HOLD_KD` × speed, seeded from the velocity
+loop's own integral). **Those first three are chosen fresh from (distance, speed) every tick, not
+latched** (hysteresis: `LIFT_DRIVE_RESUME_DEG_PER_S`); only arrival into HOLD latches. That is what
+makes rapid L1 taps merge: `setTarget()` on a move already in flight *only moves `goal_`* — it must
+never restart the move, because that wipes the velocity integral and resets the approach clock. A **descent**
 (a non-precise goal at or below `LIFT_BOTTOM_GOAL_DEG`: L2, B, auton DOWN, R2 in clamped mode) is
 DESCEND (three position-banded speeds — `LIFT_DESCENT_TOP_PCT`, `_MID_PCT` through the middle,
 `_SLOW_PCT` below `LIFT_DESCENT_SLOW_ZONE_DEG`, ramped between) → SEAT (a constant `LIFT_SEAT_MV`

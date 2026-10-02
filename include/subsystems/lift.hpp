@@ -143,7 +143,8 @@ class Lift {
     };
 
     /** Where a commanded move is (see the class comment). DRIVE/BRAKE/APPROACH/HOLD are a position
-     *  move; DESCEND/SEAT are a trip to the bottom. */
+     *  move; DESCEND/SEAT are a trip to the bottom. For a position move the first three are chosen
+     *  fresh from (distance, speed) every tick -- only arrival into HOLD latches. */
     enum class Phase { DRIVE, BRAKE, APPROACH, HOLD, DESCEND, SEAT };
 
     Lift();
@@ -359,7 +360,6 @@ class Lift {
     bool descent_ = false;  // a trip to the bottom: the banded DESCEND -> SEAT, not a position move
     Phase phase_ = Phase::HOLD;
     std::uint32_t phaseStart_ = 0;
-    double dir0_ = 1.0;     // which way DRIVE set off (+1 up / -1 down); a normal goal never reverses it
     double minDist_ = 0.0;  // smallest distance-to-goal seen during this DRIVE (runaway guard)
     double velI_ = 0.0;     // velocity loop integral, mV
     double holdGoal_ = 0.0; // the height HOLD is holding: the goal on a normal arrival, or wherever the

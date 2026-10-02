@@ -174,14 +174,24 @@ There are **two kinds of commanded move** and **one manual input**, all inside t
 
 - **DRIVE.** Full ±12000 mV toward the goal, from the very first tick -- exactly what the D-pad does --
   until the arm is up to the speed the profile allows. Moves are still instant off the line.
-- **BRAKE.** The velocity loop (`LIFT_VEL_KP` / `LIFT_VEL_KI`, clamped to `LIFT_VEL_MAX_MV`) tracks
-  `min(cruise cap, sqrt(2 · LIFT_DECEL_DEG_PER_S2 · (distance − LIFT_APPROACH_ZONE_DEG)))`, where the
-  cruise cap is `LIFT_UP_SPEED_PCT` / `LIFT_DOWN_SPEED_PCT` of the free speed. Computed from
+- **BRAKE.** The velocity loop (`LIFT_VEL_KP` / `LIFT_VEL_KI`, clamped to `LIFT_VEL_MAX_MV` = 12000)
+  tracks `min(cruise cap, sqrt(2 · LIFT_DECEL_DEG_PER_S2 · (distance − LIFT_APPROACH_ZONE_DEG)))`,
+  where the cruise cap is `LIFT_UP_SPEED_PCT` / `LIFT_DOWN_SPEED_PCT` of the free speed. Computed from
   *distance*, not time, so an arm ahead of or behind the profile corrects itself.
-- **APPROACH.** Inside `LIFT_APPROACH_ZONE_DEG` the reference becomes
-  `LIFT_APPROACH_KP_PER_S × (degrees left)`, capped at `LIFT_APPROACH_DEG_PER_S` -- a crawl that tapers
-  to nothing at the goal. **This is what stopped the spring/bounce:** the arm is practically stopped
-  before the hold takes it, so there is no energy for the six-bar to store and give back.
+- **APPROACH.** Inside `LIFT_APPROACH_ZONE_DEG` (5°) the reference becomes
+  `LIFT_APPROACH_KP_PER_S × (degrees left)`, **clamped between `LIFT_APPROACH_MIN_DEG_PER_S` and
+  `LIFT_APPROACH_DEG_PER_S`** -- a controlled walk-in, not an exponential decay. **This is what stopped
+  the spring/bounce:** the arm is nearly stopped before the hold takes it, so there is no energy for
+  the six-bar to store and give back. The floor matters: without it, `kP × distance` decays forever and
+  the last couple of degrees dominate the whole move's duration.
+
+**Those three are not a latching state machine.** Every tick picks one from (distance, speed), with
+`LIFT_DRIVE_RESUME_DEG_PER_S` (20 deg/s) of hysteresis between DRIVE and BRAKE so they can't flicker.
+Only arrival into HOLD latches. **That is what makes rapid L1 taps merge into one fluid move:**
+`setTarget()` on a move that is already flying just moves the goal (see "Retargeting" below) and the
+next tick sees a longer distance, a profile that allows more speed, and therefore full DRIVE again --
+with the velocity loop's integral, the stall window and the approach clock all untouched. It still
+slows into the *final* level with the normal braking curve and approach.
 - **HOLD.** A **damped position hold**, not the firmware's brake-hold:
   `LIFT_HOLD_KP × (error outside the deadband) + integral(LIFT_HOLD_KI × error) − LIFT_HOLD_KD × speed`,
   clamped to `LIFT_HOLD_MAX_MV`. The integral is the learned gravity voltage and is seeded from the
@@ -224,6 +234,26 @@ descent above with `R_LIFT_DOWN_PCT` as its top band.
 > most angles of a six-bar); DRIVE → BRAKE → **firmware** hold (`3723ef2`, overshot and rang -- see
 > below); and anything that parks the arm above the bottom instead of seating it.
 
+### Why L1 felt slow in the start and middle (fixed, don't reintroduce)
+Three separate causes, all from the first pass at this design (`56fe5f8`):
+1. `LIFT_DECEL_DEG_PER_S2 = 700` puts braking distance at `150²/1400 = 16.1°`, plus an 8° approach
+   zone, so braking began **24° before the goal**. Stack levels are 12–44° apart, so a level-to-level
+   move was ~2° of full power and ~24° of braking and crawling. Now 1200 → 9.4° + a 5° zone = 14.4°,
+   so half a typical move is full power.
+2. `LIFT_VEL_MAX_MV = 9000` physically cannot sustain the cruise: back-EMF alone is `12000/150 = 80` mV
+   per deg/s, so holding 150 deg/s needs ~12000 mV and a 9000 mV clamp sagged the arm to ~110 deg/s
+   for the whole middle of a long rise. Now 12000. The braking force was never set by this clamp --
+   `LIFT_DECEL_DEG_PER_S2` sets that.
+3. The approach reference `3.0 × degrees left` with no floor decays exponentially (τ ≈ 0.33 s): the
+   last 6° took ~0.8 s. Now `6.0 × degrees left` clamped to 6…28 deg/s, so the tail is a constant
+   walk-in. `LIFT_STOPPED_DEG_PER_S` went 8 → 12 so arrival still latches above that floor (it latches
+   around 2° out), and `LIFT_HOLD_KD` went 60 → 90 so the slightly faster handover doesn't bring the
+   bounce back.
+
+`LIFT_VEL_FILTER = 0.8` was checked and cleared: its effective lag is `(1−α)/α × 10 ms = 2.5 ms`,
+0.4° at full speed. It is not what delayed DRIVE ending. DRIVE *is* ±12000 mV from tick 1 of every up
+move (`velocity ≈ 0 < profile` ⇒ DRIVE ⇒ `move_voltage(+LIFT_MAX_MV)`).
+
 ### Why L1 used to overshoot and bounce (fixed, don't reintroduce)
 Four separate causes, all in the `3723ef2` design:
 1. `LIFT_BRAKE_DECEL_DEG_PER_S2 = 2000` meant braking only started 7.6° out from full speed, which
@@ -248,26 +278,34 @@ assumes the one above is settled. **Start from the values in `config.hpp` -- the
    stay there while cruising. If the rise feels slow, `LIFT_UP_SPEED_PCT` is the cap. Going *down* to a
    lower level, `LIFT_DOWN_SPEED_PCT` (60) is the cap -- raise it only if the descent to a lower level
    feels sluggish, and lower it if the arm ever feels like it is falling.
-3. **Where it stops: `LIFT_DECEL_DEG_PER_S2`.** This is the main knob. Tap `L1` to level 1, read the
-   last `A` line's `pos` against `goal`.
-   - runs past the goal before `vel` reaches the crawl → **lower** it (600, 500, …)
-   - dawdles through the last third of every move → **raise** it (850, 1000, …)
+3. **How much of the move is at full power: `LIFT_DECEL_DEG_PER_S2`.** This is the main knob, and it
+   sets both where it stops *and* how fast it feels: braking starts `150²/(2a) + LIFT_APPROACH_ZONE_DEG`
+   degrees before the goal, so at `a = 1200` that is 14.4° of a 12–44° move. Tap `L1` to level 1 and
+   read the last `A` line's `pos` against `goal`, and count how many `D` lines there are.
+   - runs past the goal before `vel` reaches the crawl → **lower** it (1000, 850, …)
+   - barely any `D` lines / feels like it brakes the whole way → **raise** it (1400, …)
    Repeat until stack levels land inside `LIFT_TOLERANCE_DEG`. Don't touch anything else yet.
 4. **The crawl: `LIFT_APPROACH_*`.** Watch the `A` lines.
-   - still visibly moving when it grabs the hold (`H` appears while `vel` is above ~10) → raise
-     `LIFT_APPROACH_ZONE_DEG`, or lower `LIFT_APPROACH_DEG_PER_S`
-   - the last couple of degrees take visibly long → raise `LIFT_APPROACH_KP_PER_S` first (3 → 4 → 5),
-     then `LIFT_APPROACH_DEG_PER_S`
+   - still visibly moving when it grabs the hold (`H` appears while `vel` is above ~15) → lower
+     `LIFT_APPROACH_DEG_PER_S` / `LIFT_APPROACH_MIN_DEG_PER_S`, or raise `LIFT_HOLD_KD` (step 6 --
+     try that first, it costs no speed)
+   - the last couple of degrees take visibly long → raise `LIFT_APPROACH_KP_PER_S` (6 → 8), then
+     `LIFT_APPROACH_MIN_DEG_PER_S`; shrink `LIFT_APPROACH_ZONE_DEG` to start the crawl later
+   - **keep `LIFT_STOPPED_DEG_PER_S` above `LIFT_APPROACH_MIN_DEG_PER_S`**, or arrival never latches
+     and every move ends on the `LIFT_APPROACH_TIMEOUT_MS` instead
 5. **The velocity loop: `LIFT_VEL_KP`, then `LIFT_VEL_KI`.** Only if the `B`/`A`/`V` lines show `vel`
    swinging above and below the reference (the brain's `LIFT ref` field).
    - `vel` oscillates around the reference → **lower** `LIFT_VEL_KP` (30 → 22 → 16)
    - `vel` sits persistently below the reference, or sags before it gets going → **raise**
      `LIFT_VEL_KI` (400 → 600 → 800)
-   Leave `LIFT_VEL_MAX_MV` alone unless the braking feels mechanically violent; lowering it means
-   lowering `LIFT_DECEL_DEG_PER_S2` to match.
+   Leave `LIFT_VEL_MAX_MV` at 12000 unless the braking feels mechanically violent: it is what lets the
+   loop sustain the cruise, and lowering it both slows the middle of long moves and means lowering
+   `LIFT_DECEL_DEG_PER_S2` to match.
+   If the trace shows `D` and `B` alternating line-to-line, raise `LIFT_DRIVE_RESUME_DEG_PER_S`.
 6. **The hold: `LIFT_HOLD_KD`, then `KP`, then `KI`.** Park at level 3 and watch the `H` lines.
-   - **any bounce at all on arrival → raise `LIFT_HOLD_KD`** (60 → 90 → 120). This is the anti-bounce
-     knob; try it before touching anything else in this step.
+   - **any bounce at all on arrival → raise `LIFT_HOLD_KD`** (90 → 120 → 150). This is the anti-bounce
+     knob, it costs no speed, and it is the first thing to try. The second lever is lowering
+     `LIFT_STOPPED_DEG_PER_S` (12 → 8) for a gentler handover, at the cost of a slightly slower finish.
    - the arm sags below the level over a few seconds → raise `LIFT_HOLD_KI` (400 → 600), then
      `LIFT_HOLD_KP`
    - it buzzes or twitches while parked → raise `LIFT_HOLD_DEADBAND_DEG` (0.8 → 1.2), then lower
@@ -286,7 +324,12 @@ assumes the one above is settled. **Start from the values in `config.hpp` -- the
    - `SEAT` appears while the arm is still a few degrees up → lower `LIFT_SEAT_DETECT_DEG` or
      `LIFT_SEAT_STILL_DEG_PER_S`, or raise `LIFT_SEAT_STILL_MS`
    - lift motors warming on the `TEMP` line while parked at the bottom → less negative (−800)
-9. **`INTAKE`.** Tap `R1` and confirm the last `A` line's `pos` is within
+9. **Rapid taps.** From the bottom, clamp with `L1`, then double-tap and triple-tap `L1`. The `LIFT`
+   line's phase must go `DRIVE` → (maybe `BRAKE`) → `DRIVE` again as each tap lands, and never
+   `APPROACH` or `HOLD` at an intermediate level. In the trace there must be no `H` line between taps.
+   If a tap only takes effect once the arm has arrived, the retarget path in `Lift::setTarget()` is
+   being bypassed -- check `blocked_` / `faulted_` aren't set (the brain shows them).
+10. **`INTAKE`.** Tap `R1` and confirm the last `A` line's `pos` is within
    `LIFT_PRECISE_TOLERANCE_DEG × 10` of `goal`. If `INTAKE` itself is in the wrong place, that is a
    preset, not a gain -- see "Tuning the claw positions".
 
@@ -318,7 +361,11 @@ show `pos` holding within a degree with no sign change in `vel`. Any oscillation
 |---|---|
 | Overshoots a level / arrives still moving | lower `LIFT_DECEL_DEG_PER_S2` |
 | Stops short of every preset by the same few degrees | raise `LIFT_DECEL_DEG_PER_S2`. Up to 5 deg short is `LIFT_TOLERANCE_DEG` working as designed, and the hold pulls the rest in |
-| Springs / bounces up and down as it arrives | raise `LIFT_HOLD_KD` first, then raise `LIFT_APPROACH_ZONE_DEG` |
+| Springs / bounces up and down as it arrives | raise `LIFT_HOLD_KD` first (costs no speed), then lower `LIFT_STOPPED_DEG_PER_S` |
+| Feels slow at the start / through the middle | raise `LIFT_DECEL_DEG_PER_S2` (less of the move is braking), and check `LIFT_VEL_MAX_MV` is 12000 -- a lower clamp cannot sustain the cruise |
+| The last couple of degrees crawl forever | raise `LIFT_APPROACH_KP_PER_S` and `LIFT_APPROACH_MIN_DEG_PER_S`, or shrink `LIFT_APPROACH_ZONE_DEG` |
+| Rapid L1 taps stop at each level instead of merging | the arm is reaching `APPROACH`/`HOLD` before the next tap lands -- raise `LIFT_DECEL_DEG_PER_S2` so less of the move is slow. A tap is only *dropped* if D-pad Up/Down is held, or mid-L2 (`RELEASING`) |
+| Trace shows `D` and `B` alternating every line | raise `LIFT_DRIVE_RESUME_DEG_PER_S` |
 | Sags below a stack level while parked | raise `LIFT_HOLD_KI`, then `LIFT_HOLD_KP` |
 | Buzzes or twitches while parked | raise `LIFT_HOLD_DEADBAND_DEG`, then lower `LIFT_HOLD_KP` |
 | `vel` swings above and below the reference in the trace (hunts) | lower `LIFT_VEL_KP` |

@@ -134,26 +134,40 @@ inline constexpr double LIFT_DOWN_SPEED_PCT = 60.0;          // TUNE: cruise spe
 
 // --- When it starts slowing down (the braking curve) ------------------------
 // The arm is never allowed to go faster than sqrt(2 * LIFT_DECEL_DEG_PER_S2 * d) with d = the degrees
-// left minus LIFT_APPROACH_ZONE_DEG. This is the single number that decides whether it overshoots.
+// left minus LIFT_APPROACH_ZONE_DEG. This is the single number that decides whether it overshoots --
+// and, just as much, how FAST a move feels, because it sets how much of the move is spent braking.
 // Read it off the trace: in the B lines `vel` should fall by about a * 0.02 per 20 ms line.
-//   Overshoots the level / arrives still moving: LOWER it (braking starts earlier).
-//   Dawdles the last third of every move: RAISE it (braking starts later).
-// 700 deg/s^2 means it starts braking 16 deg out from full speed -- deliberately well inside what two
-// red motors through a 4:1 can really do. The old value, 2000, started braking only 7.6 deg out, which
-// the arm physically cannot achieve: that was the overshoot.
-inline constexpr double LIFT_DECEL_DEG_PER_S2 = 700.0;       // TUNE: how hard it brakes, arm deg/s^2
+//   Overshoots the level / arrives still moving: LOWER it (braking starts earlier): 1000, 850.
+//   Feels slow / spends most of the move braking: RAISE it (braking starts later): 1400.
+// SIZING IT. Braking distance from the 150 deg/s free speed is 150^2 / (2a), and braking begins that
+// far out PLUS LIFT_APPROACH_ZONE_DEG. The stack levels are 12-44 deg apart, so for a move to have any
+// full-power section at all, (150^2 / 2a) + zone has to be well under ~25 deg:
+//   a =  700 -> 16.1 + 8 = 24.1 deg of braking. A 26.6 deg move is then ~2 deg of power and 24 of
+//                braking -- that is exactly why the start and middle "felt slower".
+//   a = 1200 -> 9.4 + 5 = 14.4 deg. Half the move is full power. This is the value here.
+//   a = 2000 -> 5.6 + 5 = 10.6 deg, but 2000 deg/s^2 is more than the arm can actually do -- that was
+//                the original overshoot (3723ef2). 1200 is 40% less demanding than that.
+inline constexpr double LIFT_DECEL_DEG_PER_S2 = 1200.0;      // TUNE: how hard it brakes, arm deg/s^2
 
 // --- The last few degrees (the final approach) ------------------------------
 // Inside LIFT_APPROACH_ZONE_DEG the speed reference becomes LIFT_APPROACH_KP_PER_S * (degrees left),
-// capped at LIFT_APPROACH_DEG_PER_S. So the arm walks the last few degrees in at a crawl and hands
-// over to the hold already nearly stopped -- this is what stops the six-bar springing.
-//   Still visibly moving when it grabs the hold: raise LIFT_APPROACH_ZONE_DEG, or lower
-//     LIFT_APPROACH_DEG_PER_S / LIFT_APPROACH_KP_PER_S.
-//   Takes too long to finish the last bit: raise LIFT_APPROACH_KP_PER_S first, then
-//     LIFT_APPROACH_DEG_PER_S.
-inline constexpr double LIFT_APPROACH_ZONE_DEG = 8.0;        // TUNE: where the crawl starts
-inline constexpr double LIFT_APPROACH_DEG_PER_S = 18.0;      // TUNE: fastest the crawl may be
-inline constexpr double LIFT_APPROACH_KP_PER_S = 3.0;        // TUNE: crawl speed per degree left (1/s)
+// clamped between LIFT_APPROACH_MIN_DEG_PER_S and LIFT_APPROACH_DEG_PER_S. So the arm walks the last
+// few degrees in at a crawl and hands over to the hold already nearly stopped -- this is what stops
+// the six-bar springing.
+// THE MINIMUM MATTERS. kP * (degrees left) on its own decays exponentially, so the arm creeps toward
+// the goal more and more slowly and never really gets there: with kP = 3 the last 6 deg took 0.8 s,
+// which is most of why a short move felt slow. The floor turns the tail into a constant walk-in
+// instead, and LIFT_STOPPED_DEG_PER_S is set above it so arrival still latches.
+//   Still visibly moving when it grabs the hold: lower LIFT_APPROACH_DEG_PER_S, or
+//     LIFT_APPROACH_MIN_DEG_PER_S, or raise LIFT_HOLD_KD (the anti-bounce term) first.
+//   The last few degrees take too long: raise LIFT_APPROACH_KP_PER_S, then
+//     LIFT_APPROACH_MIN_DEG_PER_S; shrink LIFT_APPROACH_ZONE_DEG to start the crawl later.
+// At a = 1200 the braking curve is already down to 28 deg/s a third of a degree outside a 5 deg zone,
+// so the handover from braking into the crawl is seamless rather than a step.
+inline constexpr double LIFT_APPROACH_ZONE_DEG = 5.0;        // TUNE: where the crawl starts
+inline constexpr double LIFT_APPROACH_DEG_PER_S = 28.0;      // TUNE: fastest the crawl may be
+inline constexpr double LIFT_APPROACH_MIN_DEG_PER_S = 6.0;   // TUNE: slowest -- no exponential tail
+inline constexpr double LIFT_APPROACH_KP_PER_S = 6.0;        // TUNE: crawl speed per degree left (1/s)
 
 // --- The velocity loop (phases BRAKE, APPROACH and DESCEND) -----------------
 // Everything that is "go at this speed" runs through this one PI loop on the MEASURED arm speed:
@@ -163,9 +177,21 @@ inline constexpr double LIFT_APPROACH_KP_PER_S = 3.0;        // TUNE: crawl spee
 //   `vel` swings above and below the reference in the trace (hunts): LOWER LIFT_VEL_KP.
 //   Sags / is slow to reach the reference speed: RAISE LIFT_VEL_KI.
 //   The braking feels violent: LOWER LIFT_VEL_MAX_MV (and lower LIFT_DECEL_DEG_PER_S2 to match).
+// LIFT_VEL_MAX_MV IS 12000 ON PURPOSE. It was 9000, and that was a second reason the middle of a long
+// move felt slow: holding the arm at its 150 deg/s free speed needs essentially the full 12000 mV
+// (back-EMF alone is 12000/150 = 80 mV per deg/s), so a 9000 mV clamp physically could not sustain the
+// cruise -- the arm sagged to whatever 9000 mV holds, around 110 deg/s, for the whole middle of the
+// rise. The clamp was never what limits the braking either; LIFT_DECEL_DEG_PER_S2 is.
 inline constexpr float LIFT_VEL_KP = 30.0f;                  // TUNE: mV per (deg/s) of speed error
 inline constexpr float LIFT_VEL_KI = 400.0f;                 // TUNE: mV per (deg/s) of speed error, per second
-inline constexpr float LIFT_VEL_MAX_MV = 9000.0f;            // TUNE: most the velocity loop may push, either way
+inline constexpr float LIFT_VEL_MAX_MV = 12000.0f;           // TUNE: most the velocity loop may push, either way
+// Hysteresis between DRIVE (full voltage) and BRAKE (the velocity loop). DRIVE ends the moment the arm
+// reaches the profile speed, and is only re-entered once the arm is this far BELOW it -- which is what
+// stops the two flickering tick-to-tick around the boundary, and what lets a mid-move retarget drop
+// straight back into full power.
+//   The trace shows D and B alternating every line or two: RAISE it.
+//   It takes too long to go back to full power after an L1 retarget: LOWER it.
+inline constexpr double LIFT_DRIVE_RESUME_DEG_PER_S = 20.0;  // TUNE
 
 // --- Holding position (phase HOLD) -----------------------------------------
 // A damped position hold, NOT the firmware's brake-hold. The firmware hold is a stiff position loop
@@ -179,7 +205,7 @@ inline constexpr float LIFT_VEL_MAX_MV = 9000.0f;            // TUNE: most the v
 //   Audibly straining while parked at a high level: lower LIFT_HOLD_MAX_MV (expect some sag).
 inline constexpr float LIFT_HOLD_KP = 180.0f;                // TUNE: mV per deg of sag
 inline constexpr float LIFT_HOLD_KI = 400.0f;                // TUNE: mV per deg per second (learns gravity)
-inline constexpr float LIFT_HOLD_KD = 60.0f;                 // TUNE: mV per deg/s -- the anti-bounce term
+inline constexpr float LIFT_HOLD_KD = 90.0f;                 // TUNE: mV per deg/s -- the anti-bounce term
 inline constexpr double LIFT_HOLD_DEADBAND_DEG = 0.8;        // TUNE: inside this, only the learned gravity term acts
 inline constexpr float LIFT_HOLD_MAX_MV = 7000.0f;           // TUNE: most the hold may push
 
@@ -247,9 +273,14 @@ inline constexpr double LIFT_PRECISE_TOLERANCE_DEG = 1.0;    // TUNE: INTAKE onl
 // score" (L2 is then a no-op). INTAKE (1.1) is inside it numerically but is always precise, so R1 keeps
 // its own exact approach and never seats.
 inline constexpr double LIFT_BOTTOM_GOAL_DEG = 5.0;          // TUNE
-// Hands over to HOLD once the arm is inside its band AND slower than this. The hold has real damping
-// now, so this does not have to be tiny -- but lowering it makes the handover gentler still.
-inline constexpr double LIFT_STOPPED_DEG_PER_S = 8.0;        // TUNE
+// Hands over to HOLD once the arm is inside its band AND slower than this. It has to sit ABOVE
+// LIFT_APPROACH_MIN_DEG_PER_S or the crawl's floor speed would mean arrival never latches and every
+// move ended on the LIFT_APPROACH_TIMEOUT_MS instead. With kP = 6 /s, the reference is down to 12
+// deg/s about 2 deg out, so that is where a move actually latches -- comfortably inside the 5 deg
+// tolerance, and the hold's LIFT_HOLD_KD (90) then absorbs 12 deg/s as ~1080 mV of opposing voltage.
+//   Any bounce as it grabs the hold: raise LIFT_HOLD_KD first; lowering this to 8 is the second lever
+//   (gentler handover, slightly slower finish).
+inline constexpr double LIFT_STOPPED_DEG_PER_S = 12.0;       // TUNE
 // The final approach can't take longer than this (arm fighting something, loop badly tuned): the lift
 // hands over to HOLD, whose position term then pulls in whatever is left, gently.
 inline constexpr int LIFT_APPROACH_TIMEOUT_MS = 1500;        // TUNE
@@ -258,6 +289,9 @@ inline constexpr int LIFT_APPROACH_TIMEOUT_MS = 1500;        // TUNE
 // count, so there is nothing to filter out except task jitter -- and filtering costs LAG, which makes
 // the brake react late and overshoot. 0.8 is a quarter of a tick of lag; 0.5 (the old value) was a
 // whole tick, which at 150 deg/s is 1.5 deg of stale position.
+// (Checked while chasing the "slow start/middle": at 0.8 the EMA's effective lag is (1-a)/a * 10 ms =
+// 2.5 ms, i.e. 0.4 deg at full speed. It is NOT what delays DRIVE ending or BRAKE responding -- that
+// was the decel value and the 9000 mV velocity clamp above. Leave it at 0.8.)
 inline constexpr double LIFT_VEL_FILTER = 0.8;
 
 // ---------------------------------------------------------------------------

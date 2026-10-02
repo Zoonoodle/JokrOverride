@@ -16,12 +16,15 @@ include/subsystems/ src/subsystems/
   lift.*      DR6-4B lift: DRIVE -> BRAKE -> APPROACH -> HOLD position moves, DESCEND -> SEAT trips to
               the bottom, homing, stall/runaway guards, manual voltage for D-pad Up/Down and R1,
               a terminal trace, moveTo()/setTarget() shared by driver + auton
+  contact_detector.hpp  PURE landing detector for the L2 scorer (no PROS) -- host-tested in test/
   claw.*      pneumatic claw + autoclamp state machine
   intake.*    one-motor roller intake (driver-controlled only)
   scoring.*   intake macro: intake / matchload / 5-level stacking state machine with interlocks,
               drives the lift only through Lift::setTarget() (the PID), never raw power
 src/screen.cpp                brain screen sensor readout
 src/main.cpp                  initialize / autonomous stub / opcontrol + button map
+test/                         host-side tests for the pure parts (test/run.sh, Mac clang++ only --
+                              pros make never sees this directory, it only globs src/)
 docs/notebook/                notebook-ready write-ups, flowcharts and blank test tables
 ```
 
@@ -56,7 +59,7 @@ allowed to own the lift motors.
 | **D-pad Up** (hold) | lift **up**, full power (manual, cancels any preset/macro target) |
 | **D-pad Down** (hold) | lift **down**, full power (same) |
 | let go of Up/Down | lift motors HOLD where they are (no target resumes) |
-| **L1** | intake macro: step up a stack level (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached). If the claw is already `CLAMPED` (L2 just clamped it at the bottom), the first tap skips the clamp wait and rises immediately |
+| **L1** | intake macro: step up a stack level (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached). If the claw is already `CLAMPED` (L2 just clamped it at the bottom), the first tap skips the clamp wait and rises immediately. **Auto-intake:** an L1 that starts a rise **from the floor** (at the bottom / seated, e.g. after an L2 score or a B stow, or parked at the `INTAKE` handoff after R1) also runs the intake rollers **in** from the press itself -- including during the claw-close wait -- until the arm climbs past `L1_AUTO_INTAKE_UNTIL_DEG` (20°), sweeping the floor while the arm is going up anyway. The brain's `DRV` line shows `INT:AUTO` while it runs. Extra L1 taps during the same rise neither restart nor extend it, and an L1 from a stack level never starts it. It stops early on D-pad, B, L2, clamped-mode R1/R2, or a `BLOCKED`/`FAULT` lift, and after `L1_AUTO_INTAKE_MAX_MS` regardless |
 | **L2** | intake macro, **above the bottom**, holding a pin → **THE SENSING SCORER**. The jaws stay **shut**; the arm presses the pin **down onto the stack** at `L2_SCORE_SPEED_PCT` (60%), watches the rotation sensor, and the moment the measured speed drops below `L2_CONTACT_SPEED_FRAC` of the commanded speed the pin has landed → **release the claw and keep pushing down** so the jaws slide off → confirm the arm runs free again → **run home fast** (`L2_RETURN_SPEED_PCT`, still slowing and seating at the bottom). If the claw stays caught it lifts `L2_UNSTICK_UP_DEG` (20°) and retries, up to `L2_MAX_UNSTICK_TRIES`, then stops and shows `SCORE STUCK`. If it reaches `L2_NO_CONTACT_DEG` with no landing detected there was no stack: it **releases nothing**, seats at the bottom with the pin still clamped, and shows `NO CONTACT`. Pivot stays **OUT** throughout; the D-pad cancels at any stage; L2 pressed mid-sequence is ignored. Resets the level count. **At the bottom** (seated, or within `LIFT_BOTTOM_GOAL_DEG` of it) and not mid-move: L2 is instead the **clamp trigger** -- not clamped → clamp, clamped → release -- the same toggle A uses, moving neither the lift nor the pivot |
 | **B** | **stow**: pivot **OUT**, lift straight down to `DOWN` and seated, cancel the intake macro. Uses the same fast banded descent as L2's run home (`LIFT_DESCENT_TOP_PCT` / `_MID_PCT`, now 80% / 95%), minus any claw work |
 | **A** | claw clamp / open. The claw is physically **OPEN at power-on** -- it needs air to grip: the `CLAW` line shows `OPEN D[0]` and A closes it. `CLAW_CLOSED_IS_ADI_HIGH` (`true`) says which ADI level is closed; if A *opens* the jaws while the line says `CLAMPED`, flip it |
@@ -70,6 +73,9 @@ Which one is in force is **latched the moment the button goes down**, from wheth
 | | **R1** (hold) | **R2** (hold) |
 |---|---|---|
 | **Nothing clamped** (`R:INTAKE`) | intake roller **in**; a tap also sends the lift to the **INTAKE** handoff with the jaws open and the pivot **BACK** | intake roller **out** |
+
+**The driver always wins over L1's auto-intake:** R1/R2 in `R:INTAKE` mode are the roller buttons, and
+the auto-intake only gets the rollers when neither is being asked for.
 | **A pin `CLAMPED`** (`R:LIFT`) | lift **up** at `R_LIFT_UP_PCT` (90%). Plain voltage, same feel as the D-pad | lift **down**, controlled: closed-loop on the measured arm speed at `R_LIFT_DOWN_PCT` (65%) of the free speed, slowing to the crawl near the bottom and **seating** on the hard stop. Hold it all the way down and it ends exactly like an L2 |
 
 Letting go of either brakes and holds where it is -- no old target resumes. **D-pad Up/Down still win
@@ -237,6 +243,17 @@ descent above with `R_LIFT_DOWN_PCT` as its top band.
 > most angles of a six-bar); DRIVE → BRAKE → **firmware** hold (`3723ef2`, overshot and rang -- see
 > below); and anything that parks the arm above the bottom instead of seating it.
 
+### Why the first contact detector could never fire (fixed, don't reintroduce)
+It compared the measured speed against the **nominal** commanded speed (~90 deg/s): a relative trigger
+armed only once the arm reached 85% of it, and an absolute trigger at 8 deg/s. **Both are dead if the
+arm simply cannot make 90 deg/s** -- and on this six-bar it often cannot, because the arm swings up and
+*back*, so over much of the arc gravity **resists** the descent and the loop can only push down with
+`L2_PRESS_MAX_MV` of authority. A free descent settling at 50 deg/s never armed the relative trigger
+(50 < 76.5) and never tripped the absolute one (50 > 8); the landing then slowed it to 15, still over 8.
+Nothing could fire, so every score ran to the bottom and reported `NO CONTACT` with the pin still held.
+The lesson, and the rule now: **never threshold against the nominal command -- threshold against what
+the arm was actually doing a moment ago.**
+
 ### Why L1 felt slow in the start and middle (fixed, don't reintroduce)
 Three separate causes, all from the first pass at this design (`56fe5f8`):
 1. `LIFT_DECEL_DEG_PER_S2 = 700` puts braking distance at `150²/1400 = 16.1°`, plus an 8° approach
@@ -343,14 +360,24 @@ can see the exact tick contact fired.
 
 | What you see | Change |
 |---|---|
-| **Releases too early** -- jaws open with the pin still in the air, pin drops | lower `L2_CONTACT_SPEED_FRAC` (0.45 → 0.35) and/or raise `L2_CONTACT_MS` (80 → 120). Check `aux` in the `P` lines: if it dips below 45 during a free descent, that dip is the false trigger, and the floor of those dips is what the fraction has to sit under |
-| **Releases too late** -- the stack gets crushed or pushed over, or `aux` sits near 0 for several `P` lines before the first `r` line | raise `L2_CONTACT_SPEED_FRAC` (→ 0.55), lower `L2_CONTACT_MS` (→ 60), and lower `L2_PRESS_MAX_MV` (5000 → 3500) so the push is gentler while it decides |
-| **Never detects contact** -- always ends `NO CONTACT` | raise `L2_CONTACT_SPEED_FRAC`; check `aux` really drops when the pin lands (if it doesn't, the press speed is too low for the gap to be visible -- raise `L2_SCORE_SPEED_PCT`); check `L2_NO_CONTACT_DEG` isn't above the real landing height |
+| **Releases too early** -- jaws open with the pin still in the air | read the `trg` column first and fix only the signal that fired. `spd` → lower `L2_CONTACT_SPEED_FRAC` (0.70 → 0.60). `lag` → raise `L2_CONTACT_LAG_DEG` (1.5 → 2.5). `eff` → raise `L2_CONTACT_EFFORT_MV` (2000 → 3000). Any of them → raise `L2_CONTACT_MS` (20 → 40) |
+| **Releases too late** -- the stack gets crushed, or `lag`/`eff` climb for several `P` lines before the first `r` line | lower `L2_CONTACT_LAG_DEG` (→ 1.0) and `L2_CONTACT_EFFORT_MV` (→ 1400) -- those are the early-warning signals. Lowering `L2_CONTACT_SPEED_FRAC` makes it *later*, not earlier. Also lower `L2_PRESS_MAX_MV` so the push is gentler while it decides |
+| **Never detects contact** (ends `NO CONTACT`) | raise `L2_CONTACT_SPEED_FRAC` toward 0.80, lower `L2_CONTACT_LAG_DEG` and `L2_CONTACT_EFFORT_MV`. **But check the trace first:** if `lag` and `eff` both stay near 0 right through the landing, the arm is genuinely neither slowing nor working harder -- the claw is sliding along the pin, which is a mechanical problem, not a threshold one |
+| **Fires during a free descent, before any landing** | the `trg` column says which. If `lag`, the baseline isn't tracking the gravity sag: lower `L2_CONTACT_LAG_LEAK_MS` (200 → 120) or `L2_CONTACT_BASELINE_TAU_MS` (200 → 120). If `spd`, lower `L2_CONTACT_SPEED_FRAC`. Then re-run `test/run.sh` -- the "slow gravity drift" scenario is exactly this case |
+| **Fires during the spin-up** | raise `L2_CONTACT_SETTLE_MS` and `L2_CONTACT_IGNORE_MS` |
 | **Presses too hard / knocks the tower** | lower `L2_PRESS_MAX_MV` first, then `L2_SCORE_SPEED_PCT` (60 → 45) |
-| **Pin doesn't seat fully before the release** | raise `L2_PRESS_MAX_MV` (→ 6500); a higher `L2_CONTACT_MS` also presses a little longer before releasing |
-| **Keeps getting stuck** (`UNSTK` lines, or `SCORE STUCK`) | raise `L2_UNSTICK_UP_DEG` (20 → 30) so the hop clears the pin, raise `L2_MAX_UNSTICK_TRIES`, and check `CLAW_OPEN_TIME_MS` is long enough for the jaws to actually open (the freed check starts from there) |
+| **Pin doesn't seat fully before the release** | raise `L2_PRESS_MAX_MV`; a higher `L2_CONTACT_MS` also presses a little longer before releasing |
+| **Keeps getting stuck** (`UNSTK` lines, or `SCORE STUCK`) | raise `L2_UNSTICK_UP_DEG` (20 → 30) so the hop clears the pin, raise `L2_MAX_UNSTICK_TRIES`, and check `CLAW_OPEN_TIME_MS` is long enough for the jaws to actually open (the freed check starts counting from it) |
+| **`SCORE STUCK` with the arm obviously free** | lower `L2_FREE_MS`, or raise `L2_STUCK_MS` so it waits longer before declaring a jam |
 | **Goes home too slowly after scoring** | raise `L2_RETURN_SPEED_PCT` (95 → 100); if it then thumps, raise `LIFT_DESCENT_SLOW_ZONE_DEG` |
-| **`SCORE STUCK` with the arm obviously free** | the freed check never saw a recovery: lower `L2_FREE_MS`, or raise `L2_CONTACT_SPEED_FRAC` so "slow" is judged less strictly |
+
+**After changing any `L2_CONTACT_*` value, run `test/run.sh`.** It compiles the detector with the Mac's
+own `clang++` (no PROS toolchain needed) and drives it through synthetic 10 ms traces: free descent at
+55 and 90 deg/s with noise, spin-up only, a hard landing, a soft landing, a creep landing, a pin already
+resting, and a slow gravity drift. It prints the trigger and the detection latency for each and fails if
+any of them fires when it shouldn't, fires before the landing, or fires too late. The thresholds in the
+test are mirrored from `config.hpp` **by hand on purpose** -- if you change one there and the test still
+passes with the old value, that mismatch is the thing worth noticing.
 
 ### Capturing a trace
 `LIFT_TRACE = true` prints one integer line per 20 ms to the PROS terminal whenever the arm moves, and
@@ -358,15 +385,18 @@ for half a second after. In VS Code: PROS sidebar → **Brain Terminal** (or `pr
 shell), press a lift button, copy the lines out. Columns:
 
 ```
-LIFT <ms> <phase> <pos*10> <goal*10> <vel deg/s> <out mV> <aux>
+LIFT <ms> <phase> <pos*10> <goal*10> <vel deg/s> <out mV> <v/base %> <lag*10> <effort mV> <trg>
 ```
 
 `phase` is `D` drive, `B` brake, `A` approach (the final crawl), `H` hold, `V` descend, `R` descend as
 L2's post-score run home, `S` seat, `P` press (L2 pushing the pin onto the stack), `r` release (L2
 after the jaws were asked to open), `U` unstick, `M` manual (D-pad or R1 in clamped mode), `h` homing,
-`F` fault, `I` idle. `goal*10` is `-1` when nothing is commanded. **`aux`** is the measured/commanded
-speed ratio as a percentage during `P`/`r`/`U` -- the single number contact detection is made on -- and
-0 everywhere else. The lines are written by a separate low-priority task from a ring buffer; the
+`F` fault, `I` idle. `goal*10` is `-1` when nothing is commanded. **The last four columns are the L2
+scorer's view** and are 0 on every other phase: `v/base %` the measured/baseline speed ratio, `lag*10`
+the accumulated position shortfall in arm degrees x10, `effort mV` the extra downward push over the
+free-descent baseline, and `trg` which signal fired (0 none, 1 stall, 2 lag, 3 effort, 4 speed). Those
+three numbers are exactly what the detector thresholds, so a trace says precisely which signal moved
+when the pin landed. The lines are written by a separate low-priority task from a ring buffer; the
 control loop itself never prints.
 
 **To capture an L1 move specifically:** open the Brain Terminal, enable, put the arm at the bottom,
@@ -477,8 +507,8 @@ below alongside the existing sensor readouts. A sensor that isn't plugged in sho
 | CLAW | claw state (`OPEN`/`ARMED`/`CLAMPED`/`RELEASED`) and pivot `PIV OUT` / `PIV BACK`, **each with its ADI port letter and raw level** (`CLAW OPEN D[0]  PIV OUT C[0]` at power-on) so A / X each confirm one polarity constant; then intake-macro state, stack level, and `R:INTAKE`/`R:LIFT`/`R:wait` -- which mode R1/R2 are in |
 | LIFT (position line) | position → target (or `none`), the active named preset (or `custom`), the phase (`DRIVE`/`BRAKE`/`APPROACH`/`HOLD`/`DESCEND`/`RETURN`/`SEAT`/`PRESS`/`REL`/`UNSTK`), and `FAULT`/`SCORE STUCK`/`NO CONTACT`/`BLOCKED`/`SETTLED` |
 | LIFT (err/vel/out line) | error in lift degrees, measured arm speed in deg/s, and what was sent to the motors in mV |
-| LIFT (ref line) | the speed reference the velocity loop is tracking this tick (0 in `HOLD`/`SEAT`), then either the hold loop's learned gravity voltage in mV **or**, during an L2 score, `v/cmd` -- the measured/commanded speed ratio as a percentage, the number contact detection is made on. Then `DIST`: claw distance sensor mm and `PIN` when inside `CLAW_DETECT_MM` |
+| LIFT (ref line) | the speed reference the velocity loop is tracking this tick (0 in `HOLD`/`SEAT`) and the hold loop's learned gravity voltage in mV -- **or, during an L2 score, all three contact signals live**: `L2 lag <deg> eff <mV> v/b <%>`. Then `DIST`: claw distance sensor mm and `PIN` when inside `CLAW_DETECT_MM` |
 | TUNE | `LIFT_DECEL_DEG_PER_S2`, the approach zone / speed, `LIFT_HOLD_KD` and `LIFT_TOLERANCE_DEG` read straight from `config.hpp`, so you can see which build is on the brain while iterating |
 | LIFT (temp/current line) | lift motor temp (°C) and current draw (mA) |
 | TEMP | hottest left drive / right drive / lift motor and the intake motor (C). Motors lose power around 55 C. |
-| DRV | driver-loop heartbeat: `not started`, or a loop counter plus stick values and the manual-override Up/Down |
+| DRV | driver-loop heartbeat: `not started`, or a loop counter plus stick values and the manual-override Up/Down, plus `INT:AUTO` while L1's auto-intake is sweeping |

@@ -12,7 +12,7 @@ every session, so changes get built, uploaded and tested for real.
 | `include/robot.hpp`, `src/robot.cpp` | The LemLib chassis + the single instance of each subsystem. |
 | `include/subsystems/lift.*`, `src/subsystems/lift.cpp` | DR6-4B position PID, gravity feedforward, stall + runaway guards, manual override. **Only** place that writes the lift motors. |
 | `include/subsystems/claw.*` | Pneumatic claw + autoclamp state machine. |
-| `include/subsystems/intake.*` | One-motor roller intake. Driver-controlled only. |
+| `include/subsystems/intake.*` | One-motor roller intake. Driver-controlled (R1/R2) **plus** L1's auto-intake sweep — `main.cpp` makes one decision per loop; never add a second writer. |
 | `include/subsystems/scoring.*` | Intake / matchload / 5-level stacking state machine and its interlocks. |
 | `src/screen.cpp`, `include/screen.hpp` | Brain screen sensor readout. |
 | `src/main.cpp` | `initialize()` / `autonomous()` / `opcontrol()` and the button map. |
@@ -106,10 +106,17 @@ mode) is DESCEND (three position-banded speeds — `LIFT_DESCENT_TOP_PCT`, `_MID
 `_SLOW_PCT` below `LIFT_DESCENT_SLOW_ZONE_DEG`, ramped between) → SEAT (a constant `LIFT_SEAT_MV`
 pressed into the hard stop, so it does not park above the frame and cannot bounce). An **L2 score** is
 a third kind: `Lift::startScore()` → PRESS (push the pin onto the stack with the jaws **shut**, capped
-at `L2_PRESS_MAX_MV`) → contact detected from *measured vs commanded* speed → REL (the lift raises
+at `L2_PRESS_MAX_MV`) → contact, decided by `subsystems::ContactDetector` → REL (the lift raises
 `needsClawRelease()`; **Scoring** opens the claw, the lift never touches a cylinder) → the freed check
 → UNSTK up `L2_UNSTICK_UP_DEG` and retry if the claw is caught → the descent above at
-`L2_RETURN_SPEED_PCT`. No stack under it → `NO CONTACT`, nothing released, seated with the pin still
+`L2_RETURN_SPEED_PCT`. **The detector's rule, learned the hard way:** never threshold against the
+*nominal command* — the first version did, and could never fire, because this six-bar often cannot make
+the commanded descent speed at all (the arm swings up and *back*, so gravity resists the descent over
+much of the arc and the press cap limits the push). Every signal is measured against a **learned
+baseline of what the arm was actually doing a moment ago**: a leaky integral of the position shortfall
+(`LAG`), the loop's effort over the free-descent baseline (`EFFORT`), and a speed-ratio / near-stop
+backstop. The baselines track slow gravity drift but **freeze** below `L2_CONTACT_FREEZE_FRAC` so they
+cannot follow a gentle landing down and mask it. No stack under it → `NO CONTACT`, nothing released, seated with the pin still
 clamped. Out of unstick tries → `SCORE STUCK`, holds where it is, never grinds. Nothing re-drives
 or re-chases: the hold *is* the correction. Four earlier designs are in `git log` and must not come
 back: `d2978c7` (jumped setpoint, high kP), `6b8165c` (trapezoid + leash + fixed `LIFT_KG`), `3723ef2`

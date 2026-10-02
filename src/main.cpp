@@ -43,7 +43,11 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *               takes manual control. Letting go brakes and holds right there -- it does NOT
  *               resume whatever preset or macro step was active before.
  *   L1          intake macro: step up a stack level (1st tap clamps + goes to level 1; each
- *               tap after goes up one level, staying at the top once reached)
+ *               tap after goes up one level, staying at the top once reached). An L1 that starts a
+ *               rise FROM THE FLOOR (at the bottom/seated, or parked at the INTAKE handoff) also runs
+ *               the intake rollers IN from the press until the arm passes L1_AUTO_INTAKE_UNTIL_DEG --
+ *               sweeping the floor while the arm is going up anyway. `INT:AUTO` on the brain's DRV
+ *               line while it does. Extra taps don't restart or extend it.
  *   L2          intake macro: THE SENSING SCORER (above the bottom, holding a pin). Presses the pin
  *               DOWN onto the stack with the claw still SHUT at L2_SCORE_SPEED_PCT, watches the
  *               rotation sensor for the landing (measured speed vs commanded speed), releases the
@@ -144,6 +148,10 @@ void opcontrol() {
     scoring.pivotOut();
     lift.requestHome();
 
+    // L1's auto-intake window: the millisecond the rise began, or 0 when it isn't running. A plain
+    // local, not static, so a second opcontrol() in one program run starts clean.
+    std::uint32_t autoIntakeStart = 0;
+
     while (true) {
         // --- Drive ---
         const int forward = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
@@ -175,8 +183,38 @@ void opcontrol() {
         screen::rMode = rModeFor(r1 || r2, claw.isClamped());
         const bool rLift = screen::rMode == screen::RMode::LIFT && !up && !down;  // D-pad wins
 
+        // --- L1 auto-intake: sweep the floor while the arm is rising off it anyway. An L1 press that
+        // starts a rise FROM THE FLOOR -- arm at or below LIFT_BOTTOM_GOAL_DEG, seated, or parked at
+        // the INTAKE handoff after R1 -- runs the rollers IN from the press itself (so they are already
+        // going during CLAMPING's claw-close wait) until the arm climbs past
+        // L1_AUTO_INTAKE_UNTIL_DEG. Extra L1 taps during the same rise neither restart nor extend it
+        // (the window only opens while it is closed), and an L1 from a stack level never opens it at
+        // all. This is ONE INPUT to the single intake.set() below, never a second writer. ---
+        const double liftPos = lift.getPosition();
+        if (l1New && autoIntakeStart == 0 && !up && !down &&
+            scoring.getState() != Scoring::State::RELEASING &&
+            (lift.isSeated() || liftPos <= config::LIFT_BOTTOM_GOAL_DEG ||
+             scoring.getState() == Scoring::State::INTAKE_POS)) {
+            autoIntakeStart = pros::millis();
+        }
+        if (autoIntakeStart != 0) {
+            // Done when the arm is clear of the floor; cancelled by anything that abandons the rise --
+            // the manual override, clamped-mode R1/R2 (which take the lift over), B, L2, or a lift that
+            // gave up; and timed out so a rise that never gets there can't leave the rollers spinning.
+            const bool done = liftPos > config::L1_AUTO_INTAKE_UNTIL_DEG;
+            const bool cancelled = up || down || bNew || l2New || screen::rMode == screen::RMode::LIFT ||
+                                   lift.isBlocked() || lift.isFaulted();
+            const bool timedOut =
+                pros::millis() - autoIntakeStart >= static_cast<std::uint32_t>(config::L1_AUTO_INTAKE_MAX_MS);
+            if (done || cancelled || timedOut) autoIntakeStart = 0;
+        }
+        screen::autoIntake = autoIntakeStart != 0;
+
+        // The driver always wins: R1/R2 in R:INTAKE mode are the roller buttons, and the auto-intake
+        // only gets the rollers when they aren't being asked for.
         if (screen::rMode == screen::RMode::INTAKE && r1) intake.set(Intake::Mode::IN);
         else if (screen::rMode == screen::RMode::INTAKE && r2) intake.set(Intake::Mode::OUT);
+        else if (screen::autoIntake) intake.set(Intake::Mode::IN);
         else intake.set(Intake::Mode::STOP);
 
         // Clamped mode. R1 is plain voltage through the same manual path the D-pad uses (so it cancels

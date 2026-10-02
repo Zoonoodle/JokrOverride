@@ -25,6 +25,9 @@ extern DriverDebug driverDebug;
  *  clamp state changed while the button was held, so they do nothing until it is released. */
 enum class RMode { IDLE, INTAKE, LIFT, INERT };
 extern RMode rMode;
+/** True while L1's auto-intake is sweeping during a rise off the floor (see config's
+ *  L1_AUTO_INTAKE_UNTIL_DEG). Written by opcontrol every loop; shown as INT:AUTO on the DRV line. */
+extern bool autoIntake;
 /** True once chassis.calibrate() has finished (it runs in the background). */
 extern bool calibrated;
 

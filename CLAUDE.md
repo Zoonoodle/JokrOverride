@@ -12,7 +12,7 @@ every session, so changes get built, uploaded and tested for real.
 | `include/robot.hpp`, `src/robot.cpp` | The LemLib chassis + the single instance of each subsystem. |
 | `include/subsystems/lift.*`, `src/subsystems/lift.cpp` | DR6-4B position PID, gravity feedforward, stall + runaway guards, manual override. **Only** place that writes the lift motors. |
 | `include/subsystems/claw.*` | Pneumatic claw + autoclamp state machine. |
-| `include/subsystems/intake.*` | One-motor roller intake. Driver-controlled (R1/R2) **plus** L1's auto-intake sweep — `main.cpp` makes one decision per loop; never add a second writer. |
+| `include/subsystems/intake.*` | One-motor roller intake, with an optional power fraction (`set(mode, power)`, default full). Driver-controlled (R1/R2, full power) **plus** L1's auto-intake sweep (full power) **plus** L2's auto-outtake near the bottom (`L2_OUTTAKE_PCT`, 60%) — `main.cpp` makes one decision per loop; never add a second writer. |
 | `include/subsystems/scoring.*` | Intake / matchload / 5-level stacking state machine and its interlocks. |
 | `src/screen.cpp`, `include/screen.hpp` | Brain screen sensor readout. |
 | `src/main.cpp` | `initialize()` / `autonomous()` / `opcontrol()` and the button map. |

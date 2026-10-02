@@ -14,6 +14,7 @@ namespace screen {
 DriverDebug driverDebug;
 RMode rMode = RMode::IDLE;
 bool autoIntake = false;
+bool autoOuttake = false;
 bool calibrated = false;
 
 using namespace robot;
@@ -190,13 +191,15 @@ void draw() {
                         hottest(rightDrive), lift.getTemperature(), intake.getTemperature());
 
     // 12: driver loop heartbeat, plus INT:AUTO while L1's auto-intake is sweeping during a rise off
-    // the floor. "not started" = opcontrol never ran (not enabled / stuck before it).
+    // the floor, or INT:OUT while an L2 score descent is auto-outtaking near the bottom (the two never
+    // overlap -- one needs the claw empty and rising, the other a pin held and descending). "not
+    // started" = opcontrol never ran (not enabled / stuck before it).
     if (driverDebug.loops == 0)
         pros::screen::print(pros::E_TEXT_MEDIUM, 12, "DRV   not started %s", calibrated ? "" : "(calibrating)");
     else
         pros::screen::print(pros::E_TEXT_MEDIUM, 12, "DRV #%u fwd %d trn %d Up %d Dn %d%s",
                             static_cast<unsigned>(driverDebug.loops), driverDebug.forward, driverDebug.turn,
-                            driverDebug.up, driverDebug.down, autoIntake ? "  INT:AUTO" : "");
+                            driverDebug.up, driverDebug.down, autoOuttake ? "  INT:OUT" : autoIntake ? "  INT:AUTO" : "");
 }
 
 }  // namespace

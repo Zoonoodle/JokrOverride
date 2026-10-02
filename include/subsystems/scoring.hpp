@@ -161,6 +161,11 @@ class Scoring {
     State getState() const { return state_; }
     /** Current stack level 1..STACK_LEVEL_COUNT, 0 when not stacking. */
     int getLevel() const { return state_ == State::STACKING || state_ == State::CLAMPING ? level_ : 0; }
+    /** True for the whole L2 SCORE descent -- RELEASING with scoreToHome_ set -- from the first PRESS
+     *  tick through REL/UNSTK/RETURN/SEAT, as distinct from RELEASING via scoreOrMatchload() (lowering
+     *  to INTAKE instead) or L2's at-the-bottom clamp toggle, neither of which drop anything. main.cpp
+     *  uses this to auto-outtake while the arm is near the bottom (see config::L2_OUTTAKE_BELOW_DEG). */
+    bool isScoreDescent() const { return state_ == State::RELEASING && scoreToHome_; }
     const char* stateName() const;
 
   private:

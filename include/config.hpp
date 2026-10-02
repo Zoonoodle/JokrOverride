@@ -482,6 +482,23 @@ inline constexpr double L1_AUTO_INTAKE_UNTIL_DEG = 20.0;     // TUNE: arm degree
 // L1_AUTO_INTAKE_UNTIL_DEG (jam, BLOCKED lift, a preset below it) can't leave them spinning.
 inline constexpr int L1_AUTO_INTAKE_MAX_MS = 1500;           // TUNE
 
+// AUTO-OUTTAKE ON L2 SCORE. While an L2 score descent is running (Scoring::isScoreDescent(): RELEASING
+// with scoreToHome_ set -- the sensing scorer, not L2's at-the-bottom clamp toggle) and the arm is
+// below this height, run the rollers OUT at L2_OUTTAKE_PCT so anything still in the intake ejects
+// instead of riding the lift down. Covers the whole trip through PRESS / REL / UNSTK / RETURN, not
+// just the final run home -- whichever phase the arm happens to be under this height in.
+//   NOTE: stack level 1 (31.0 deg) is already below this, so scoring at level 1 outtakes from the
+//   start of the press, not partway down. That is this constant as specified, not a bug.
+//   Pin/cup gets knocked loose too early: lower it. Rollers start too late to clear the handoff
+//   before the arm seats: raise it.
+inline constexpr double L2_OUTTAKE_BELOW_DEG = 40.0;         // TUNE: arm degrees
+// % of full intake power (config::INTAKE_MV) the rollers run OUT at during the above. Lower than
+// R2's full-power outtake on purpose -- this runs unattended during a score, not under driver thumb.
+inline constexpr double L2_OUTTAKE_PCT = 60.0;               // TUNE: % of INTAKE_MV
+// Safety net: the rollers stop after this long no matter what, so a score that stalls while under
+// L2_OUTTAKE_BELOW_DEG (BLOCKED, FAULT, stuck claw) can't leave them spinning for the rest of the match.
+inline constexpr int L2_OUTTAKE_MAX_MS = 2000;               // TUNE
+
 // ---------------------------------------------------------------------------
 // Pivot + claw timing. See include/subsystems/scoring.hpp.
 // ---------------------------------------------------------------------------

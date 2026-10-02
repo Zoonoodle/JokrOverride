@@ -56,6 +56,11 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *               home fast and SEATs. Pivot stays OUT. Resets the level count. Nothing under the arm
  *               -> NO CONTACT: it seats at the bottom with the pin STILL CLAMPED, dropping nothing.
  *               At the bottom instead, L2 toggles the claw (clamp / release) and moves nothing.
+ *               Once this descent passes below L2_OUTTAKE_BELOW_DEG (40 deg), the intake rollers run
+ *               OUT at L2_OUTTAKE_PCT on their own -- through REL/UNSTK/RETURN, whichever phase the
+ *               arm is in -- and stop the instant the arm seats at the bottom (or the score ends some
+ *               other way). `INT:OUT` on the brain's DRV line while it runs. Level 1 (31 deg) is
+ *               already under 40, so scoring from level 1 outtakes from the start of the press.
  *
  *   R1 / R2 have TWO modes, and which one is in force is latched when the button goes down (see
  *   rModeFor() below; the brain's CLAW line shows `R:INTAKE` / `R:LIFT` / `R:wait`):
@@ -151,6 +156,11 @@ void opcontrol() {
     // L1's auto-intake window: the millisecond the rise began, or 0 when it isn't running. A plain
     // local, not static, so a second opcontrol() in one program run starts clean.
     std::uint32_t autoIntakeStart = 0;
+    // L2's auto-outtake window: the millisecond the rollers started, or 0 when it isn't running, plus
+    // a latch so L2_OUTTAKE_MAX_MS's timeout can't just re-arm itself on the very next tick -- it stays
+    // off until the score descent ends and a fresh one starts.
+    std::uint32_t autoOuttakeStart = 0;
+    bool autoOuttakeExpired = false;
 
     while (true) {
         // --- Drive ---
@@ -191,6 +201,31 @@ void opcontrol() {
         // (the window only opens while it is closed), and an L1 from a stack level never opens it at
         // all. This is ONE INPUT to the single intake.set() below, never a second writer. ---
         const double liftPos = lift.getPosition();
+
+        // --- L2 auto-outtake: while an L2 SCORE descent (not the at-the-bottom clamp toggle, not
+        // scoreOrMatchload()'s INTAKE lower) is under L2_OUTTAKE_BELOW_DEG, eject through the whole
+        // rest of the trip down -- PRESS, REL, UNSTK or RETURN, whichever the arm happens to be in --
+        // so anything still in the intake doesn't ride the lift to the bottom. Stack level 1 (31.0 deg)
+        // is already under 40, so scoring from level 1 outtakes from the start of the press; that is
+        // this constant as specified, not a bug (see config.hpp). ---
+        const bool scoringDown = scoring.isScoreDescent();
+        if (!scoringDown) autoOuttakeExpired = false;  // a finished score re-arms the timeout for the next one
+        if (scoringDown && !autoOuttakeExpired && autoOuttakeStart == 0 &&
+            liftPos < config::L2_OUTTAKE_BELOW_DEG) {
+            autoOuttakeStart = pros::millis();
+        }
+        if (autoOuttakeStart != 0) {
+            // Done once the score sequence ends or the arm is at the bottom; cancelled by anything that
+            // would otherwise fight it -- the manual override, B, or a lift that gave up.
+            const bool done = !scoringDown || lift.isSeated() || liftPos <= config::LIFT_BOTTOM_GOAL_DEG;
+            const bool cancelled = up || down || bNew || lift.isBlocked() || lift.isFaulted();
+            const bool timedOut =
+                pros::millis() - autoOuttakeStart >= static_cast<std::uint32_t>(config::L2_OUTTAKE_MAX_MS);
+            if (timedOut) autoOuttakeExpired = true;
+            if (done || cancelled || timedOut) autoOuttakeStart = 0;
+        }
+        screen::autoOuttake = autoOuttakeStart != 0;
+
         if (l1New && autoIntakeStart == 0 && !up && !down &&
             scoring.getState() != Scoring::State::RELEASING &&
             (lift.isSeated() || liftPos <= config::LIFT_BOTTOM_GOAL_DEG ||
@@ -210,10 +245,13 @@ void opcontrol() {
         }
         screen::autoIntake = autoIntakeStart != 0;
 
-        // The driver always wins: R1/R2 in R:INTAKE mode are the roller buttons, and the auto-intake
-        // only gets the rollers when they aren't being asked for.
+        // The driver always wins: R1/R2 in R:INTAKE mode are the roller buttons. Then L2's auto-outtake
+        // (so a score always ejects), then L1's auto-intake -- they can never both be active (one needs
+        // the claw empty and rising, the other a pin held and descending) -- then stop. ONE intake.set()
+        // call, the single writer decision.
         if (screen::rMode == screen::RMode::INTAKE && r1) intake.set(Intake::Mode::IN);
         else if (screen::rMode == screen::RMode::INTAKE && r2) intake.set(Intake::Mode::OUT);
+        else if (screen::autoOuttake) intake.set(Intake::Mode::OUT, config::L2_OUTTAKE_PCT / 100.0);
         else if (screen::autoIntake) intake.set(Intake::Mode::IN);
         else intake.set(Intake::Mode::STOP);
 

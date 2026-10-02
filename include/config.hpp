@@ -112,104 +112,199 @@ inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
 inline constexpr double MAX = 133.3;
 }  // namespace lift_preset
 
-// ---------------------------------------------------------------------------
-// Lift motion — DRIVE -> BRAKE -> HOLD. Read lift.hpp's class comment for the full picture.
-// ---------------------------------------------------------------------------
-// Both lift motors are RED (100 RPM) cartridges (see the MotorGears::red in Lift::Lift()). Through
-// the 12T -> 48T (4:1) reduction the ARM's free speed is 100 / 4 = 25 arm RPM = 25 * 360 / 60 =
-// 150 arm deg/s. That is the most the arm can do with the D-pad held, and it is what every preset move
-// now does too: full voltage from the first tick, so the `vel` column of the trace (see LIFT_TRACE)
-// should climb to about this number on any move longer than ~10 deg.
+// ===========================================================================
+// LIFT TUNING — start here
+// ===========================================================================
+// Everything that decides how the lift feels is in this block. Each line says what it does and which
+// way to move it for which symptom. Nothing else needs touching to tune the lift. The structure these
+// numbers feed is described under "Lift motion" below, and the step-by-step order to tune them in is
+// in README "Tuning the lift". Watch a move with the Brain Terminal trace open (LIFT_TRACE).
+//
+// HARDWARE FACTS (not knobs -- these are what the robot is):
+// Both lift motors are RED (100 RPM) cartridges (MotorGears::red in Lift::Lift()). Through the
+// 12T -> 48T (4:1) reduction the ARM's free speed is 100 / 4 = 25 arm RPM = 150 arm deg/s.
 inline constexpr double LIFT_FREE_SPEED_DEG_PER_S = 150.0;   // red 100 RPM / 4:1 = 25 arm RPM = 150 deg/s
-inline constexpr float LIFT_MAX_MV = 12000.0f;               // DRIVE voltage, and the manual override's full-send power
-//
-// HOW A MOVE WORKS. There is no position PID, no setpoint profile and no gravity feedforward any more.
-// Every preset move is three phases, decided every 10 ms from the arm's measured POSITION and VELOCITY:
-//   DRIVE   full +-LIFT_MAX_MV toward the goal (exactly what the D-pad does) until the arm is going
-//           as fast as the braking curve below allows for the distance that is left,
-//   BRAKE   a velocity loop (LIFT_VEL_KP / LIFT_VEL_KI) that follows that braking curve down to a
-//           stop -- or, for INTAKE and DOWN, down to a slow CREEP that it holds until it is inside
-//           the goal's tolerance,
-//   HOLD    the motors' own brake-hold (MotorBrake::hold), the same thing that holds the arm when the
-//           D-pad is let go. Arrival LATCHES here: nothing in this phase pushes, so nothing can hunt.
-// The braking curve is the stopping-distance relation v = sqrt(2 * a * d) with a =
-// LIFT_BRAKE_DECEL_DEG_PER_S2 and d = distance to go minus LIFT_BRAKE_MARGIN_DEG. It is computed from
-// distance, not time, so an arm that is ahead of or behind the curve is corrected automatically.
-//
-// Why this and not the two designs before it: a jumped setpoint with kP = 600 oscillated (d2978c7); a
-// trapezoidal profile + leash + feedforward + PID + gravity term + arrive/hold hysteresis (6b8165c) was
-// slow off the line (the leash capped the net drive at ~3000 mV) and STILL oscillated, because its hold
-// relied on a fixed gravity feedforward that is wrong at most angles of a six-bar, so the arm drifted
-// out of the band, the loop re-chased with a D-term kick, and it drifted again -- a limit cycle. The
-// design here cannot do that: HOLD is the firmware's brake-hold, and a move is re-engaged from HOLD at
-// most LIFT_MAX_REDRIVES times, only for an error bigger than LIFT_REENGAGE_DEG.
-//
-// THE ONE NUMBER THAT SETS WHERE IT STOPS. How hard the arm can really brake, in arm deg/s^2. The
-// loop starts braking when the arm is this many deg/s^2 away from stopping at the goal, so a value
-// UNDER the real capability stops SHORT (safe), a value OVER it overshoots. Read it off the trace: in
-// the BRAKE phase the `vel` column drops by about a * 0.02 per 20 ms line.
-//   Stops short of every preset by the same few degrees: RAISE it (braking starts later).
-//   Overshoots / arrives at a level still moving / taps the frame at DOWN: LOWER it.
-inline constexpr double LIFT_BRAKE_DECEL_DEG_PER_S2 = 2000.0; // TUNE: conservative on purpose
-// Where the braking curve aims to reach zero speed: this far before the goal, so tracking lag lands
-// the arm on the goal rather than past it.
-inline constexpr double LIFT_BRAKE_MARGIN_DEG = 2.0;         // TUNE
-// The velocity loop that follows the curve (BRAKE and CREEP). Output mV = KP * (vref - v) + the
-// integral of KI * (vref - v); the integral is what learns gravity (whatever voltage it takes to hold
-// the arm's speed at this angle, up or down), so no gravity constant has to be right in advance.
-//   `vel` swings above and below the curve in the trace (hunts): lower LIFT_VEL_KP.
-//   CREEP takes a long time to reach LIFT_CREEP_DEG_PER_S, or sags before it gets going: raise LIFT_VEL_KI.
+inline constexpr float LIFT_MAX_MV = 12000.0f;               // full battery volts; the D-pad's full-send power
+
+// --- How fast a preset move cruises, as a % of the free speed above ---------
+//   Feels sluggish on a long rise: raise LIFT_UP_SPEED_PCT (100 is the hardware limit).
+//   Runs away / slams going down to a LOWER level: lower LIFT_DOWN_SPEED_PCT.
+inline constexpr double LIFT_UP_SPEED_PCT = 100.0;           // TUNE: cruise speed going up
+inline constexpr double LIFT_DOWN_SPEED_PCT = 60.0;          // TUNE: cruise speed going down (gravity helps, so less)
+
+// --- When it starts slowing down (the braking curve) ------------------------
+// The arm is never allowed to go faster than sqrt(2 * LIFT_DECEL_DEG_PER_S2 * d) with d = the degrees
+// left minus LIFT_APPROACH_ZONE_DEG. This is the single number that decides whether it overshoots.
+// Read it off the trace: in the B lines `vel` should fall by about a * 0.02 per 20 ms line.
+//   Overshoots the level / arrives still moving: LOWER it (braking starts earlier).
+//   Dawdles the last third of every move: RAISE it (braking starts later).
+// 700 deg/s^2 means it starts braking 16 deg out from full speed -- deliberately well inside what two
+// red motors through a 4:1 can really do. The old value, 2000, started braking only 7.6 deg out, which
+// the arm physically cannot achieve: that was the overshoot.
+inline constexpr double LIFT_DECEL_DEG_PER_S2 = 700.0;       // TUNE: how hard it brakes, arm deg/s^2
+
+// --- The last few degrees (the final approach) ------------------------------
+// Inside LIFT_APPROACH_ZONE_DEG the speed reference becomes LIFT_APPROACH_KP_PER_S * (degrees left),
+// capped at LIFT_APPROACH_DEG_PER_S. So the arm walks the last few degrees in at a crawl and hands
+// over to the hold already nearly stopped -- this is what stops the six-bar springing.
+//   Still visibly moving when it grabs the hold: raise LIFT_APPROACH_ZONE_DEG, or lower
+//     LIFT_APPROACH_DEG_PER_S / LIFT_APPROACH_KP_PER_S.
+//   Takes too long to finish the last bit: raise LIFT_APPROACH_KP_PER_S first, then
+//     LIFT_APPROACH_DEG_PER_S.
+inline constexpr double LIFT_APPROACH_ZONE_DEG = 8.0;        // TUNE: where the crawl starts
+inline constexpr double LIFT_APPROACH_DEG_PER_S = 18.0;      // TUNE: fastest the crawl may be
+inline constexpr double LIFT_APPROACH_KP_PER_S = 3.0;        // TUNE: crawl speed per degree left (1/s)
+
+// --- The velocity loop (phases BRAKE, APPROACH and DESCEND) -----------------
+// Everything that is "go at this speed" runs through this one PI loop on the MEASURED arm speed:
+//   mV = LIFT_VEL_KP * (reference - measured) + integral of LIFT_VEL_KI * (reference - measured)
+// The integral is what learns gravity -- whatever voltage the arm needs at this angle to hold a speed,
+// up or down -- so no gravity constant has to be right in advance.
+//   `vel` swings above and below the reference in the trace (hunts): LOWER LIFT_VEL_KP.
+//   Sags / is slow to reach the reference speed: RAISE LIFT_VEL_KI.
+//   The braking feels violent: LOWER LIFT_VEL_MAX_MV (and lower LIFT_DECEL_DEG_PER_S2 to match).
 inline constexpr float LIFT_VEL_KP = 30.0f;                  // TUNE: mV per (deg/s) of speed error
-inline constexpr float LIFT_VEL_KI = 600.0f;                 // TUNE: mV per (deg/s) of speed error, per second
-// Most the velocity loop may push, either way. Braking from 150 deg/s against this much reverse
-// voltage is already harsher than the firmware hold the D-pad release does, so don't raise it casually.
-inline constexpr float LIFT_BRAKE_MAX_MV = 9000.0f;          // TUNE
-// BRAKE hands over to HOLD once the arm is slower than this (and inside LIFT_TOLERANCE_DEG). The
-// firmware hold grabs the position where it is called, so handing over at a crawl means no spring-back.
-inline constexpr double LIFT_STOPPED_DEG_PER_S = 20.0;       // TUNE
-// BRAKE/CREEP can't take longer than this; if it does (arm fighting something, loop badly tuned) the
-// lift simply holds where it is and, if that is far off, re-drives per LIFT_REENGAGE_DEG below.
-inline constexpr int LIFT_APPROACH_TIMEOUT_MS = 1000;        // TUNE
+inline constexpr float LIFT_VEL_KI = 400.0f;                 // TUNE: mV per (deg/s) of speed error, per second
+inline constexpr float LIFT_VEL_MAX_MV = 9000.0f;            // TUNE: most the velocity loop may push, either way
+
+// --- Holding position (phase HOLD) -----------------------------------------
+// A damped position hold, NOT the firmware's brake-hold. The firmware hold is a stiff position loop
+// with gains we don't control: handing a still-moving, springy six-bar (chain stretch, 4:1 backlash,
+// rubber bands) to it is what made the arm ring up and down after L1. This one has an explicit damping
+// term, so the arriving arm's energy is absorbed instead of stored:
+//   mV = LIFT_HOLD_KP * (error outside the deadband) + integral(LIFT_HOLD_KI * error) - LIFT_HOLD_KD * speed
+//   Sags below the level over a few seconds: raise LIFT_HOLD_KI first, then LIFT_HOLD_KP.
+//   Buzzes / twitches while holding: raise LIFT_HOLD_DEADBAND_DEG, then lower LIFT_HOLD_KP.
+//   Still bounces once or twice on arrival: RAISE LIFT_HOLD_KD. This is the anti-bounce knob.
+//   Audibly straining while parked at a high level: lower LIFT_HOLD_MAX_MV (expect some sag).
+inline constexpr float LIFT_HOLD_KP = 180.0f;                // TUNE: mV per deg of sag
+inline constexpr float LIFT_HOLD_KI = 400.0f;                // TUNE: mV per deg per second (learns gravity)
+inline constexpr float LIFT_HOLD_KD = 60.0f;                 // TUNE: mV per deg/s -- the anti-bounce term
+inline constexpr double LIFT_HOLD_DEADBAND_DEG = 0.8;        // TUNE: inside this, only the learned gravity term acts
+inline constexpr float LIFT_HOLD_MAX_MV = 7000.0f;           // TUNE: most the hold may push
+
+// --- The descent to the bottom (L2, B, auton DOWN, and R2 in clamped mode) --
+// Three speed bands on the way down, as % of the free speed, so the arm walks itself onto its hard
+// stop instead of falling onto it. Band boundaries are read off the arm's POSITION (degrees above 0):
+//   top    : from wherever the descent started, down to the mid boundary -> LIFT_DESCENT_TOP_PCT
+//   middle : from the mid boundary down to LIFT_DESCENT_SLOW_ZONE_DEG   -> LIFT_DESCENT_MID_PCT
+//   slow   : LIFT_DESCENT_SLOW_ZONE_DEG down to the stop                -> LIFT_DESCENT_SLOW_PCT
+// The mid boundary is a FRACTION of the travel between the start height and the slow zone, not a fixed
+// height, so "the middle" really is the middle of this particular descent whether it starts at level 1
+// or level 5: mid boundary = SLOW_ZONE + LIFT_DESCENT_MID_FRACTION * (start height - SLOW_ZONE).
+// Band changes are short ramps at LIFT_DESCENT_RAMP_DEG_PER_S2, never stops.
+//   Falls too fast off a high level: lower LIFT_DESCENT_TOP_PCT / LIFT_DESCENT_MID_PCT.
+//   Still arrives at the bottom with a thump: raise LIFT_DESCENT_SLOW_ZONE_DEG, lower LIFT_DESCENT_SLOW_PCT.
+//   The whole descent takes too long: raise LIFT_DESCENT_MID_PCT, lower LIFT_DESCENT_SLOW_ZONE_DEG.
+inline constexpr double LIFT_DESCENT_TOP_PCT = 50.0;         // TUNE: ~75 deg/s
+inline constexpr double LIFT_DESCENT_MID_PCT = 75.0;         // TUNE: ~112 deg/s
+inline constexpr double LIFT_DESCENT_SLOW_PCT = 12.0;        // TUNE: ~18 deg/s, the constant slow final descent
+inline constexpr double LIFT_DESCENT_SLOW_ZONE_DEG = 20.0;   // TUNE: slow zone starts this many deg above 0
+inline constexpr double LIFT_DESCENT_MID_FRACTION = 0.5;     // TUNE: 0.5 = the mid band is the lower half of the fast travel
+inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 300.0;// TUNE: how quickly the reference may change between bands
+
+// --- Seating on the hard stop (phase SEAT) ---------------------------------
+// The point of the slow final descent is that the arm does not STOP above the frame -- it keeps
+// walking down until it physically cannot, and then stays pressed there so it cannot bounce back up.
+// "Physically cannot" = the arm is below LIFT_SEAT_DETECT_DEG and has moved slower than
+// LIFT_SEAT_STILL_DEG_PER_S for LIFT_SEAT_STILL_MS. After that the lift holds LIFT_SEAT_MV forever.
+// HEAT: -1200 mV is 10% of full volts. A stalled V5 motor at 10% draws well under an amp (the winding
+// is about 1.4 ohm), roughly a watt per motor, and the arm is resting on the frame so the seat voltage
+// is only fighting bounce, not holding the arm up. That is safe for a whole match -- but watch the
+// brain's TEMP line the first time, and LIFT_SEAT_TEMP_LIMIT_C drops the seat to a plain brake-hold if
+// a lift motor ever does get that hot.
+//   Bounces back up off the stop: raise the magnitude of LIFT_SEAT_MV (more negative, e.g. -1500).
+//   Motors warm up while parked at the bottom: lower the magnitude (e.g. -800).
+//   Declares itself seated while still a few degrees up: lower LIFT_SEAT_DETECT_DEG or
+//     LIFT_SEAT_STILL_DEG_PER_S, or raise LIFT_SEAT_STILL_MS.
+inline constexpr float LIFT_SEAT_MV = -1200.0f;              // TUNE: constant downward seating voltage
+inline constexpr double LIFT_SEAT_DETECT_DEG = 6.0;          // TUNE: only this close to 0 may "stopped" mean "seated"
+inline constexpr double LIFT_SEAT_STILL_DEG_PER_S = 4.0;     // TUNE
+inline constexpr int LIFT_SEAT_STILL_MS = 150;               // TUNE
+// If something knocks a seated arm this far back up above LIFT_SEAT_DETECT_DEG, the descent restarts
+// and walks it down again rather than leaving it hanging.
+inline constexpr double LIFT_SEAT_UNSEAT_DEG = 4.0;          // TUNE
+inline constexpr double LIFT_SEAT_TEMP_LIMIT_C = 50.0;       // safety net, not a tuning knob
+
+// --- Clamped-mode R1 / R2 lift (see src/main.cpp and README "Driver guide") --
+// While the claw is CLAMPED on a pin, R1/R2 stop being intake/extake and become lift up/down.
+// Up is plain voltage; down goes through the banded descent above (so it seats at the bottom exactly
+// like L2 does) with this as its top-band speed.
+inline constexpr double R_LIFT_UP_PCT = 90.0;                // TUNE: R1 up, % of full voltage
+inline constexpr double R_LIFT_DOWN_PCT = 50.0;              // TUNE: R2 down, % of free speed
+
+// --- Arrival bands ---------------------------------------------------------
+// How close counts as arrived for the stack levels and MATCHLOAD. 5 deg of final error at a stack
+// level is fine -- the pin only has to land in the cup. A goal already inside this band is "arrived"
+// without moving at all. With the final approach above, moves normally land inside ~2.5 deg anyway.
+inline constexpr double LIFT_TOLERANCE_DEG = 5.0;            // TUNE: stack levels, MATCHLOAD
+// INTAKE is the exception: the claw has to line up with the handoff, so it is a PRECISE move and gets
+// this tight band. Lift::setTarget(h, true) marks a move precise, and any goal within half a degree of
+// lift_preset::INTAKE is promoted automatically so no call site can forget.
+inline constexpr double LIFT_PRECISE_TOLERANCE_DEG = 1.0;    // TUNE: INTAKE only
+// Any NON-PRECISE goal at or below this is "a trip to the bottom": it uses the banded descent + seating
+// above instead of a position move, and Scoring's score() treats an arm already here as "nothing to
+// score" (L2 is then a no-op). INTAKE (1.1) is inside it numerically but is always precise, so R1 keeps
+// its own exact approach and never seats.
+inline constexpr double LIFT_BOTTOM_GOAL_DEG = 5.0;          // TUNE
+// Hands over to HOLD once the arm is inside its band AND slower than this. The hold has real damping
+// now, so this does not have to be tiny -- but lowering it makes the handover gentler still.
+inline constexpr double LIFT_STOPPED_DEG_PER_S = 8.0;        // TUNE
+// The final approach can't take longer than this (arm fighting something, loop badly tuned): the lift
+// hands over to HOLD, whose position term then pulls in whatever is left, gently.
+inline constexpr int LIFT_APPROACH_TIMEOUT_MS = 1500;        // TUNE
 // Velocity estimate: position differenced every tick, then this much of each new sample is blended in
-// (1.0 = raw, no filtering). 0.5 is one tick of lag, enough to take the edge off task timing jitter.
-inline constexpr double LIFT_VEL_FILTER = 0.5;
+// (1.0 = raw, no filtering). The rotation sensor's quantisation is 0.0025 arm deg, i.e. 0.25 deg/s per
+// count, so there is nothing to filter out except task jitter -- and filtering costs LAG, which makes
+// the brake react late and overshoot. 0.8 is a quarter of a tick of lag; 0.5 (the old value) was a
+// whole tick, which at 150 deg/s is 1.5 deg of stale position.
+inline constexpr double LIFT_VEL_FILTER = 0.8;
 
 // ---------------------------------------------------------------------------
-// Lift arrival: tolerance, then hold. Precision traded for clean stops, on purpose.
+// Lift motion — how those knobs fit together. Read lift.hpp's class comment for the full picture.
 // ---------------------------------------------------------------------------
-// How close counts as arrived for the stack levels and MATCHLOAD. 5 deg of final error at a stack
-// level is fine -- the pin only has to land in the cup -- and trading that for a stop with no hunting
-// is a deliberate call. A goal already inside this band is "arrived" without moving at all.
-inline constexpr double LIFT_TOLERANCE_DEG = 5.0;            // TUNE: stack levels, MATCHLOAD
-// INTAKE is the exception: the claw has to line up with the handoff, so it is a PRECISE move -- it
-// brakes down to LIFT_CREEP_DEG_PER_S by LIFT_CREEP_ZONE_DEG before the goal, creeps the rest, and
-// hands over to HOLD inside this tight band. Lift::setTarget(h, true) marks a move precise, and any
-// goal within half a degree of lift_preset::INTAKE is promoted automatically so no call site can forget.
-inline constexpr double LIFT_PRECISE_TOLERANCE_DEG = 1.0;    // TUNE: INTAKE only
-inline constexpr double LIFT_CREEP_DEG_PER_S = 25.0;         // TUNE: final-approach speed for INTAKE and DOWN
-inline constexpr double LIFT_CREEP_ZONE_DEG = 6.0;           // TUNE: how far out the creep starts
-// Heading to DOWN (0): the arm creeps (same LIFT_CREEP_* as above, so it cannot arrive at speed) and
-// hands over to the brake-hold this many degrees above the hard stop. Nothing ever drives the arm
-// into the frame -- an arm pushed onto its stop is what made the lift bounce at startup (17ab865).
-inline constexpr double LIFT_REST_BAND_DEG = 3.0;            // TUNE: lower (1.5) to park closer to the frame
-// Any goal at or below this counts as "a trip to the bottom": the DOWN creep applies, and Scoring's
-// score() treats an arm already here as "nothing to score" (L2 is then a no-op). INTAKE (1.1) is inside it.
-inline constexpr double LIFT_BOTTOM_GOAL_DEG = 5.0;          // TUNE
-// From HOLD, the lift re-drives (DRIVE -> BRAKE -> HOLD again) only if the arm is this far from the
-// goal -- a brake that stopped well short or well long -- and only LIFT_MAX_REDRIVES times per command.
-// After that it holds wherever it is and the brain shows the residual error. Both together are the
-// structural guarantee that a preset move cannot hunt: the number of pushes per button press is finite.
-inline constexpr double LIFT_REENGAGE_DEG = 12.0;            // TUNE
-inline constexpr int LIFT_MAX_REDRIVES = 2;                  // TUNE
+// There are exactly two kinds of commanded move, and one manual input, all inside the single 10 ms
+// Lift::update() that owns the motors:
+//
+// A POSITION MOVE (every goal except a trip to the bottom) is DRIVE -> BRAKE -> APPROACH -> HOLD:
+//   DRIVE     full +-LIFT_MAX_MV, the exact thing the D-pad does, until the arm is up to the speed
+//             the braking curve allows -- so a move is still off the line instantly.
+//   BRAKE     the velocity loop tracks min(cruise cap, braking curve) all the way in.
+//   APPROACH  the same loop, now tracking LIFT_APPROACH_KP_PER_S * (degrees left) capped at
+//             LIFT_APPROACH_DEG_PER_S, so the arm is down to a crawl before it stops.
+//   HOLD      the damped position hold (KP/KI/KD above). Its integral carries the learned gravity
+//             voltage over to the next move, so no move ever starts by guessing it.
+//
+// A DESCENT (a non-precise goal at or below LIFT_BOTTOM_GOAL_DEG: L2, B, auton DOWN, R2 in clamped
+// mode) is DESCEND -> SEAT: the three speed bands above, then a constant LIFT_SEAT_MV pressed into the
+// hard stop. It does not stop above the frame and it does not bounce.
+//
+// THE MANUAL INPUT (D-pad Up/Down, and R1 in clamped mode) is plain voltage straight into the same
+// loop, ahead of everything else; it cancels any target and any homing instantly, and letting go
+// brake-holds where it is.
+//
+// Why this and not the designs before it: a jumped setpoint with kP = 600 oscillated (d2978c7); a
+// trapezoidal profile + leash + feedforward + PID + gravity term + arrive/hold hysteresis (6b8165c)
+// was slow off the line and still oscillated because its hold used a FIXED gravity feedforward that is
+// wrong at most angles of a six-bar; and DRIVE -> BRAKE -> firmware-hold (3723ef2) overshot and rang,
+// because LIFT_BRAKE_DECEL_DEG_PER_S2 = 2000 asked for more braking than the arm can do, the velocity
+// estimate lagged a whole tick, enterBrake() seeded the loop's integral with an upward kick, and the
+// handover at up to 20 deg/s dropped a still-moving springy arm into the firmware's stiff hold, which
+// stored the energy and gave it back. All four of those are fixed above: realistic decel, less filter
+// lag, the integral seeded from the learned gravity voltage, a crawl before the stop, and a hold with
+// an explicit damping term. Nothing re-drives or re-chases any more -- the hold IS the correction, and
+// it is gentle, so LIFT_REENGAGE_DEG / LIFT_MAX_REDRIVES are gone.
 
 // ---------------------------------------------------------------------------
 // Lift guards
 // ---------------------------------------------------------------------------
-// Stall guard: a phase that WANTS motion (DRIVE at full voltage, or CREEP) but the arm moved less than
-// STALL_DEG in STALL_MS = it can't get there (preset above the real top, or jammed). The lift gives up
-// on that target, holds where it is (no re-drives) and the brain shows BLOCKED. It is not checked in
-// BRAKE or HOLD, which are stopping on purpose. It cannot false-trip: at full voltage the arm covers
-// 0.5 deg in a few tens of ms, and the creep covers it in 20 ms.
+// Stall guard: a phase that WANTS real motion (its speed reference is at least 5 deg/s) but the arm
+// moved less than STALL_DEG in STALL_MS = it can't get there (preset above the real top, or jammed).
+// The lift gives up on that target, holds where it is and the brain shows BLOCKED. It is NOT checked
+// once the final approach has tapered the reference below 5 deg/s (where slow progress is the plan,
+// not a jam), nor in HOLD, nor below LIFT_SEAT_DETECT_DEG during a descent -- an arm that has stopped
+// down there is seated, which is the goal, not a fault. It cannot false-trip: 5 deg/s covers 0.5 deg
+// in 100 ms, a fifth of the window.
 //   Shows BLOCKED on a normal move: first check for a real jam or a preset above the top. Then raise
 //   LIFT_STALL_MS.
 inline constexpr double LIFT_STALL_DEG = 0.5;                // TUNE: arm deg of progress that counts as moving
@@ -231,7 +326,8 @@ inline constexpr double LIFT_FAULT_DEG = 8.0;                // TUNE
 // ---------------------------------------------------------------------------
 // VS Code -> PROS -> "Brain Terminal" (or `pros terminal`), press a lift button, paste the lines back.
 // Columns: `LIFT <ms> <phase> <pos*10> <goal*10> <vel deg/s> <out mV>`; phase is D=DRIVE, B=BRAKE,
-// C=CREEP, H=HOLD, M=manual D-pad, h=homing, F=fault, I=idle. Integers only (no float formatting on the
+// A=APPROACH (the final crawl), H=HOLD, V=DESCEND (a banded trip to the bottom), S=SEAT (pressed onto
+// the hard stop), M=manual (D-pad, or R1 in clamped mode), h=homing, F=fault, I=idle. Integers only (no float formatting on the
 // control task), sampled every LIFT_TRACE_EVERY_TICKS, written from a separate low-priority task that
 // drains a ring buffer -- the 10 ms control loop never calls printf. Keeps going LIFT_TRACE_TAIL_MS
 // after the arm stops so the hold is visible too. Set false to silence it entirely (no task started).
@@ -281,15 +377,29 @@ inline constexpr int LIFT_DEFAULT_TIMEOUT_MS = 2500;         // TUNE
 // ---------------------------------------------------------------------------
 // Claw (pneumatic) + autoclamp sensor
 // ---------------------------------------------------------------------------
-inline constexpr char CLAW_PISTON_PORT = 'C';                // TODO(team): confirm ADI port
-// Which ADI level CLOSES the jaws. Observed on the robot (2026-10-01): with the pin LOW -- at power-on,
-// and at the intake where the code had "opened" the jaws -- the claw was clamped shut, so the
-// unpowered/LOW level is CLOSED and HIGH opens it. (The old CLAW_EXTENDED_IS_CLOSED = true said the
-// opposite, which is why L1's "clamp" opened the jaws and R1's "open" closed them.) Because unpowered
-// is closed, the claw is physically CLOSED at power-on and the code starts in Claw::State::CLOSED
-// without writing anything the ADI isn't already at -- nothing moves at startup. If pressing A opens
-// the jaws when the brain's CLAW line says CLAMPED, flip this one constant.
-inline constexpr bool CLAW_CLOSED_IS_ADI_HIGH = false;       // TODO(team): confirm with A on the brain's CLAW line
+// THE TWO CYLINDERS WERE CROSSED IN CODE UNTIL 2026-10-01. The port the code called the claw ('C')
+// is physically the PIVOT cylinder, and the port it called the pivot ('D') is physically the CLAW.
+// The user found this on the robot; the ports below are the corrected, physical assignment, and every
+// polarity note here was re-derived from scratch afterwards (see the derivation under each constant).
+inline constexpr char CLAW_PISTON_PORT = 'D';                // physically the claw (was 'C', which is the pivot)
+// Which ADI level CLOSES the jaws.
+//
+// DERIVATION. Every build this robot has ever run wrote BOTH ADI pins LOW at construction (the claw
+// object: Pneumatics(port, start_extended=false), then DigitalOut(port, LOW); the pivot object the
+// same), so at power-on C and D are both LOW, which is also their unpowered level. On the 3723ef2
+// build, R1/INTAKE wrote the "claw" object's open level to C (LOW) and the "pivot" object's BACK level
+// to D (HIGH). The driver's report of that run was "clamp and pivot reversed at the intake": the claw
+// was gripping when the code wanted it open. The pin that was HIGH at that moment was D -- the real
+// claw. So HIGH closes the jaws, and the unpowered LOW level is OPEN.
+// That also makes mechanical sense: a single-acting VEX cylinder needs air to grip, and this is the
+// arrangement where losing air opens the jaws rather than locking them shut.
+// CONSEQUENCE FOR STARTUP: the jaws are physically OPEN at power-on, so Claw starts in State::OPEN and
+// writes the pin the level it already sits at -- nothing moves at startup (CLAUDE.md rule 1). It also
+// means the claw cannot hold a preloaded pin with the program off; press A or L1 to grip one.
+// This is a one-observation deduction, so confirm it in 10 seconds: at power-on the brain's CLAW line
+// reads `CLAW OPEN D[0]`; press A and the jaws must CLOSE while the line reads `CLAMPED D[1]`. If A
+// opens them instead, flip this one constant and nothing else.
+inline constexpr bool CLAW_CLOSED_IS_ADI_HIGH = true;        // TODO(team): confirm with A on the brain's CLAW line
 // Autoclamp: a distance sensor looking between the jaws. None is in the notebook yet.
 inline constexpr int8_t CLAW_DISTANCE_PORT = 11;             // TODO(team): mount + confirm port
 inline constexpr int CLAW_DETECT_MM = 40;                    // TODO(team): distance that means "pin is between the jaws"
@@ -308,18 +418,23 @@ inline constexpr float INTAKE_MV = 12000.0f;
 // Pivot + claw timing. See include/subsystems/scoring.hpp.
 // ---------------------------------------------------------------------------
 // If the claw/wrist flips with its own cylinder, set the port. ' ' = no pivot actuator.
-inline constexpr char PIVOT_PISTON_PORT = 'D';
+inline constexpr char PIVOT_PISTON_PORT = 'C';               // physically the pivot (was 'D', which is the claw)
 // THE PIVOT HAS TWO POSITIONS, named for where the end effector physically is (the driver's words):
 //   OUT  = swung out. Where it sits at power-on, at every stack level while scoring, and in the
 //          default down position after L2 / B. In the code, pivot OUT == true.
 //   BACK = pulled in toward the intake handoff, for taking a pin from the intake (R1 / INTAKE).
 //          In the code, pivot BACK == false.
-// Which ADI level is OUT: at power-on the brain's ADI outputs are LOW and the pivot sits OUT, so the
-// unpowered/LOW level is OUT and HIGH is BACK. That is also the only arrangement where Scoring can
-// start with the pivot logically OUT without writing anything the ADI isn't already at -- so nothing
-// moves at startup (CLAUDE.md rule 1). If pressing X the first time makes the pivot swing BACK and the
-// brain's CLAW line says it went OUT, flip this one constant; nothing else needs to change.
-inline constexpr bool PIVOT_OUT_IS_ADI_HIGH = false;         // TODO(team): confirm with X on the brain's CLAW line
+// DERIVATION of which ADI level is OUT -- now from the correct pin, and confirmed twice:
+//  1. At power-on every ADI output is LOW, the code writes LOW anyway, and the driver's own
+//     observation is that the physical pivot sits OUT. C is the pivot. So C LOW = OUT.
+//  2. Independently: on the 6b8165c build, Claw::clamp() at every stack level wrote HIGH to C (that
+//     build's "claw" object lived on C), and the driver reported the pivot sat PULLED IN at every
+//     stack level. So C HIGH = BACK. Same answer from a different run.
+// So the unpowered/LOW level is OUT and HIGH is BACK -- which is also the only arrangement where
+// Scoring can start with the pivot logically OUT without writing anything the ADI isn't already at, so
+// nothing moves at startup (CLAUDE.md rule 1). Confirm with X: the line reads `PIV OUT C[0]` at
+// power-on and must read `BACK C[1]` with the pivot pulled in after one press.
+inline constexpr bool PIVOT_OUT_IS_ADI_HIGH = false;         // confirmed twice (see above); re-check with X
 // The matchload spot (scoreOrMatchload(), not on a driver button): take the pin with the pivot BACK
 // like at the intake, or OUT like everywhere else?
 inline constexpr bool PIVOT_BACK_AT_MATCHLOAD = false;       // TODO(team): confirm
@@ -334,17 +449,26 @@ inline constexpr bool PIVOT_BACK_AT_MATCHLOAD = false;       // TODO(team): conf
 //   The pivot is still swinging when the arm reaches level 1, or still OUT when the arm reaches the
 //   handoff on R1: lower it.
 inline constexpr double PIVOT_HANDOFF_ZONE_DEG = 10.0;       // TUNE
-inline constexpr int PIVOT_TIME_MS = 250;                    // TUNE: time for the pivot to finish moving
+// How long the pivot takes to finish swinging. NOTE: until the port swap this timer was watching the
+// CLAW cylinder, so it has never actually been measured against the pivot. 250 ms is a safe guess.
+inline constexpr int PIVOT_TIME_MS = 250;                    // TUNE: never measured on the real pivot
 // THIS IS THE L1 DELAY. The first L1 tap closes the jaws and waits here before the lift is given any
 // target at all (Scoring::update(), case CLAMPING) -- interlock: the arm must not pull out of an open
-// claw. So the gap between pressing L1 and the arm moving is at least this long, by design. 100 ms is
-// about as low as a pneumatic claw can be trusted with.
-//   Pin slips / the arm starts up before the jaws are shut: raise it back to 150.
+// claw. So the gap between pressing L1 and the arm moving is at least this long, by design.
+// NOTE: this was trimmed to 100 ms while the ports were crossed, i.e. it was timing the PIVOT
+// cylinder, not the claw. Put back to 150 ms, which is a sane starting point for a pneumatic claw that
+// has to actually grip a pin before the arm pulls away.
+//   Pin slips / the arm starts up before the jaws are shut: raise it (175, 200).
+//   The gap between the first L1 tap and the arm moving annoys you: lower it, carefully.
 // (Every L1 tap AFTER the first one commands the next level immediately -- no wait.)
-inline constexpr int CLAW_CLOSE_TIME_MS = 100;               // TUNE: was 150. Jaws shut before the lift starts rising (L1)
+inline constexpr int CLAW_CLOSE_TIME_MS = 150;               // TUNE: never measured on the real claw
 // Jaws open before the arm lowers -- only for scoreOrMatchload()'s path (not currently on a button).
-// L2's score() no longer waits on this: the claw opens, the pivot starts retracting, and the lift's
-// own profiled descent all start in the same tick (see Scoring::enter()/update(), case RELEASING).
-inline constexpr int CLAW_OPEN_TIME_MS = 200;                // TUNE
+// L2's score() uses L2_RELEASE_WAIT_MS below instead.
+inline constexpr int CLAW_OPEN_TIME_MS = 200;                // TUNE: never measured on the real claw
+// L2 (score). The jaws open, and the arm then stands completely still for this long before the descent
+// starts, so the pin is free and settled in the cup before the end effector moves away from it.
+//   The pin gets dragged / knocked as the arm leaves: raise it.
+//   Scoring feels sluggish and the pin is clearly free: lower it (150).
+inline constexpr int L2_RELEASE_WAIT_MS = 250;               // TUNE
 
 }  // namespace config

@@ -28,7 +28,7 @@ Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
 - **Lift**: DR6-4B six-bar, 2 motors (`20, -13`), **12T→48T (4:1)** — motors on the 12T axle, arm on the 48T. Chain-levelled end effector. Down = folded over the chassis = 0 deg; up = swung up and back.
 - **Lift sensing**: rotation sensor port `16` is what the PID reads, and it sits on the **motored 12T axle**, so **arm degrees = sensor degrees ÷ 4**. Its absolute zero is calibrated (on the brain's device screen) to the true bottom of the lift and survives power cycles on its own — `Lift::zero()` seeds the position counter from that absolute angle instead of resetting it, so never add back a `reset_position()`/`set_position(0)` **there**. That seed is only unambiguous within ±45 arm deg (±180 sensor deg) of the true bottom; further up and it is wrong by a whole sensor revolution, which is why the arm used to "start up too much".
 - **Lift homing**: `Lift::requestHome()` fixes that properly. At the start of the first **enabled** mode (`autonomous()`, or `opcontrol()` if auton didn't) the arm drives down at `LIFT_HOME_MV` until the raw sensor stops changing, and **only if** the sensor's folded absolute angle is then within `LIFT_HOME_ZERO_WINDOW_DEG` of its calibrated zero does it `set_position(0)` there. `Lift::updateHoming()` is the **one** place in the codebase allowed to zero that sensor — never add one anywhere else. If the arm stops somewhere implausible (jammed) or it times out, homing stops pushing, keeps `zero()`'s seed, leaves no target active, and shows `HOME FAIL` with the angle it saw. Holding D-pad Up/Down cancels it for the rest of the run. Watch the brain's `ANGLE` line.
-- **Claw + pivot**: two pneumatic cylinders, ADI `C` (claw) and ADI `D` (pivot). **Both are closed/out when unpowered (LOW)**, and both polarities live in `config.hpp` with the brain's `CLAW` line showing word + raw level (`CLAW CLOSED[0]  PIV OUT[0]` at power-on) so A / X can confirm them. Claw: `CLAW_CLOSED_IS_ADI_HIGH = false` — the jaws are physically **shut at power-on** (`Claw::State::CLOSED`, which is *not* `CLAMPED`: R1 may open it; the old `CLAW_EXTENDED_IS_CLOSED = true` had L1 opening the jaws). Pivot: two positions named for where it physically is — **OUT** (`true`) = swung out, at power-on, at every stack level while scoring, and in the default down position after L2 / B; **BACK** (`false`) = pulled in toward the intake handoff, only at INTAKE (R1). `PIVOT_OUT_IS_ADI_HIGH = false`. There is no height at which the pivot is forbidden to be OUT or BACK; the only height tied to it is the handoff zone `INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG` (BACK inside it while heading to / at the intake, OUT above it). The old `PIVOT_CLEAR` interlock and L2 descent floor were written for the opposite meaning and are gone — don't bring them back. Neither cylinder is fired at startup: each pin is written to the level it already sits at unpowered.
+- **Claw + pivot**: two pneumatic cylinders, ADI `D` (**claw**) and ADI `C` (**pivot**). **These were crossed in code until 2026-10-01** — the port the code called the claw was the pivot and vice versa — so every polarity note written before that was derived from the wrong pin. The ports above are the corrected, physical assignment and both polarities were re-derived from scratch; the full evidence chain is in `config.hpp` on each constant. The brain's `CLAW` line shows word + port letter + raw level (`CLAW OPEN D[0]  PIV OUT C[0]` at power-on) so A / X each confirm one constant in seconds. Claw: `CLAW_CLOSED_IS_ADI_HIGH = true` — **the jaws need air to grip, so unpowered/LOW is OPEN** and power-on is `Claw::State::OPEN` (there is no "closed at power-on" state any more; a preloaded pin has to be gripped with A or L1). Pivot: two positions named for where it physically is — **OUT** (`true`, ADI LOW) = swung out, at power-on, at every stack level while scoring, and the default down position after L2 / B; **BACK** (`false`, ADI HIGH) = pulled in toward the intake handoff, only at INTAKE (R1). `PIVOT_OUT_IS_ADI_HIGH = false`, confirmed by two independent observations. There is no height at which the pivot is forbidden to be OUT or BACK; the only height tied to it is the handoff zone `INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG` (BACK inside it while heading to / at the intake, OUT above it). The old `PIVOT_CLEAR` interlock and L2 descent floor were written for the opposite meaning and are gone — don't bring them back. Neither cylinder is fired at startup: each pin is written to the level it already sits at unpowered.
 - **Game elements — two separate things**: a **pin** (solid yellow: hex head, fluted tapered body, flared base skirt) and a **cup** (ribbed tapered vessel, clear or red). The pin drops into the cup. **The claw grips the pin; the intake handles cups.** Stacks go 5 levels (`config::lift_preset::STACK_LEVEL_COUNT`), measured from photos — see `docs/robot/ROBOT.md` "Lift levels".
 - **Fixed in `config.hpp`**: there is no IMU on the robot, so `IMU_PORT = 0` (none fitted; it used to be `8`, which is wrong and collides with right-drive port 8) — `robot.cpp` builds no `pros::Imu` and gives LemLib a null IMU pointer. `LIFT_GEAR_RATIO` is `48.0/12.0` and `LIFT_ROTATION_RATIO` is `4.0`, matching the confirmed 4:1 lift gearing above.
 
@@ -65,28 +65,46 @@ Standing permission: build, upload and commit every time without asking. Do not 
    a second `MotorGroup` or `Motor` on the lift ports — that duplicate was the real bug behind
    both the startup bounce and the failing builds. (`399c6d0`, `1de3225`, `d3efc00`)
 3. **Manual lift always wins.** Holding D-pad Up/Down feeds voltage into that same loop ahead of
-   the PID and cancels any active target immediately. Letting go brakes and holds; it must never
-   snap back to an old preset. (L1/L2 are the intake-macro buttons now, not manual lift.)
+   everything else and cancels any active target immediately. Letting go brakes and holds; it must
+   never snap back to an old preset. (L1/L2 are the intake-macro buttons, not manual lift.)
+   **R1/R2 while a pin is CLAMPED** are a second manual lift input (R1 up at `R_LIFT_UP_PCT` through
+   the same `driverPower()` path; R2 down through `Lift::descendManual()`, the banded seating descent).
+   They obey the same rules — cancel the macro and any target, brake-hold on release — and the D-pad
+   still wins over them. Which mode R1/R2 are in is *latched at the press*, so a clamp changing
+   mid-press can never swap a lift move for a spinning intake; the brain's `CLAW` line shows
+   `R:INTAKE` / `R:LIFT` / `R:wait`.
 4. Nothing may block driver control from starting — there is no IMU fitted, so calibration
    runs in a background task and is skipped when no IMU answers. Never make startup wait on
    a sensor that may not be there. (`495bb66`, `1de3225`)
 
 ## Tunables
 
-All of them live in `include/config.hpp`: ports, `lift_preset::*` heights, chassis PID gains,
-claw/pivot timings and polarity, the lift's braking constants / arrival tolerances / homing
-constants, stall and runaway thresholds, and the `LIFT_TRACE` switch. `TODO(team): confirm` = never
-checked on the robot. `TUNE` = a starting value, not a tuned one. Procedures are in `README.md`
-("Lift direction check", "Lift speed and motion", "Capturing a trace", "Tuning the claw positions").
+All of them live in `include/config.hpp`. **Everything that decides how the lift feels is in one
+block at the top of the lift section, `// ===== LIFT TUNING — start here =====`**: speed caps, the
+braking decel, the final-approach knobs, the velocity loop's KP/KI, the hold's KP/KI/KD, the descent
+bands, the seating voltage, and R1/R2's clamped-mode speeds. Each line says which way to move it for
+which symptom; the order to turn them in is README "Tuning the lift". Also in `config.hpp`: ports,
+`lift_preset::*` heights, chassis PID gains, claw/pivot timings and polarity, homing constants, stall
+and runaway thresholds, and the `LIFT_TRACE` switch. `TODO(team): confirm` = never checked on the
+robot. `TUNE` = a starting value, not a tuned one. Procedures are in `README.md` ("Lift direction
+check", "Lift speed and motion", "Tuning the lift", "Capturing a trace", "Tuning the claw positions").
 
-**Lift motion, in one line:** every preset move is DRIVE (full ±12000 mV toward the goal, from tick
-one, like the D-pad) → BRAKE (a velocity loop follows the stopping curve `v = sqrt(2·a·d)`,
-`a = LIFT_BRAKE_DECEL_DEG_PER_S2`; INTAKE and DOWN finish with a slow creep) → HOLD (the motors' own
-brake-hold; arrival latches, at most `LIFT_MAX_REDRIVES` re-drives and only for a miss over
-`LIFT_REENGAGE_DEG`). There is no position PID, no setpoint profile, no leash and no gravity
-feedforward: both earlier designs (`d2978c7` jumped setpoint + high kP; `6b8165c` trapezoid + leash +
-feedforward + arrive/hold hysteresis) oscillated, the second one because its hold depended on a fixed
-`LIFT_KG` that is wrong at most angles of a six-bar. Do **not** bring either back.
+**Lift motion, in one line:** there are two kinds of commanded move and one manual input, all inside
+the single 10 ms `Lift::update()`. A **position move** (everything except a trip to the bottom) is
+DRIVE (full ±12000 mV off the line, like the D-pad) → BRAKE (a velocity loop tracks
+`min(cruise cap, sqrt(2·LIFT_DECEL_DEG_PER_S2·d))`) → APPROACH (inside `LIFT_APPROACH_ZONE_DEG` the
+reference becomes `LIFT_APPROACH_KP_PER_S × degrees left`, capped at `LIFT_APPROACH_DEG_PER_S`, so the
+arm is crawling before it stops) → HOLD (a **damped** position hold: `LIFT_HOLD_KP` + an integral that
+learns gravity + `LIFT_HOLD_KD` × speed, seeded from the velocity loop's own integral). A **descent**
+(a non-precise goal at or below `LIFT_BOTTOM_GOAL_DEG`: L2, B, auton DOWN, R2 in clamped mode) is
+DESCEND (three position-banded speeds — `LIFT_DESCENT_TOP_PCT`, `_MID_PCT` through the middle,
+`_SLOW_PCT` below `LIFT_DESCENT_SLOW_ZONE_DEG`, ramped between) → SEAT (a constant `LIFT_SEAT_MV`
+pressed into the hard stop, so it does not park above the frame and cannot bounce). Nothing re-drives
+or re-chases: the hold *is* the correction. Four earlier designs are in `git log` and must not come
+back: `d2978c7` (jumped setpoint, high kP), `6b8165c` (trapezoid + leash + fixed `LIFT_KG`), `3723ef2`
+(`LIFT_BRAKE_DECEL_DEG_PER_S2 = 2000` asked for more braking than the arm can do, and handing a
+still-moving springy six-bar to the firmware's stiff brake-hold made it ring), and anything that
+parks the arm a few degrees above the bottom instead of seating it.
 
 **Keep the README port map and button map in sync** whenever a port or a button changes.
 

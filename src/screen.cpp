@@ -12,6 +12,7 @@
 namespace screen {
 
 DriverDebug driverDebug;
+RMode rMode = RMode::IDLE;
 bool calibrated = false;
 
 using namespace robot;
@@ -25,6 +26,17 @@ const char* portProblem(int port, pros::DeviceType expected) {
     if (found == expected) return nullptr;
     if (found == pros::DeviceType::none) return "not connected";
     return "WRONG DEVICE on port";
+}
+
+/** The word for the brain's `R:` field -- which mode R1/R2 are in. */
+const char* rModeName() {
+    switch (rMode) {
+        case RMode::IDLE: return "-";
+        case RMode::INTAKE: return "INTAKE";
+        case RMode::LIFT: return "LIFT";
+        case RMode::INERT: return "wait";
+    }
+    return "?";
 }
 
 double hottest(const pros::MotorGroup& group) {
@@ -93,22 +105,25 @@ void draw() {
                             lift.getStartupAngle(), home);
     }
 
-    // 5: CLAW is the claw's own state (CLOSED/OPEN/ARMED/CLAMPED/RELEASED), the pivot (OUT/BACK), each
-    // with the raw ADI level in brackets so config::CLAW_CLOSED_IS_ADI_HIGH / PIVOT_OUT_IS_ADI_HIGH can
-    // be confirmed with A / X (if the word says one thing and the mechanism did the other, flip that
-    // constant), and the intake macro's state and stack level. Without this line there was no way to
-    // see that the jaws were still CLAMPED, or that the macro was parked in STACKING -- and both of
-    // those silently change what R1 and L2 do (interlock 4 makes R1 a no-op while a pin is held, and a
-    // claw left clamped by B or the manual override is what made L2 fire the jaws at the bottom). If a
-    // button seems to do nothing, read this line first.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 5, "CLAW %s[%d]  PIV %s[%d]  MACRO %s L%d", claw.stateName(),
-                        claw.adiHigh() ? 1 : 0, scoring.isPivotOut() ? "OUT" : "BACK", scoring.pivotAdiHigh() ? 1 : 0,
-                        scoring.stateName(), scoring.getLevel());
+    // 5: CLAW is the claw's own state (OPEN/ARMED/CLAMPED/RELEASED) and the pivot (OUT/BACK), each
+    // with its ADI PORT LETTER and the raw level it is driven to, so config::CLAW_CLOSED_IS_ADI_HIGH
+    // and PIVOT_OUT_IS_ADI_HIGH can each be confirmed in seconds with A / X: if the word says one
+    // thing and the mechanism did the other, flip that one constant. The port letters are on the line
+    // because the two cylinders were wired to each other's ports in code until 2026-10-01, and nothing
+    // on the screen would have shown it. Then the intake macro's state and stack level, and which mode
+    // R1/R2 are in (see screen::RMode). Without this line there was no way to see that the jaws were
+    // still CLAMPED or that the macro was parked in STACKING -- and both silently change what R1 and
+    // L2 do. If a button seems to do nothing, read this line first.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 5, "CLAW %s %c[%d]  PIV %s %c[%d]  %s L%d  R:%s",
+                        claw.stateName(), config::CLAW_PISTON_PORT, claw.adiHigh() ? 1 : 0,
+                        scoring.isPivotOut() ? "OUT" : "BACK", config::PIVOT_PISTON_PORT,
+                        scoring.pivotAdiHigh() ? 1 : 0, scoring.stateName(), scoring.getLevel(),
+                        rModeName());
 
     // --- Lift section (lines 6-10): everything needed to judge a move at a glance. ---
 
     // 6: position -> goal, which named preset (if any) is active, which phase the move is in
-    // (DRIVE / BRAKE / CREEP / HOLD), and SETTLED / BLOCKED / FAULT.
+    // (DRIVE / BRAKE / APPROACH / HOLD / DESCEND / SEAT), and SETTLED / BLOCKED / FAULT.
     //   LIFT 61.4 -> 128.3  STACK 5  DRIVE
     // means "goal is level 5, the arm is at 61.4 and still under full voltage".
     {
@@ -127,8 +142,8 @@ void draw() {
     pros::screen::print(pros::E_TEXT_MEDIUM, 7, "LIFT err %.1f  vel %.0f/s  out %.0f mV", lift.getError(),
                         lift.getVelocity(), lift.getOutput());
 
-    // 8: the braking curve's allowed speed at this distance (what BRAKE tracks), how many times this
-    // command has re-driven from HOLD, then the claw distance sensor.
+    // 8: the speed reference the velocity loop is tracking this tick (0 in HOLD/SEAT), the hold loop's
+    // learned gravity voltage, then the claw distance sensor.
     {
         char dist[26] = "";
         if (const char* p = portProblem(config::CLAW_DISTANCE_PORT, pros::DeviceType::distance)) {
@@ -138,13 +153,16 @@ void draw() {
             if (mm <= 0 || mm >= 9999) std::snprintf(dist, sizeof(dist), "--");
             else std::snprintf(dist, sizeof(dist), "%dmm%s", mm, mm <= config::CLAW_DETECT_MM ? " PIN" : "");
         }
-        pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT curve %.0f/s  redrive %d   DIST %s", lift.getBrakeCurve(),
-                            lift.getRedrives(), dist);
+        pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT ref %.0f/s  grav %.0f mV   DIST %s", lift.getSpeedRef(),
+                            lift.getGravityMv(), dist);
     }
 
-    // 9: the motion constants, read straight from config.hpp -- tuning happens in code, not here.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 9, "BRAKE a %.0f  margin %.1f  creep %.0f  tol %.0f",
-                        config::LIFT_BRAKE_DECEL_DEG_PER_S2, config::LIFT_BRAKE_MARGIN_DEG, config::LIFT_CREEP_DEG_PER_S,
+    // 9: the headline motion constants, read straight from config.hpp's "LIFT TUNING -- start here"
+    // block -- tuning happens in code, not here. This line is just so you can see which build is on
+    // the brain while you iterate.
+    pros::screen::print(pros::E_TEXT_MEDIUM, 9, "TUNE decel %.0f  appr %.0f/%.0f  holdD %.0f  tol %.0f",
+                        config::LIFT_DECEL_DEG_PER_S2, config::LIFT_APPROACH_ZONE_DEG,
+                        config::LIFT_APPROACH_DEG_PER_S, static_cast<double>(config::LIFT_HOLD_KD),
                         config::LIFT_TOLERANCE_DEG);
 
     // 10: lift motor health -- temp (both readouts lose power around 55 C) and current draw.

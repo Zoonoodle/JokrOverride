@@ -9,6 +9,27 @@ using namespace robot;
 using subsystems::Intake;
 using subsystems::Scoring;
 
+namespace {
+/** R1/R2 have two meanings and the one in force is LATCHED at the moment the button goes down, so a
+ *  clamp that changes while the button is held can never swap a lift move for a spinning intake
+ *  mid-press. See the button map above and README "Driver guide".
+ *    INTAKE  nothing clamped: R1 = roller in (+ tap sends the arm to the handoff), R2 = roller out.
+ *    LIFT    a pin is clamped: R1 = lift up, R2 = controlled lift down. Neither runs the intake.
+ *    INERT   the claw clamped or unclamped while the button was held: the lift move and the intake are
+ *            both stopped and nothing happens until the button is released and pressed again.
+ */
+screen::RMode rModeFor(bool held, bool clamped) {
+    if (!held) return screen::RMode::IDLE;  // released: the next press re-latches
+    switch (screen::rMode) {
+        case screen::RMode::IDLE: return clamped ? screen::RMode::LIFT : screen::RMode::INTAKE;
+        case screen::RMode::LIFT: return clamped ? screen::RMode::LIFT : screen::RMode::INERT;
+        case screen::RMode::INTAKE: return clamped ? screen::RMode::INERT : screen::RMode::INTAKE;
+        case screen::RMode::INERT: return screen::RMode::INERT;
+    }
+    return screen::RMode::INERT;
+}
+}  // namespace
+
 /**
  * Button map (driver). Full walkthrough in README "Driver guide".
  *   (At the start of the first enabled mode the lift homes itself: it drives down to its hard stop
@@ -23,15 +44,28 @@ using subsystems::Scoring;
  *               resume whatever preset or macro step was active before.
  *   L1          intake macro: step up a stack level (1st tap clamps + goes to level 1; each
  *               tap after goes up one level, staying at the top once reached)
- *   L2          intake macro: SCORE (open the jaws and lower all the way to DOWN in one motion,
- *               pivot stays OUT) and reset the level count so the next L1 starts at level 1 again
- *   R1 (hold)   intake roller in; (new-press) also sends the lift to the INTAKE handoff position
- *               with the jaws open and the pivot BACK (a no-op while a pin is CLAMPED)
- *   R2 (hold)   intake roller out
- *   B           stow: pivot OUT, lift straight down to DOWN (0 deg), cancel the macro
- *   A           claw open / clamp (the claw is physically shut at power-on; the CLAW line shows
- *               CLOSED[0], and A opens it)
- *   X           pivot OUT / BACK (the brain's CLAW line shows which, and the raw ADI level)
+ *   L2          intake macro: SCORE -- open the jaws, stand still for L2_RELEASE_WAIT_MS so the pin
+ *               is free, then run the lift's banded descent all the way down and SEAT the arm on its
+ *               hard stop (pivot stays OUT). Resets the level count so the next L1 starts at level 1.
+ *
+ *   R1 / R2 have TWO modes, and which one is in force is latched when the button goes down (see
+ *   rModeFor() below; the brain's CLAW line shows `R:INTAKE` / `R:LIFT` / `R:wait`):
+ *   nothing clamped ->
+ *     R1 (hold)   intake roller in; (new-press) also sends the lift to the INTAKE handoff position
+ *                 with the jaws open and the pivot BACK
+ *     R2 (hold)   intake roller out
+ *   a pin CLAMPED ->
+ *     R1 (hold)   lift UP at R_LIFT_UP_PCT. Plain voltage, same feel as the D-pad.
+ *     R2 (hold)   lift DOWN, controlled: closed-loop on the measured arm speed at R_LIFT_DOWN_PCT of
+ *                 the free speed, slowing to the final-approach crawl near the bottom and SEATING on
+ *                 the hard stop, exactly like L2's descent. Neither runs the intake.
+ *   Letting go of either brakes and holds where it is (no old target resumes); D-pad Up/Down still
+ *   win over both.
+ *
+ *   B           stow: pivot OUT, lift straight down to DOWN (0 deg) and seated, cancel the macro
+ *   A           claw clamp / open (the claw is physically OPEN at power-on -- it needs air to grip:
+ *               the CLAW line shows `OPEN D[0]`, and A closes it)
+ *   X           pivot OUT / BACK (the brain's CLAW line shows which, with the port letter and level)
  *   Y           autoclamp on / off
  *
  * The lift PID task (subsystems/lift.*) starts once in initialize() and runs for the whole
@@ -123,22 +157,43 @@ void opcontrol() {
         } else if (down) {
             scoring.reset();
             lift.driverPower(-1.0);
-        } else {
-            lift.driverPower(0.0);
         }
 
-        // --- Intake roller: R1 in, R2 out (hold) ---
-        if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) intake.set(Intake::Mode::IN);
-        else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) intake.set(Intake::Mode::OUT);
+        // --- R1 / R2: intake rollers, or (while a pin is clamped) manual lift up/down. The new-press
+        // edges are read exactly once per loop, here, so latching below can't swallow one. ---
+        const bool r1 = master.get_digital(pros::E_CONTROLLER_DIGITAL_R1);
+        const bool r2 = master.get_digital(pros::E_CONTROLLER_DIGITAL_R2);
+        const bool r1New = master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R1);
+        const bool l1New = master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L1);
+        const bool l2New = master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L2);
+        const bool bNew = master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B);
+        screen::rMode = rModeFor(r1 || r2, claw.isClamped());
+        const bool rLift = screen::rMode == screen::RMode::LIFT && !up && !down;  // D-pad wins
+
+        if (screen::rMode == screen::RMode::INTAKE && r1) intake.set(Intake::Mode::IN);
+        else if (screen::rMode == screen::RMode::INTAKE && r2) intake.set(Intake::Mode::OUT);
         else intake.set(Intake::Mode::STOP);
+
+        // Clamped mode. R1 is plain voltage through the same manual path the D-pad uses (so it cancels
+        // any target/macro and brake-holds on release); R2 is the lift's own banded descent, which
+        // seats the arm on its hard stop if it is held all the way down. Both are no-ops the moment
+        // the claw unclamps, because rModeFor() has already dropped the mode to INERT.
+        if (rLift && r1) {
+            scoring.reset();
+            lift.driverPower(config::R_LIFT_UP_PCT / 100.0);
+        } else if (!up && !down) {
+            lift.driverPower(0.0);
+        }
+        if (rLift && r2 && !r1) scoring.reset();
+        lift.descendManual(rLift && r2 && !r1);
 
         // --- Lift height presets / intake macro. Locked out while the manual override is held so a
         // tap here can never re-command the lift out from under a manual nudge. ---
         if (!up && !down) {
-            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R1)) scoring.goToIntake();
-            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L1)) scoring.stepUp();
-            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L2)) scoring.score();
-            if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B)) scoring.stow();  // pivot OUT + lift to DOWN
+            if (r1New && screen::rMode == screen::RMode::INTAKE) scoring.goToIntake();
+            if (l1New) scoring.stepUp();
+            if (l2New) scoring.score();
+            if (bNew) scoring.stow();  // pivot OUT + lift to DOWN, seated
         }
 
         // --- Claw (A), pivot (X), autoclamp (Y) ---

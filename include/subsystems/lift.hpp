@@ -25,37 +25,62 @@
  *      Nothing moves on its own. Letting go of the manual override lands here --
  *      it does NOT snap back to whatever preset was active before.
  *
- * MOTION. A preset move is three phases, decided every tick from the arm's
- * measured position and velocity (position differenced each tick, lightly
- * filtered). There is no position PID, no setpoint profile and no gravity
- * feedforward:
+ * MOTION. There are exactly two kinds of commanded move plus one manual
+ * input, all decided every tick from the arm's measured position and velocity.
+ * Every number they use is in the "LIFT TUNING -- start here" block at the top
+ * of config.hpp; README "Tuning the lift" is the order to turn them in.
  *
- *   DRIVE  full +-LIFT_MAX_MV toward the goal -- the exact thing the D-pad does,
- *          from the very first tick -- until the arm is moving as fast as the
- *          braking curve allows for the distance that is left:
- *          v_curve = sqrt(2 * LIFT_BRAKE_DECEL_DEG_PER_S2 * (dist - LIFT_BRAKE_MARGIN_DEG)).
- *   BRAKE  a velocity loop (LIFT_VEL_KP / LIFT_VEL_KI, clamped to LIFT_BRAKE_MAX_MV)
- *          that follows that curve down. Its integral learns whatever voltage
- *          gravity needs at this angle, so nothing has to know the six-bar's
- *          torque curve in advance. For a normal goal the reference never points
- *          back the way the arm came: a small overshoot is simply stopped, never
- *          chased. Once the arm is slower than LIFT_STOPPED_DEG_PER_S and inside
- *          LIFT_TOLERANCE_DEG (or has passed the goal), -> HOLD.
- *          INTAKE (precise) and DOWN use the same loop with a floor speed: the
- *          curve is offset by LIFT_CREEP_ZONE_DEG so the arm is down to
- *          LIFT_CREEP_DEG_PER_S that far out, then CREEPs until it is inside
- *          LIFT_PRECISE_TOLERANCE_DEG (INTAKE) or LIFT_REST_BAND_DEG above the
- *          hard stop (DOWN) -> HOLD. The creep may creep back if it overshoots.
- *   HOLD   motors_.brake() every tick with MotorBrake::hold -- the firmware's own
- *          position hold, the same one that holds the arm when the D-pad is let
- *          go. Nothing in this phase pushes toward the goal, so nothing can hunt.
- *          Arrival latches: HOLD only goes back to DRIVE if the arm is more than
- *          LIFT_REENGAGE_DEG from the goal, and at most LIFT_MAX_REDRIVES times
- *          per command. The number of pushes per button press is finite.
+ * A POSITION MOVE -- every goal except a trip to the bottom -- is
+ * DRIVE -> BRAKE -> APPROACH -> HOLD:
  *
- * The one number that decides where the arm stops is LIFT_BRAKE_DECEL_DEG_PER_S2
- * (under the real capability = stops short, over = overshoots). Read it off the
- * trace (LIFT_TRACE) rather than guessing.
+ *   DRIVE     full +-LIFT_MAX_MV toward the goal, the exact thing the D-pad
+ *             does, from the very first tick, until the arm is up to the speed
+ *             the profile allows. A move is still instant off the line.
+ *   BRAKE     the velocity loop (LIFT_VEL_KP / LIFT_VEL_KI, clamped to
+ *             LIFT_VEL_MAX_MV) tracks
+ *               min(cruise cap, sqrt(2 * LIFT_DECEL_DEG_PER_S2 * (dist - zone)))
+ *             where the cruise cap is LIFT_UP_SPEED_PCT / LIFT_DOWN_SPEED_PCT of
+ *             the free speed. Computed from DISTANCE, not time, so an arm ahead
+ *             of or behind the profile is corrected automatically.
+ *   APPROACH  inside LIFT_APPROACH_ZONE_DEG the same loop tracks
+ *             LIFT_APPROACH_KP_PER_S * (degrees left), capped at
+ *             LIFT_APPROACH_DEG_PER_S -- a crawl that tapers to nothing at the
+ *             goal, so the arm is practically stopped before the hold takes it.
+ *             This is what stops the six-bar springing on arrival.
+ *   HOLD      a DAMPED position hold, not the firmware's brake-hold:
+ *               LIFT_HOLD_KP * (error outside the deadband)
+ *               + integral(LIFT_HOLD_KI * error)      <- learns gravity
+ *               - LIFT_HOLD_KD * velocity             <- absorbs the arrival
+ *             clamped to LIFT_HOLD_MAX_MV. The integral is kept between moves,
+ *             so the next hold starts already knowing roughly what this arm
+ *             costs to hold up, and enterBrake() seeds the velocity loop from
+ *             it too. Nothing re-drives and nothing re-chases: the hold IS the
+ *             correction, and it is gentle.
+ *
+ * A DESCENT -- a non-precise goal at or below LIFT_BOTTOM_GOAL_DEG, i.e. L2, B,
+ * auton DOWN and R2 in clamped mode -- is DESCEND -> SEAT:
+ *
+ *   DESCEND   the velocity loop tracks a banded speed reference read off the
+ *             arm's position: LIFT_DESCENT_TOP_PCT of free speed from the start
+ *             height down to the mid boundary, LIFT_DESCENT_MID_PCT through the
+ *             middle, then a constant LIFT_DESCENT_SLOW_PCT crawl from
+ *             LIFT_DESCENT_SLOW_ZONE_DEG to the stop. The mid boundary is a
+ *             FRACTION (LIFT_DESCENT_MID_FRACTION) of the travel between the
+ *             start height and the slow zone, so "the middle" is the middle of
+ *             this descent whatever height it began at. Band changes are ramps
+ *             at LIFT_DESCENT_RAMP_DEG_PER_S2, never stops.
+ *   SEAT      the arm has gone still (under LIFT_SEAT_STILL_DEG_PER_S for
+ *             LIFT_SEAT_STILL_MS) below LIFT_SEAT_DETECT_DEG, i.e. it is
+ *             physically on its hard stop: hold a constant LIFT_SEAT_MV pressed
+ *             into it so it cannot bounce back up. It does NOT park a few
+ *             degrees above the frame any more. If a lift motor ever reaches
+ *             LIFT_SEAT_TEMP_LIMIT_C the seat drops to a plain brake-hold.
+ *
+ * THE MANUAL INPUT (driverPower(): D-pad Up/Down at full send, and R1 at
+ * R_LIFT_UP_PCT while a pin is clamped) is plain voltage fed into this same
+ * loop ahead of everything else. R2 in clamped mode is not manual at all --
+ * descendManual() runs the DESCENT above with R_LIFT_DOWN_PCT as its top band,
+ * so holding R2 to the bottom seats the arm exactly like L2 does.
  *
  * HOMING. The arm often powers on sitting well above the bottom, and zero() can
  * only seed from the sensor's folded absolute angle, which is unambiguous within
@@ -77,12 +102,15 @@
  * for the rest of the run. Targets requested while homing are QUEUED, not dropped,
  * and start the moment homing ends.
  *
- * GUARDS. Runaway: during DRIVE the distance to the goal can only shrink; if it
- * grows by LIFT_FAULT_DEG the sensor or the motors are reversed -> cut power,
- * LIFT FAULT. Stall: a phase that wants motion (DRIVE, CREEP) but the arm moved
- * less than LIFT_STALL_DEG in LIFT_STALL_MS -> give up on that goal, HOLD where
- * it is, BLOCKED. Neither is checked in BRAKE or HOLD, which are stopping on
- * purpose, and neither can brick the buttons: a new setTarget() clears both.
+ * GUARDS. Runaway: during DRIVE the distance to the goal can only shrink, and
+ * during DESCEND the arm can only go down; if either reverses by LIFT_FAULT_DEG
+ * the sensor or the motors are reversed -> cut power, LIFT FAULT. Stall: a tick
+ * whose speed reference is a real one (at least 5 deg/s) but the arm moved less
+ * than LIFT_STALL_DEG in LIFT_STALL_MS -> give up on that goal, HOLD where it
+ * is, BLOCKED. The stall guard is deliberately off once APPROACH has tapered
+ * the reference below that, in HOLD, and below LIFT_SEAT_DETECT_DEG during a
+ * descent -- an arm that has stopped down there is seated, which is the point.
+ * Neither guard can brick the buttons: a new setTarget() clears both.
  *
  * TRACE. With config::LIFT_TRACE on, one compact integer line per 20 ms goes to
  * the PROS terminal while the arm moves (and for LIFT_TRACE_TAIL_MS after), from
@@ -114,9 +142,9 @@ class Lift {
         SKIPPED,   // no rotation sensor answering, so there is nothing to home against
     };
 
-    /** Where a commanded move is (see the class comment). CREEP is BRAKE with the floor speed
-     *  active; phaseName() tells them apart for the brain and the trace. */
-    enum class Phase { DRIVE, BRAKE, HOLD };
+    /** Where a commanded move is (see the class comment). DRIVE/BRAKE/APPROACH/HOLD are a position
+     *  move; DESCEND/SEAT are a trip to the bottom. */
+    enum class Phase { DRIVE, BRAKE, APPROACH, HOLD, DESCEND, SEAT };
 
     Lift();
 
@@ -157,14 +185,17 @@ class Lift {
     // -----------------------------------------------------------------------
 
     /**
-     * Set a new target height in lift-arm degrees (clamped to 0..MAX). Never blocks. The move runs
-     * DRIVE -> BRAKE -> HOLD as described in the class comment, at full voltage from the first tick.
+     * Set a new target height in lift-arm degrees (clamped to 0..MAX). Never blocks. The move runs as
+     * described in the class comment, at full voltage from the first tick.
      *
-     * precise = true gives the goal the tight LIFT_PRECISE_TOLERANCE_DEG band and the slow CREEP
-     * final approach, for a height that has to line up (INTAKE). Any goal within half a degree of
-     * lift_preset::INTAKE is promoted to precise automatically, so a call site cannot forget.
-     * Everything else gets LIFT_TOLERANCE_DEG and a plain stop. A goal already inside its band is
-     * arrived at once, without moving.
+     * precise = true gives the goal the tight LIFT_PRECISE_TOLERANCE_DEG band, for a height that has
+     * to line up (INTAKE). Any goal within half a degree of lift_preset::INTAKE is promoted to precise
+     * automatically, so a call site cannot forget. Everything else gets LIFT_TOLERANCE_DEG. A goal
+     * already inside its band is arrived at once, without moving.
+     *
+     * A NON-PRECISE goal at or below config::LIFT_BOTTOM_GOAL_DEG is not a position move at all: it
+     * runs the banded DESCEND -> SEAT trip to the bottom (see the class comment), which ends pressed
+     * onto the hard stop rather than parked above it.
      *
      * Also clears a latched LIFT FAULT or BLOCKED: a deliberate new command is the retry (see the
      * guard notes in config.hpp). If homing is still running the target is QUEUED and starts when it
@@ -195,7 +226,7 @@ class Lift {
     const char* activePresetName() const;
     /** Which phase the active move is in. Only meaningful while hasActiveTarget() is true. */
     Phase getPhase() const { return phase_; }
-    /** "DRIVE" / "BRAKE" / "CREEP" / "HOLD", or "" with no active target. */
+    /** "DRIVE" / "BRAKE" / "APPROACH" / "HOLD" / "DESCEND" / "SEAT", or "" with no active target. */
     const char* phaseName() const;
 
     /** Current lift-arm angle in degrees (rotation sensor if fitted, else motor encoders). */
@@ -214,8 +245,9 @@ class Lift {
     /** Arm velocity, deg/s (+ = up), as update() measured it this tick. Runs in every mode. */
     double getVelocity() const { return velocity_; }
 
-    /** True once the lift has arrived (HOLD) on the active goal. */
-    bool isSettled() const { return active_ && phase_ == Phase::HOLD && !blocked_; }
+    /** True once the lift has arrived on the active goal -- holding a height (HOLD), or seated on the
+     *  hard stop at the bottom (SEAT), which is what arrival at DOWN means now. */
+    bool isSettled() const { return active_ && (phase_ == Phase::HOLD || phase_ == Phase::SEAT) && !blocked_; }
     /** True if the last target couldn't be reached (stalled) and the lift is holding where it stopped. */
     bool isBlocked() const { return blocked_; }
     /** True if the runaway guard tripped. */
@@ -234,18 +266,34 @@ class Lift {
     double getError() const { return lastError_; }
     /** What update() last sent to the motors, mV (0 when it braked). */
     double getOutput() const { return lastOutput_; }
-    /** The speed the braking curve allows at the current distance, deg/s (what BRAKE is tracking). */
-    double getBrakeCurve() const { return lastVRef_; }
-    /** How many times this command has re-driven from HOLD (see LIFT_REENGAGE_DEG). */
-    int getRedrives() const { return redrives_; }
+    /** The signed speed reference the velocity loop is tracking this tick, deg/s (+ = up). 0 in HOLD
+     *  and SEAT, which are not speed-controlled. */
+    double getSpeedRef() const { return lastVRef_; }
+    /** The hold loop's learned gravity voltage, mV -- what it currently reckons this arm costs to hold
+     *  where it is. Carried between moves. */
+    double getGravityMv() const { return gravityMv_; }
+    /** True while the arm is pressed down onto its hard stop (phase SEAT). */
+    bool isSeated() const { return phase_ == Phase::SEAT; }
 
     /**
-     * Driver manual override, D-pad Up/Down: -1..1, full send both directions (same feel as plain
-     * motor power -- no feedforward, no clamping beyond the input range). Non-zero input immediately
-     * cancels any active target AND any homing in progress (see class comment). Call with 0 every
-     * loop the driver isn't holding the override.
+     * Driver manual override: -1..1 of LIFT_MAX_MV, plain motor power, no feedforward. The D-pad uses
+     * +-1.0 (full send); R1 in clamped mode uses +R_LIFT_UP_PCT / 100. Non-zero input immediately
+     * cancels any active target AND any homing in progress (see class comment), and letting go
+     * brake-holds where it is -- no old target resumes. Call with 0 every loop nothing is holding it.
      */
     void driverPower(double input);
+
+    /**
+     * R2 in clamped mode: a controlled trip to the bottom that ends SEATED on the hard stop. Pass
+     * true every loop the button is held and false the moment it is let go. It is the same banded
+     * DESCEND -> SEAT as L2/B (see the class comment) with R_LIFT_DOWN_PCT as its top band, so it is
+     * velocity-controlled on the measured arm speed and gravity cannot run it away.
+     *
+     * Letting go part-way brake-holds where it is. Letting go once the arm is SEATED leaves it seated
+     * (the DOWN target stays active in SEAT), so holding R2 all the way down ends exactly like L2.
+     * driverPower() -- the D-pad -- still preempts it, as does any new setTarget().
+     */
+    void descendManual(bool held);
 
     /** Run one control step. Called every 10 ms by the lift task -- see class comment: this is the
      *  ONLY function that is allowed to write to the lift motors. */
@@ -259,16 +307,28 @@ class Lift {
     void startQueuedTarget();
 
     void enterDrive(std::uint32_t now, double position);
-    void enterBrake(std::uint32_t now, bool fromDrive);
-    void enterHold(std::uint32_t now);
+    void enterBrake(std::uint32_t now);
+    void enterHold(std::uint32_t now, double holdAt);
+    void enterDescend(std::uint32_t now, double position, double topPct, double midPct);
+    void enterSeat(std::uint32_t now);
     /** Stall guard window: true once the arm has made less than LIFT_STALL_DEG of progress for
-     *  LIFT_STALL_MS. Resets itself whenever the arm does move. */
+     *  LIFT_STALL_MS. Resets itself whenever the arm does move. Only ever called with a speed
+     *  reference that really wants motion -- see the guard notes in config.hpp. */
     bool stalled(std::uint32_t now, double position);
-    /** The braking curve: fastest the arm may be going at `dist` deg from the goal and still stop in
-     *  time (zero speed at LIFT_BRAKE_MARGIN_DEG before it, or at LIFT_CREEP_ZONE_DEG for a creep goal). */
-    double brakeCurve(double dist) const;
-    /** This goal's arrival band: LIFT_PRECISE_TOLERANCE_DEG (precise), LIFT_REST_BAND_DEG (a trip to
-     *  the bottom), else LIFT_TOLERANCE_DEG. */
+    /** The whole speed profile of a position move, as an UNSIGNED deg/s: the cruise cap, the braking
+     *  curve sqrt(2 a d), and the final-approach taper, whichever is smallest at this distance. */
+    double speedProfile(double dist, double dir) const;
+    /** One tick of the velocity loop: pushes the motors toward `vRef` (signed deg/s) and returns the
+     *  mV it sent. The only place LIFT_VEL_KP/KI are used. */
+    double runVelocityLoop(double vRef, double dt);
+    /** One tick of the damped position hold (LIFT_HOLD_KP/KI/KD). Writes the motors and traces. */
+    void runHold(std::uint32_t now, double dt, double position);
+    /** One tick of a trip to the bottom: DESCEND's bands and ramp, the seat detector, and SEAT's
+     *  constant pressure. Writes the motors and traces. */
+    void updateDescent(std::uint32_t now, double dt, double position);
+    /** The banded descent's speed reference for this position, as an UNSIGNED deg/s. */
+    double descentSpeed(double position) const;
+    /** This goal's arrival band: LIFT_PRECISE_TOLERANCE_DEG (precise) else LIFT_TOLERANCE_DEG. */
     double arrivalTolerance() const;
 
     // trace ring (single producer: the lift task; single consumer: the trace task)
@@ -295,17 +355,34 @@ class Lift {
     // the active command
     bool active_ = false;   // false = no commanded height; update() just brakes (see class comment)
     double goal_ = 0.0;     // final target, arm deg
-    bool precise_ = false;  // tight tolerance + creep (INTAKE)
-    bool creep_ = false;    // precise, or a trip to the bottom: floor the braking curve at the creep speed
+    bool precise_ = false;  // tight tolerance (INTAKE)
+    bool descent_ = false;  // a trip to the bottom: the banded DESCEND -> SEAT, not a position move
     Phase phase_ = Phase::HOLD;
     std::uint32_t phaseStart_ = 0;
     double dir0_ = 1.0;     // which way DRIVE set off (+1 up / -1 down); a normal goal never reverses it
     double minDist_ = 0.0;  // smallest distance-to-goal seen during this DRIVE (runaway guard)
     double velI_ = 0.0;     // velocity loop integral, mV
-    int redrives_ = 0;
+    double holdGoal_ = 0.0; // the height HOLD is holding: the goal on a normal arrival, or wherever the
+                            // arm stopped if the move was BLOCKED (so a jammed arm is never pushed into
+                            // whatever it is caught on).
+    double gravityMv_ = 0.0;  // the hold loop's integral: the learned voltage this arm costs to hold.
+                              // Kept between moves on purpose, and used to seed velI_ in enterBrake().
+
+    // the banded descent (DESCEND / SEAT)
+    double descentTopPct_ = 0.0;    // top-band speed, % of free speed (L2/B vs R2 differ)
+    double descentMidPct_ = 0.0;    // middle-band speed, % of free speed
+    double descentMidDeg_ = 0.0;    // position at which the top band becomes the middle band
+    double descentStart_ = 0.0;     // height the descent began at (runaway guard + the mid boundary)
+    double descentRef_ = 0.0;       // ramped speed reference, unsigned deg/s
+    std::uint32_t seatStillSince_ = 0;  // when the arm was last seen moving near the bottom
+    bool seatHot_ = false;          // a lift motor passed LIFT_SEAT_TEMP_LIMIT_C: brake-hold instead of pressing
+    int seatTempTick_ = 0;          // temperature is only read every 50th SEAT tick
 
     double manualPower_ = 0.0;  // -1..1 from driverPower(), 0 = driver not overriding
     bool wasManual_ = false;
+    bool descendHeld_ = false;  // R2 held, from descendManual()
+    bool descendOwned_ = false; // this descent was started by descendManual(), so releasing R2 ends it
+    bool descendRequest_ = false;  // one-shot: the next setTarget() came from descendManual()
 
     // homing
     Home home_ = Home::IDLE;

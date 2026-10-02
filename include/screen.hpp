@@ -20,6 +20,11 @@ struct DriverDebug {
     bool up = false, down = false;  // D-pad Up/Down, the lift's manual override
 };
 extern DriverDebug driverDebug;
+/** What R1/R2 are doing right now, written by opcontrol every loop so the brain can show it:
+ *  INTAKE = roller in/out (nothing clamped), LIFT = lift up/down (a pin is clamped), INERT = the
+ *  clamp state changed while the button was held, so they do nothing until it is released. */
+enum class RMode { IDLE, INTAKE, LIFT, INERT };
+extern RMode rMode;
 /** True once chassis.calibrate() has finished (it runs in the background). */
 extern bool calibrated;
 

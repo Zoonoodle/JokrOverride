@@ -43,8 +43,9 @@ void Scoring::command(double degrees, bool precise) {
 }
 
 bool Scoring::liftArrived(double degrees) const {
-    // isSettled() already means "in HOLD on this goal" (inside LIFT_PRECISE_TOLERANCE_DEG for INTAKE,
-    // LIFT_TOLERANCE_DEG for everything else, LIFT_REST_BAND_DEG for DOWN), so the only other thing to
+    // isSettled() already means "arrived on this goal" -- in HOLD inside LIFT_PRECISE_TOLERANCE_DEG
+    // (INTAKE) or LIFT_TOLERANCE_DEG (everything else), or SEATED on the hard stop for a trip to the
+    // bottom (DOWN). So the only other thing to
     // check is that the lift is settled on the height WE asked for and not an older one. Do NOT re-test
     // the position against a tolerance of this class's own invention here: that is what made R1 report
     // "arrived at INTAKE" while the arm sat at 0, because the old 2 * LIFT_SETTLE_DEG (3.0 deg) was
@@ -89,13 +90,16 @@ void Scoring::enter(State next) {
         case State::RELEASING:
             claw_.disarm();  // jaws open now, autoclamp off so it can't re-grab the stack
             if (scoreToHome_) {
-                // L2 score: claw open and the lift's own descent to DOWN start in this same tick --
-                // one continuous motion. The pivot is already OUT at every stack level and OUT is the
-                // default down position, so normally nothing happens here; if the driver had toggled
-                // it BACK with X, put it OUT now, without waiting for it -- there is no height at
-                // which the pivot may not be OUT (see interlock 2 in scoring.hpp).
+                // L2 score: the jaws open THIS tick and the arm then stands completely still for
+                // config::L2_RELEASE_WAIT_MS before the descent is commanded (update() below), so the
+                // pin is free and settled in the cup before the end effector moves away from it. The
+                // lift is still holding its stack level, so "stands still" costs nothing: no target is
+                // sent here at all.
+                // The pivot is already OUT at every stack level and OUT is the default down position,
+                // so normally nothing happens here; if the driver had toggled it BACK with X, put it
+                // OUT now, without waiting for it -- there is no height at which the pivot may not be
+                // OUT (see interlock 2 in scoring.hpp).
                 setPivot(true);
-                command(preset::DOWN);
             }
             break;
         case State::MOVING:
@@ -124,7 +128,8 @@ void Scoring::stow() {
 }
 
 void Scoring::goToIntake() {
-    // Interlock 4: never drag a held pin back down.
+    // Interlock 4: never drag a held pin back down. (Unpowered is OPEN on this claw, so the power-on
+    // state is not clamped and R1 works straight away without a special case.)
     if (claw_.isClamped()) return;
     // Mid-sequence states that must not be interrupted. STACKING is deliberately NOT one of them any
     // more: interlock 4 above already covers the dangerous case (a pin in the jaws), so if the driver
@@ -251,8 +256,11 @@ void Scoring::update() {
 
         case State::RELEASING:
             if (scoreToHome_) {
-                // score(): the descent is already running (started in enter() above). Drop into IDLE
-                // once the arm has actually arrived and is holding at the bottom.
+                // score(): the jaws opened on entry. Hold still for L2_RELEASE_WAIT_MS, THEN command
+                // the descent (the lift's own banded, seating trip to the bottom -- see lift.hpp).
+                // Drop into IDLE once the arm is actually seated on its stop.
+                if (elapsed < static_cast<std::uint32_t>(config::L2_RELEASE_WAIT_MS)) break;
+                command(preset::DOWN);
                 if (liftArrived(preset::DOWN)) {
                     scoreToHome_ = false;
                     enter(State::IDLE);

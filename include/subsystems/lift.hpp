@@ -63,26 +63,30 @@
  *   DESCEND   the velocity loop tracks a banded speed reference read off the
  *             arm's position: LIFT_DESCENT_TOP_PCT of free speed from the start
  *             height down to the mid boundary, LIFT_DESCENT_MID_PCT through the
- *             middle, then a constant LIFT_DESCENT_SLOW_PCT crawl from
- *             LIFT_DESCENT_SLOW_ZONE_DEG down to LIFT_SEAT_DETECT_DEG. The mid
- *             boundary is a FRACTION (LIFT_DESCENT_MID_FRACTION) of the travel
- *             between the start height and the slow zone, so "the middle" is the
- *             middle of this descent whatever height it began at. Band changes
- *             are ramps at LIFT_DESCENT_RAMP_DEG_PER_S2, never stops.
- *   FINAL     below LIFT_SEAT_DETECT_DEG: a dedicated closed-loop push at a
+ *             middle, then a constant LIFT_DESCENT_SLOW_PCT "approach" cruise
+ *             from LIFT_DESCENT_SLOW_ZONE_DEG down to LIFT_FINAL_START_DEG. The
+ *             mid boundary is a FRACTION (LIFT_DESCENT_MID_FRACTION) of the
+ *             travel between the start height and the slow zone, so "the
+ *             middle" is the middle of this descent whatever height it began
+ *             at. Band changes are ramps at LIFT_DESCENT_RAMP_DEG_PER_S2, never
+ *             stops -- sized (see config.hpp) so the approach band is already
+ *             down near its own target speed well before FINAL takes over, not
+ *             still braking hard right at the floor.
+ *   FINAL     below LIFT_FINAL_START_DEG: a dedicated closed-loop push at a
  *             constant LIFT_FINAL_DEG_PER_S, with up to LIFT_FINAL_MAX_MV of
  *             downward authority -- more force than SEAT's hold (which only has
  *             to fight bounce, not resistance) but capped well under DESCEND's
  *             full 12000 mV so a real hard-stop contact doesn't slam. This is
  *             the fix for an arm that stalls a few degrees above 0 on a cup
- *             caught in the intake or plain six-bar/chain friction: the old
- *             single-step version read that stall as "seated" and left only the
- *             weak SEAT voltage to finish the job, which it often couldn't.
- *             Hands over to SEAT once the arm is BOTH within LIFT_SEAT_ZERO_DEG
- *             of 0 AND still (under LIFT_SEAT_STILL_DEG_PER_S for
- *             LIFT_SEAT_STILL_MS); if LIFT_SEAT_MAX_MS runs out first (a real
- *             jam, not just friction) it gives up and seats wherever it
- *             stopped, shown as SEAT(short) so the driver can tell it did not
+ *             caught in the intake or plain six-bar/chain friction: the
+ *             original single-step version read that stall as "seated" and
+ *             left only the weak SEAT voltage to finish the job, which it often
+ *             couldn't. FINAL is TIME-BASED: it forces for a fixed
+ *             LIFT_FINAL_FORCE_MS regardless of how settled it looks partway
+ *             through (a stall can look momentarily still without being truly
+ *             seated), then hands over to SEAT -- plain SEAT if it is within
+ *             LIFT_SEAT_ZERO_DEG of 0 at that moment, SEAT(short) otherwise (a
+ *             genuine jam, not just friction) so the driver can tell it did not
  *             actually reach 0.
  *   SEAT      hold a constant LIFT_SEAT_MV pressed into the stop so the arm
  *             cannot bounce back up. It does NOT park a few degrees above the
@@ -105,18 +109,29 @@
  *             POSITION SHORTFALL against a learned baseline, the loop's EFFORT
  *             against a learned baseline, and a speed-ratio / near-stop backstop
  *             -- all measured against what the arm was actually doing a moment
- *             ago, never against the nominal command, which is what made the
- *             first version unable to fire at all. Reaching L2_NO_CONTACT_DEG
- *             with no contact means there was no stack under the arm: nothing is
- *             released, and it slows into the bottom and SEATs with the pin still
- *             held (NO CONTACT).
- *   RELEASE   contact found: needsClawRelease() goes true for Scoring to act on
- *             IN THE SAME TICK the trigger fires, and the arm KEEPS pressing down
- *             at the same speed so the jaws slide off the pin. Once the jaws have
- *             had CLAW_OPEN_TIME_MS to open, a plain speed test decides (with the
+ *             ago, never against the nominal command, and (2026-10-02) at least
+ *             two of those three signals must agree on the same tick before any
+ *             of them (other than the absolute near-stop) counts at all -- see
+ *             AGREEMENT in contact_detector.hpp, the fix for this six-bar's
+ *             gravity torque swinging the loop's speed/effort fast enough, as
+ *             the arm passes vertical, to false-fire a single signal in plain
+ *             free air. GUARANTEED RELEASE: if the detector has not fired by the
+ *             time the arm crosses down through L2_AUTO_RELEASE_DEG, it releases
+ *             anyway, right there, exactly as if contact had been detected --
+ *             there is no longer a "press all the way down with nothing
+ *             released" outcome. If the arm is already at or below
+ *             L2_AUTO_RELEASE_DEG the moment PRESS starts, it releases on the
+ *             very first tick.
+ *   RELEASE   contact found (by the detector, or by crossing L2_AUTO_RELEASE_DEG):
+ *             needsClawRelease() goes true for Scoring to act on IN THE SAME TICK
+ *             the trigger fires, and the arm KEEPS pressing down at the same
+ *             speed so the jaws slide off the pin. Once the jaws have had
+ *             CLAW_OPEN_TIME_MS to open, a plain speed test decides (with the
  *             jaws open the arm either moves or it does not): clearly moving for
  *             L2_FREE_MS -> free, go home; still stopped for L2_STUCK_MS -> the
- *             claw is hooked on the pin -> UNSTICK.
+ *             claw is hooked on the pin -> UNSTICK. If the arm reaches
+ *             L2_RELEASE_FLOOR_DEG before either resolves, it hands over to the
+ *             fast run-home descent right there rather than keep pressing.
  *   UNSTICK   lift L2_UNSTICK_UP_DEG with the claw open, then press again. At
  *             most L2_MAX_UNSTICK_TRIES times; after that it stops, holds where
  *             it is and reports SCORE STUCK rather than grinding.
@@ -156,7 +171,7 @@
  * whose speed reference is a real one (at least 5 deg/s) but the arm moved less
  * than LIFT_STALL_DEG in LIFT_STALL_MS -> give up on that goal, HOLD where it
  * is, BLOCKED. The stall guard is deliberately off once APPROACH has tapered
- * the reference below that, in HOLD, and below LIFT_SEAT_DETECT_DEG during a
+ * the reference below that, in HOLD, and below LIFT_FINAL_START_DEG during a
  * descent -- an arm that has stopped down there is seated, which is the point.
  * Neither guard can brick the buttons: a new setTarget() clears both.
  *
@@ -192,10 +207,10 @@ class Lift {
     };
 
     /** Where a commanded move is (see the class comment). DRIVE/BRAKE/APPROACH/HOLD are a position
-     *  move; DESCEND/FINAL/SEAT are a trip to the bottom (FINAL is the dedicated push-to-zero step
-     *  below LIFT_SEAT_DETECT_DEG, see "Seating on the hard stop" in config.hpp). For a position move
-     *  the first three are chosen fresh from (distance, speed) every tick -- only arrival into HOLD
-     *  latches. */
+     *  move; DESCEND/FINAL/SEAT are a trip to the bottom (FINAL is the dedicated, time-boxed
+     *  push-to-zero step below LIFT_FINAL_START_DEG, see "Seating on the hard stop" in config.hpp). For
+     *  a position move the first three are chosen fresh from (distance, speed) every tick -- only
+     *  arrival into HOLD latches. */
     enum class Phase { DRIVE, BRAKE, APPROACH, HOLD, DESCEND, FINAL, SEAT, PRESS, RELEASE, UNSTICK };
 
     Lift();
@@ -278,8 +293,9 @@ class Lift {
     const char* activePresetName() const;
     /** Which phase the active move is in. Only meaningful while hasActiveTarget() is true. */
     Phase getPhase() const { return phase_; }
-    /** "DRIVE" / "BRAKE" / "APPROACH" / "HOLD" / "DESCEND" / "FINAL" / "SEAT" (or "SEAT(short)" if it
-     *  gave up before reaching true 0, see LIFT_SEAT_MAX_MS), or "" with no active target. */
+    /** "DRIVE" / "BRAKE" / "APPROACH" / "HOLD" / "DESCEND" / "FINAL" / "SEAT" (or "SEAT(short)" if
+     *  FINAL's forcing window, LIFT_FINAL_FORCE_MS, ran out before reaching true 0), or "" with no
+     *  active target. */
     const char* phaseName() const;
 
     /** Current lift-arm angle in degrees (rotation sensor if fitted, else motor encoders). */
@@ -326,13 +342,13 @@ class Lift {
      *  where it is. Carried between moves. */
     double getGravityMv() const { return gravityMv_; }
     /** True while the arm is pressed down onto its hard stop (phase SEAT) -- including a SEAT(short)
-     *  that gave up above true 0 after LIFT_SEAT_MAX_MS (see isSeatShort()). It is still "done trying"
+     *  that ended FINAL's forcing window above true 0 (see isSeatShort()). It is still "done trying"
      *  either way, which is what callers that just want "stop waiting" (e.g. main.cpp's L2 auto-
      *  outtake) should react to. */
     bool isSeated() const { return phase_ == Phase::SEAT; }
-    /** True if the current/last SEAT gave up before reaching LIFT_SEAT_ZERO_DEG (FINAL's time budget,
-     *  LIFT_SEAT_MAX_MS, ran out first) -- shown as SEAT(short) on the brain. Meaningless unless
-     *  isSeated() is also true. */
+    /** True if the current/last SEAT ended FINAL's forcing window (LIFT_FINAL_FORCE_MS) above
+     *  LIFT_SEAT_ZERO_DEG of 0 -- shown as SEAT(short) on the brain. Meaningless unless isSeated() is
+     *  also true. */
     bool isSeatShort() const { return seatShort_; }
 
     // -----------------------------------------------------------------------
@@ -354,9 +370,6 @@ class Lift {
     /** The score sequence gave up: the claw is still caught after L2_MAX_UNSTICK_TRIES. The lift is
      *  holding where it stopped and will not push again. Cleared by the next command. */
     bool isScoreStuck() const { return scoreStuck_; }
-    /** The press reached the bottom without ever finding a stack. Nothing was released -- the pin is
-     *  still clamped and the arm is seated. Cleared by the next command. */
-    bool hadNoContact() const { return noContact_; }
     /** What the contact detector currently sees, for the brain screen and the trace: the measured /
      *  BASELINE speed ratio, the accumulated position shortfall in arm degrees, and the extra downward
      *  push over the free-descent baseline in mV. Only meaningful during PRESS. */
@@ -401,15 +414,16 @@ class Lift {
     void enterBrake(std::uint32_t now);
     void enterHold(std::uint32_t now, double holdAt);
     void enterDescend(std::uint32_t now, double position, double topPct, double midPct);
-    /** Hand DESCEND over to FINAL (see the class comment): the dedicated closed-loop push through the
-     *  last stretch to true 0, entered once the arm crosses LIFT_SEAT_DETECT_DEG. */
+    /** Hand DESCEND over to FINAL (see the class comment): the dedicated, time-boxed closed-loop push
+     *  through the last stretch to true 0, entered once the arm crosses LIFT_FINAL_START_DEG. */
     void enterFinal(std::uint32_t now);
-    /** shortSeat = true marks a SEAT that gave up above LIFT_SEAT_ZERO_DEG once FINAL's LIFT_SEAT_MAX_MS
-     *  ran out (SEAT(short) on the brain); false (the default) is every other caller -- homing finding
-     *  the real hard stop, and FINAL actually reaching true 0 and going still. */
+    /** shortSeat = true marks a SEAT where FINAL's forcing window (LIFT_FINAL_FORCE_MS) ended with the
+     *  arm still above LIFT_SEAT_ZERO_DEG (SEAT(short) on the brain); false (the default) is every
+     *  other caller -- homing finding the real hard stop, and FINAL ending within LIFT_SEAT_ZERO_DEG. */
     void enterSeat(std::uint32_t now, bool shortSeat = false);
-    /** Hand a running score sequence over to the trip home (freed, or nothing was ever there). */
-    void endScore(std::uint32_t now, double position, double topPct, double midPct);
+    /** Hand a running score sequence over to the fast run-home descent, always at L2_RETURN_SPEED_PCT
+     *  now that every release (detected, or forced by L2_AUTO_RELEASE_DEG) ends in one. */
+    void endScore(std::uint32_t now, double position);
     /** One tick of PRESS / RELEASE / UNSTICK. Writes the motors and traces. */
     void updateScore(std::uint32_t now, double dt, double position);
     /** Stall guard window: true once the arm has made less than LIFT_STALL_DEG of progress for
@@ -449,7 +463,7 @@ class Lift {
         int ratioPct;   // measured / baseline speed, percent
         int lag10;      // accumulated position shortfall, arm deg x10
         int effortMv;   // extra downward push over the free-descent baseline
-        int trigger;    // 0 none, 1 stall, 2 lag, 3 effort, 4 speed (latched once fired)
+        int trigger;    // 0 none, 1 stall, 2 lag, 3 effort, 4 speed, 5 height (latched once fired)
     };
     void trace(std::uint32_t now, char phase, double position, double mv, bool moving, const TraceAux& aux = TraceAux{});
     void traceDrain();
@@ -486,21 +500,20 @@ class Lift {
     double descentMidDeg_ = 0.0;    // position at which the top band becomes the middle band
     double descentStart_ = 0.0;     // height the descent began at (runaway guard + the mid boundary)
     double descentRef_ = 0.0;       // ramped speed reference, unsigned deg/s
-    std::uint32_t seatStillSince_ = 0;  // when the arm was last seen moving near the bottom
     bool seatHot_ = false;          // a lift motor passed LIFT_SEAT_TEMP_LIMIT_C: brake-hold instead of pressing
     int seatTempTick_ = 0;          // temperature is only read every 50th SEAT tick
-    bool seatShort_ = false;        // this SEAT gave up above LIFT_SEAT_ZERO_DEG when LIFT_SEAT_MAX_MS ran out
+    bool seatShort_ = false;        // this SEAT ended FINAL's forcing window still above LIFT_SEAT_ZERO_DEG
 
     // L2 scoring
     bool score_ = false;                 // a press/sense/release sequence is running
     bool returnFast_ = false;            // this DESCEND is a post-score run home (for the phase name)
     bool scoreStuck_ = false;            // gave up: claw still caught after every unstick try
-    bool noContact_ = false;             // pressed to the bottom and never found a stack
+    bool releasedByHeight_ = false;      // this RELEASE was forced by L2_AUTO_RELEASE_DEG, not detected
     bool clawReleaseWanted_ = false;     // the lift is asking Scoring to open the jaws
     bool clawReleased_ = false;          // Scoring acknowledged (clawReleaseDone())
     std::uint32_t clawReleasedAt_ = 0;
     ContactDetector contact_;            // the landing detector, PRESS only (pure, see its header)
-    ContactDetector::Trigger contactTrigger_ = ContactDetector::Trigger::NONE;  // which signal fired
+    ContactDetector::Trigger contactTrigger_ = ContactDetector::Trigger::NONE;  // which signal fired (NONE if releasedByHeight_)
     std::uint32_t freeSince_ = 0;        // when the arm was first seen clearly moving after the release
     std::uint32_t stuckSince_ = 0;       // when it was first seen stopped after the release
     double pressRef_ = 0.0;              // ramped press/unstick speed reference, unsigned deg/s

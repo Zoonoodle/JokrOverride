@@ -50,21 +50,24 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *               line while it does. Extra taps don't restart or extend it.
  *   L2          intake macro: THE SENSING SCORER (above the bottom, holding a pin). Presses the pin
  *               DOWN onto the stack with the claw still SHUT at L2_SCORE_SPEED_PCT, watches the
- *               rotation sensor for the landing (measured speed vs commanded speed), releases the
- *               claw at that instant and keeps pushing so the jaws slide off, checks the arm is
- *               really free (lifting L2_UNSTICK_UP_DEG and retrying if the claw is caught), then runs
- *               home fast, forces the last few degrees onto the hard stop (Lift's FINAL phase -- see
- *               lift.hpp -- so a cup or friction can't leave it parked short of true 0), and SEATs.
- *               Pivot stays OUT. Resets the level count. Nothing under the arm -> NO CONTACT: it seats
- *               at the bottom with the pin STILL CLAMPED, dropping nothing. At the bottom instead, L2
- *               toggles the claw (clamp / release) and moves nothing.
+ *               rotation sensor for the landing (at least two of LAG/EFFORT/SPEED must agree -- see
+ *               contact_detector.hpp -- a lone signal is no longer enough since this six-bar's gravity
+ *               torque swing can false-fire one on its own). GUARANTEED RELEASE: if nothing is detected
+ *               by the time the arm crosses L2_AUTO_RELEASE_DEG (32 deg) it releases anyway, right
+ *               there (shown as REL(32)) -- there is no more "pressed all the way down with nothing
+ *               released". Level 1 (31 deg) is already below this, so L2 at level 1 releases on the
+ *               very first tick, with no press-and-sense feel at all. Either way: releases the claw
+ *               and keeps pushing so the jaws slide off, checks the arm is really free (lifting
+ *               L2_UNSTICK_UP_DEG and retrying if the claw is caught), then runs home fast, forces the
+ *               last few degrees onto the hard stop (Lift's FINAL phase -- see lift.hpp -- so a cup or
+ *               friction can't leave it parked short of true 0), and SEATs. Pivot stays OUT. Resets
+ *               the level count. At the bottom instead, L2 toggles the claw (clamp / release) and
+ *               moves nothing.
  *               Once this descent passes below L2_OUTTAKE_BELOW_DEG (40 deg), the intake rollers run
- *               OUT at L2_OUTTAKE_PCT on their own -- through REL/UNSTK/RETURN/FINAL, whichever phase
- *               the arm is in -- and keep running until the arm is ACTUALLY SEATED (not just near the
- *               bottom: a cup in the intake may be exactly what is blocking that), plus
- *               L2_OUTTAKE_AFTER_SEAT_MS more. `INT:OUT` on the brain's DRV line while it runs. Level 1
- *               (31 deg) is already under 40, so scoring from level 1 outtakes from the start of the
- *               press.
+ *               OUT at L2_OUTTAKE_PCT on their own -- through REL/UNSTK/RETURN, whichever phase the
+ *               arm is in -- and stop as soon as the arm reaches L2_OUTTAKE_STOP_DEG (tied to the
+ *               lift's own FINAL handover height, 3 deg), where FINAL's own authority takes over
+ *               forcing the rest of the way down. `INT:OUT` on the brain's DRV line while it runs.
  *
  *   R1 / R2 have TWO modes, and which one is in force is latched when the button goes down (see
  *   rModeFor() below; the brain's CLAW line shows `R:INTAKE` / `R:LIFT` / `R:wait`):
@@ -162,12 +165,9 @@ void opcontrol() {
     std::uint32_t autoIntakeStart = 0;
     // L2's auto-outtake window: the millisecond the rollers started, or 0 when it isn't running, plus
     // a latch so L2_OUTTAKE_MAX_MS's timeout can't just re-arm itself on the very next tick -- it stays
-    // off until the score descent ends and a fresh one starts. autoOuttakeSeatedAt is the millisecond
-    // the lift first reported isSeated() during this run, 0 until it does; that is what starts the
-    // L2_OUTTAKE_AFTER_SEAT_MS tail, and it resets if the arm gets knocked back off the stop.
+    // off until the score descent ends and a fresh one starts.
     std::uint32_t autoOuttakeStart = 0;
     bool autoOuttakeExpired = false;
-    std::uint32_t autoOuttakeSeatedAt = 0;
 
     while (true) {
         // --- Drive ---
@@ -210,43 +210,30 @@ void opcontrol() {
         const double liftPos = lift.getPosition();
 
         // --- L2 auto-outtake: while an L2 SCORE descent (not the at-the-bottom clamp toggle, not
-        // scoreOrMatchload()'s INTAKE lower) is under L2_OUTTAKE_BELOW_DEG, eject through the whole
-        // rest of the trip down -- PRESS, REL, UNSTK, RETURN/DESCEND's slow band, and FINAL forcing the
-        // last few degrees onto the hard stop -- so anything still in the intake (a cup can be exactly
-        // what is blocking the arm from reaching 0) doesn't ride along or jam the final push. Stack
-        // level 1 (31.0 deg) is already under 40, so scoring from level 1 outtakes from the start of
-        // the press; that is this constant as specified, not a bug (see config.hpp).
-        // Stops once the lift has been ACTUALLY SEATED (lift.isSeated() -- true SEAT or SEAT(short)
-        // alike, see lift.hpp) for L2_OUTTAKE_AFTER_SEAT_MS, not merely once position crosses some
-        // threshold: the cup this exists for may only clear once the arm stops pressing on it. ---
+        // scoreOrMatchload()'s INTAKE lower) is under L2_OUTTAKE_BELOW_DEG, eject through the rest of
+        // the trip down -- PRESS, REL, UNSTK, RETURN -- so anything still in the intake doesn't ride
+        // along. Stack level 1 (31.0 deg) is already under 40, so scoring from level 1 outtakes from
+        // the start of the press; that is this constant as specified, not a bug (see config.hpp).
+        // Stops as soon as the lift reaches L2_OUTTAKE_STOP_DEG (2026-10-02 retune: tied directly to
+        // LIFT_FINAL_START_DEG, see config.hpp) -- the lift's own FINAL phase takes real downward
+        // authority from there, so the roller does not need to keep running into it. ---
         const bool scoringDown = scoring.isScoreDescent();
         if (!scoringDown) autoOuttakeExpired = false;  // a finished score re-arms the timeout for the next one
         if (scoringDown && !autoOuttakeExpired && autoOuttakeStart == 0 &&
             liftPos < config::L2_OUTTAKE_BELOW_DEG) {
             autoOuttakeStart = pros::millis();
-            autoOuttakeSeatedAt = 0;
         }
         if (autoOuttakeStart != 0) {
-            if (lift.isSeated()) {
-                if (autoOuttakeSeatedAt == 0) autoOuttakeSeatedAt = pros::millis();
-            } else {
-                autoOuttakeSeatedAt = 0;  // knocked back off the stop (LIFT_SEAT_UNSEAT_DEG): keep running
-            }
-            // Done once it has sat seated for L2_OUTTAKE_AFTER_SEAT_MS. Cancelled by anything that would
-            // otherwise fight it -- the manual override, B, a stuck score, or a lift that gave up on the
-            // move entirely (BLOCKED/FAULT) -- same stops as before, score-sequence end is no longer one
-            // of them (see above).
-            const bool done = autoOuttakeSeatedAt != 0 && pros::millis() - autoOuttakeSeatedAt >=
-                                                               static_cast<std::uint32_t>(config::L2_OUTTAKE_AFTER_SEAT_MS);
+            // Done once the arm reaches the stop height. Cancelled by anything that would otherwise
+            // fight it -- the manual override, B, a stuck score, or a lift that gave up on the move
+            // entirely (BLOCKED/FAULT).
+            const bool done = liftPos <= config::L2_OUTTAKE_STOP_DEG;
             const bool cancelled =
                 up || down || bNew || lift.isScoreStuck() || lift.isBlocked() || lift.isFaulted();
             const bool timedOut =
                 pros::millis() - autoOuttakeStart >= static_cast<std::uint32_t>(config::L2_OUTTAKE_MAX_MS);
             if (timedOut) autoOuttakeExpired = true;
-            if (done || cancelled || timedOut) {
-                autoOuttakeStart = 0;
-                autoOuttakeSeatedAt = 0;
-            }
+            if (done || cancelled || timedOut) autoOuttakeStart = 0;
         }
         screen::autoOuttake = autoOuttakeStart != 0;
 

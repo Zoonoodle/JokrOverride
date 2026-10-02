@@ -23,6 +23,8 @@
 
 #include "../include/subsystems/contact_detector.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -40,15 +42,15 @@ constexpr double kDt = 0.01;  // the lift task's 10 ms tick
 ContactDetector::Config realConfig() {
     return ContactDetector::Config{
         /*settleMs*/ 200.0,
-        /*ignoreMs*/ 60.0,
-        /*confirmMs*/ 20.0,
+        /*ignoreMs*/ 80.0,
+        /*confirmMs*/ 30.0,
         /*baselineTauMs*/ 200.0,
         /*outputTauMs*/ 50.0,
-        /*lagDeg*/ 1.5,
+        /*lagDeg*/ 2.2,
         /*lagLeakMs*/ 200.0,
-        /*effortMv*/ 2000.0,
-        /*speedFrac*/ 0.70,
-        /*freezeFrac*/ 0.90,
+        /*effortMv*/ 1800.0,
+        /*speedFrac*/ 0.55,
+        /*freezeFrac*/ 0.82,
         /*stallDegPerS*/ 6.0,
     };
 }
@@ -97,18 +99,53 @@ Result run(const std::vector<Sample>& trace) {
 
 // --- scenario builders ------------------------------------------------------------------------
 
-/** Spin-up from a standstill to `cruise` deg/s at `accel` deg/s^2, then hold it, with noise.
- *  outMv settles at `holdMv` (signed). This is the shape of every press before anything happens. */
-std::vector<Sample> freeDescent(double cruise, double holdMv, int ticks, Noise& n, double accel = 800.0) {
+/** Spin-up from a standstill to `cruise` deg/s at `accel` deg/s^2, then hold it, with noise (`noiseDeg`
+ *  on the speed, fixed 250 mV on the output). outMv settles at `holdMv` (signed). This is the shape of
+ *  every press before anything happens. */
+std::vector<Sample> freeDescent(double cruise, double holdMv, int ticks, Noise& n, double accel = 800.0,
+                                double noiseDeg = 3.0) {
     std::vector<Sample> out;
     double v = 0.0;
     for (int i = 0; i < ticks; ++i) {
         v = std::min(cruise, v + accel * kDt);
         // While accelerating the loop pushes harder than it will at cruise.
         const double mv = v < cruise ? holdMv - 2500.0 * (1.0 - v / cruise) : holdMv;
+        out.push_back({std::max(0.0, v + n.next(noiseDeg)), mv + n.next(250.0)});
+    }
+    return out;
+}
+
+/** Spin-up that does NOT start from a clean standstill: a residual few deg/s left over from HOLD's
+ *  damped settle (a real HOLD bounces to a near-still, not a true dead stop), then the same ramp shape
+ *  as freeDescent(). Starts just above stallDegPerS on purpose, so the absolute near-stop trigger is
+ *  never even a question here -- this scenario is about the BASELINE-relative signals surviving an
+ *  untidy handover, not about STALL. Must never fire. */
+std::vector<Sample> spinUpFromHold(double cruise, double holdMv, int ticks, Noise& n, double accel = 800.0) {
+    std::vector<Sample> out;
+    double v = 8.0;
+    for (int i = 0; i < ticks; ++i) {
+        v = std::min(cruise, v + accel * kDt);
+        const double mv = v < cruise ? holdMv - 2500.0 * (1.0 - v / cruise) : holdMv;
         out.push_back({std::max(0.0, v + n.next(3.0)), mv + n.next(250.0)});
     }
     return out;
+}
+
+/** Append a gravity-torque swing: speed ramps from `v0` down to `vDip` and back up to `v0` over
+ *  `periodMs` (a triangle wave), with the loop's output swinging the OPPOSITE way -- down to
+ *  `mv0 - mvSwing` at the dip, back to `mv0` -- modelling the six-bar passing vertical mid-press, where
+ *  gravity resists harder for a while then lets up. Real motion the whole time, no landing: must never
+ *  fire, however far either signal swings on its own. */
+void appendGravitySwing(std::vector<Sample>& out, double v0, double mv0, double vDip, double mvSwing,
+                        double periodMs, int ticks, Noise& n) {
+    for (int i = 0; i < ticks; ++i) {
+        const double t = i * kDt * 1000.0;
+        const double phase = std::fmod(t, periodMs) / periodMs;
+        const double tri = phase < 0.5 ? phase * 2.0 : (1.0 - phase) * 2.0;  // 0 -> 1 -> 0
+        const double v = v0 + (vDip - v0) * tri;
+        const double mv = mv0 - mvSwing * tri;
+        out.push_back({std::max(0.0, v + n.next(3.0)), mv + n.next(250.0)});
+    }
 }
 
 /** Append a landing: the speed decays from cruise to `endSpeed` over `fallMs`, and the loop pushes
@@ -157,8 +194,8 @@ void report(const Case& c) {
 }  // namespace
 
 int main() {
-    std::printf("ContactDetector — synthetic 10 ms traces (lag 1.5 deg leak 200 ms, effort 2000 mV,\n");
-    std::printf("                  frac 0.70, stall 6 deg/s, settle 200 ms, confirm 20 ms)\n\n");
+    std::printf("ContactDetector — synthetic 10 ms traces (lag 2.2 deg leak 200 ms, effort 1800 mV,\n");
+    std::printf("                  frac 0.55, stall 6 deg/s, settle 200 ms, confirm 30 ms, AGREEMENT >=2)\n\n");
     std::printf("%-42s %-9s %-7s %-9s   %-34s %s\n", "scenario", "result", "trigger", "latency", "at fire",
                 "verdict");
     std::printf("%s\n", std::string(118, '-').c_str());
@@ -189,7 +226,7 @@ int main() {
         std::vector<Sample> t = freeDescent(55.0, -1500.0, 80, n);
         const int landing = static_cast<int>(t.size());
         appendLanding(t, 55.0, -1500.0, 0.0, 50.0, 3500.0, 100.0, 120, n);
-        Case c{"hard landing: stop in 50 ms", t, true, landing, 40.0};
+        Case c{"hard landing: stop in 50 ms", t, true, landing, 120.0};
         report(c);
     }
     // 5. SOFT landing: the stack gives, so the arm only drops to ~50% and then creeps. No dramatic
@@ -210,7 +247,7 @@ int main() {
         std::vector<Sample> t = freeDescent(55.0, -1500.0, 80, n);
         const int landing = static_cast<int>(t.size());
         appendLanding(t, 55.0, -1500.0, 38.5, 150.0, 2000.0, 200.0, 200, n);
-        Case c{"creep landing: 70% + 2000 mV effort", t, true, landing, 400.0};
+        Case c{"creep landing: 70% + 2000 mV effort", t, true, landing, 650.0};
         report(c);
     }
     // 7. A pin ALREADY resting on the stack when L2 is pressed: the arm never gets going at all.
@@ -237,6 +274,46 @@ int main() {
             t.push_back({std::max(0.0, 70.0 - 25.0 * f + n.next(3.0)), -1500.0 - 2500.0 * f + n.next(250.0)});
         }
         Case c{"slow gravity drift 70->45 deg/s over 2 s", t, false, -1, 0.0};
+        report(c);
+    }
+    // 9. THE REAL FALSE-FIRE: a gravity-torque swing, not a drift. This six-bar swings up and back
+    //    PAST VERTICAL, so over a press of a few tens of degrees the torque can go from resisting to
+    //    assisting (or back) well inside one second -- faster than the 200 ms baselines can track, and
+    //    exactly the shape that used to cross SPEED_FRAC (then 0.70) on its own with nothing under the
+    //    arm at all. 90 -> 50 -> 90 over 1 s: 50/90 = 0.56, which the OLD threshold (0.70) would have
+    //    called contact; the new one (0.50) and AGREEMENT must not.
+    {
+        Noise n;
+        std::vector<Sample> t = freeDescent(90.0, -800.0, 25, n);
+        appendGravitySwing(t, 90.0, -800.0, 50.0, 2000.0, 1000.0, 150, n);
+        Case c{"gravity speed swing 90->50->90 over 1.0 s", t, false, -1, 0.0};
+        report(c);
+    }
+    // 10. The other half of the same mechanism: the OUTPUT swings by several thousand mV as gravity
+    //     flips (the velocity loop fighting harder to hold the SAME speed), with the speed itself
+    //     barely moving. This used to be able to fire EFFORT alone; now it needs a second signal that
+    //     isn't there.
+    {
+        Noise n;
+        std::vector<Sample> t = freeDescent(90.0, -800.0, 25, n);
+        appendGravitySwing(t, 90.0, -800.0, 85.0, 3800.0, 800.0, 120, n);
+        Case c{"gravity effort swing, several 1000 mV, flat speed", t, false, -1, 0.0};
+        report(c);
+    }
+    // 11. Heavier noise than the sensor could ever actually produce (+-8 deg/s, vs the +-3 used
+    //     everywhere else and the sensor's real 0.25 deg/s quantisation): a plain free descent, long
+    //     enough to accumulate if the noise alone could ever add up to anything.
+    {
+        Noise n;
+        Case c{"free descent 55 deg/s, 2.0 s, +-8 deg/s noise", freeDescent(55.0, -1500.0, 200, n, 800.0, 8.0),
+               false, -1, 0.0};
+        report(c);
+    }
+    // 12. Spin-up straight out of HOLD -- not a clean standstill (see spinUpFromHold()). Must not fire,
+    //     including on the absolute near-stop: the residual speed starts above stallDegPerS on purpose.
+    {
+        Noise n;
+        Case c{"spin-up from HOLD (residual speed, not 0)", spinUpFromHold(55.0, -1500.0, 30, n), false, -1, 0.0};
         report(c);
     }
 

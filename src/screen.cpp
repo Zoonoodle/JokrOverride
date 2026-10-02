@@ -125,17 +125,17 @@ void draw() {
     // --- Lift section (lines 6-10): everything needed to judge a move at a glance. ---
 
     // 6: position -> goal, which named preset (if any) is active, which phase the move is in
-    // (DRIVE / BRAKE / APPROACH / HOLD / DESCEND / RETURN / SEAT / PRESS / REL / UNSTK), and
-    // SCORE STUCK / NO CONTACT / FAULT / BLOCKED / SETTLED. SCORE STUCK and NO CONTACT are the two
-    // ways an L2 score can end without having scored, and they are shown ahead of BLOCKED/SETTLED
-    // because they are the more specific answer to "why did that not do what I expected".
+    // (DRIVE / BRAKE / APPROACH / HOLD / DESCEND / RETURN / FINAL / SEAT / SEAT(short) / PRESS / REL /
+    // UNSTK), and SCORE STUCK / FAULT / BLOCKED / SETTLED. SCORE STUCK is shown ahead of
+    // BLOCKED/SETTLED because it is the more specific answer to "why did that not do what I expected".
+    // There is no NO CONTACT any more: L2_AUTO_RELEASE_DEG guarantees a release by then, so a score
+    // always ends with the pin off (see REL(32) on the RELEASE phase and CLAUDE.md's L2 note).
     //   LIFT 61.4 -> 128.3  STACK 5  DRIVE
     // means "goal is level 5, the arm is at 61.4 and still under full voltage".
     {
         char status[14] = "";
         if (lift.isFaulted()) std::snprintf(status, sizeof(status), "FAULT");
         else if (lift.isScoreStuck()) std::snprintf(status, sizeof(status), "SCORE STUCK");
-        else if (lift.hadNoContact()) std::snprintf(status, sizeof(status), "NO CONTACT");
         else if (lift.isBlocked()) std::snprintf(status, sizeof(status), "BLOCKED");
         else if (lift.isSettled()) std::snprintf(status, sizeof(status), "SETTLED");
         if (lift.hasActiveTarget())

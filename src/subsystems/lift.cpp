@@ -74,7 +74,7 @@ void Lift::zero() {
     gravityMv_ = 0.0;
     descendHeld_ = descendOwned_ = descendRequest_ = false;
     seatHot_ = false;
-    score_ = returnFast_ = scoreStuck_ = noContact_ = false;
+    score_ = returnFast_ = scoreStuck_ = releasedByHeight_ = false;
     clawReleaseWanted_ = clawReleased_ = false;
     contact_.reset();
     contactTrigger_ = ContactDetector::Trigger::NONE;
@@ -288,7 +288,7 @@ void Lift::setTarget(double degrees, bool precise) {
     score_ = false;
     clawReleaseWanted_ = false;
     scoreStuck_ = false;
-    noContact_ = false;
+    releasedByHeight_ = false;
     returnFast_ = false;
 
     const bool flying = active_ && !descent_ && !faulted_ && !blocked_ && phase_ != Phase::HOLD;
@@ -381,6 +381,8 @@ const char* Lift::phaseName() const {
         case Phase::PRESS: return "PRESS";
         case Phase::RELEASE:
             // Which signal fired is the first thing worth knowing when tuning, so it goes on the line.
+            // REL(32) means the detector never fired at all -- L2_AUTO_RELEASE_DEG forced it.
+            if (releasedByHeight_) return "REL(32)";
             switch (contactTrigger_) {
                 case ContactDetector::Trigger::STALL: return "REL(stall)";
                 case ContactDetector::Trigger::LAG: return "REL(lag)";
@@ -509,7 +511,6 @@ void Lift::enterDescend(std::uint32_t now, double position, double topPct, doubl
                      config::LIFT_DESCENT_MID_FRACTION *
                          std::max(position - config::LIFT_DESCENT_SLOW_ZONE_DEG, 0.0);
     descentRef_ = std::max(-velocity_, 0.0);  // ramp on from whatever the arm is already doing
-    seatStillSince_ = now;
     stallStart_ = 0;
     velI_ = gravityMv_;
     seatHot_ = false;
@@ -518,9 +519,8 @@ void Lift::enterDescend(std::uint32_t now, double position, double topPct, doubl
 
 void Lift::enterFinal(std::uint32_t now) {
     phase_ = Phase::FINAL;
-    phaseStart_ = now;
+    phaseStart_ = now;  // FINAL's own clock -- it forces for exactly LIFT_FINAL_FORCE_MS from here
     stallStart_ = 0;
-    seatStillSince_ = now;  // the "is it actually still" window starts fresh at the handover
     descentRef_ = std::max(-velocity_, 0.0);  // ramp on from whatever DESCEND already had it doing
     velI_ = std::clamp(gravityMv_, -static_cast<double>(config::LIFT_FINAL_MAX_MV),
                        static_cast<double>(config::LIFT_FINAL_MAX_MV));
@@ -600,7 +600,7 @@ void Lift::startScore() {
     score_ = true;
     returnFast_ = false;
     scoreStuck_ = false;
-    noContact_ = false;
+    releasedByHeight_ = false;
     clawReleaseWanted_ = false;
     clawReleased_ = false;
     contact_.reset();
@@ -622,14 +622,15 @@ void Lift::clawReleaseDone() {
     clawReleasedAt_ = pros::millis();
 }
 
-void Lift::endScore(std::uint32_t now, double position, double topPct, double midPct) {
+void Lift::endScore(std::uint32_t now, double position) {
     score_ = false;
     clawReleaseWanted_ = false;
     descent_ = true;
-    // A run home after a successful release is labelled RETURN on the brain and R in the trace; the
-    // NO CONTACT path hands over at the ordinary descent speeds and keeps the DESCEND label.
-    returnFast_ = topPct >= config::L2_RETURN_SPEED_PCT - 1e-9;
-    enterDescend(now, position, topPct, midPct);
+    // Every call here now follows a release (detected, or forced by L2_AUTO_RELEASE_DEG) -- there is no
+    // more "pressed to the bottom with nothing released" path -- so the run home is always the fast
+    // one, L2_RETURN_SPEED_PCT for both bands, labelled RETURN on the brain and R in the trace.
+    returnFast_ = true;
+    enterDescend(now, position, config::L2_RETURN_SPEED_PCT, config::L2_RETURN_SPEED_PCT);
 }
 
 void Lift::updateScore(std::uint32_t now, double dt, double position) {
@@ -704,33 +705,34 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         aux.effortMv = static_cast<int>(contact_.effortMv());
         aux.trigger = ContactDetector::triggerCode(contact_.firedTrigger());
 
-        if (position <= config::L2_NO_CONTACT_DEG) {
-            // Pressed all the way down and never met a stack: there was nothing to score onto. Do NOT
-            // release -- that would drop the pin on the floor. Slow into the bottom and seat with it
-            // still clamped, and say so on the brain. L2 again down there lets it go (the clamp toggle).
-            noContact_ = true;
-            endScore(now, position, config::LIFT_DESCENT_TOP_PCT, config::LIFT_DESCENT_MID_PCT);
-            return;
-        }
-        if (fired != ContactDetector::Trigger::NONE) {
-            // CONTACT, this tick. Ask Scoring for the jaws (it owns the claw) and keep pushing down so
-            // they slide off. Scoring polls needsClawRelease() in the same 10 ms driver loop, so the
-            // cylinder is commanded within a tick of the trigger -- there is no handshake to wait on.
+        // GUARANTEED RELEASE HEIGHT: the detector gets first say (checked above, including on this very
+        // tick), but if it has not fired by the time the arm is at or below L2_AUTO_RELEASE_DEG, release
+        // anyway -- there is no more "press to the bottom with nothing released" outcome. If the arm is
+        // already at or below this height the moment PRESS starts (stack level 1, 31.0 deg), this fires
+        // on the very first tick.
+        const bool heightRelease = fired == ContactDetector::Trigger::NONE &&
+                                   position <= config::L2_AUTO_RELEASE_DEG;
+        if (fired != ContactDetector::Trigger::NONE || heightRelease) {
+            // CONTACT (detected, or forced by height) this tick. Ask Scoring for the jaws (it owns the
+            // claw) and keep pushing down so they slide off. Scoring polls needsClawRelease() in the
+            // same 10 ms driver loop, so the cylinder is commanded within a tick -- no handshake to wait
+            // on.
             clawReleaseWanted_ = true;
             clawReleased_ = false;
-            contactTrigger_ = fired;
+            contactTrigger_ = fired;  // NONE when it was the height rule; see releasedByHeight_
+            releasedByHeight_ = heightRelease;
             phase_ = Phase::RELEASE;
             phaseStart_ = now;
             freeSince_ = 0;
             stuckSince_ = 0;
-            aux.trigger = ContactDetector::triggerCode(fired);
+            aux.trigger = heightRelease ? 5 : ContactDetector::triggerCode(fired);
         }
     } else {  // Phase::RELEASE
         // Carry the detector's last readings so the r lines show what fired and what it saw.
         aux.ratioPct = static_cast<int>(contact_.speedRatio() * 100.0);
         aux.lag10 = static_cast<int>(contact_.lagDeg() * 10.0);
         aux.effortMv = static_cast<int>(contact_.effortMv());
-        aux.trigger = ContactDetector::triggerCode(contactTrigger_);
+        aux.trigger = releasedByHeight_ ? 5 : ContactDetector::triggerCode(contactTrigger_);
 
         // Don't judge anything until the jaws have actually had time to open. If nobody ever
         // acknowledges the request (no Scoring::update() running, e.g. a bare auton), carry on after
@@ -750,14 +752,17 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             freeSince_ = 0;
             if (stuckSince_ == 0) stuckSince_ = now;
         }
-        if (position <= config::L2_NO_CONTACT_DEG) {
-            endScore(now, position, config::L2_RETURN_SPEED_PCT, config::L2_RETURN_SPEED_PCT);  // already home
+        if (position <= config::L2_RELEASE_FLOOR_DEG) {
+            // Safety floor for THIS phase only (separate from L2_AUTO_RELEASE_DEG above, and lower): the
+            // jaws haven't resolved free-or-stuck yet but the arm is nearly at the bottom anyway -- stop
+            // treating this as a press and hand over to the fast run-home descent right here.
+            endScore(now, position);  // already home
             return;
         }
         if (jawsOpen && freeSince_ != 0 &&
             now - freeSince_ >= static_cast<std::uint32_t>(config::L2_FREE_MS)) {
             // The claw came off the pin and the arm is running freely again: go home, fast.
-            endScore(now, position, config::L2_RETURN_SPEED_PCT, config::L2_RETURN_SPEED_PCT);
+            endScore(now, position);
             return;
         }
         if (jawsOpen && stuckSince_ != 0 && now - stuckSince_ >= static_cast<std::uint32_t>(config::L2_STUCK_MS)) {
@@ -799,7 +804,7 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
 
     // --- phase transitions first, so the output below always matches the phase ---
     if (phase_ == Phase::SEAT &&
-        position > config::LIFT_SEAT_DETECT_DEG + config::LIFT_SEAT_UNSEAT_DEG) {
+        position > config::LIFT_FINAL_START_DEG + config::LIFT_SEAT_UNSEAT_DEG) {
         enterDescend(now, position, descentTopPct_, descentMidPct_);  // knocked off the stop: walk it back down
     }
     if (phase_ == Phase::DESCEND || phase_ == Phase::FINAL) {
@@ -816,39 +821,23 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
         }
     }
     if (phase_ == Phase::DESCEND) {
-        if (position <= config::LIFT_SEAT_DETECT_DEG) {
+        if (position <= config::LIFT_FINAL_START_DEG) {
             // Close enough that the arm MIGHT be on its hard stop -- but it might also be stalled a
-            // few degrees short (a cup in the intake, six-bar/chain friction). Hand over to FINAL,
-            // which keeps real downward authority and only declares true SEAT once it actually reaches
-            // LIFT_SEAT_ZERO_DEG, not just "stopped somewhere under here" like the old single-step
-            // version (see "Seating on the hard stop" in config.hpp for why that was the bug).
+            // few degrees short (a cup in the intake, six-bar/chain friction). Hand over to FINAL, which
+            // keeps real downward authority and forces for a fixed window rather than trusting "looks
+            // stopped" the instant it crosses this line (see "Seating on the hard stop" in config.hpp
+            // for why the original single-step version could be fooled by that).
             enterFinal(now);
-        } else {
-            seatStillSince_ = now;
-            if (stalled(now, position)) {  // stopped well above the bottom: caught on something
-                blocked_ = true;
-                enterHold(now, position);  // hold where it stopped, never push into the jam
-            }
+        } else if (stalled(now, position)) {  // stopped well above the bottom: caught on something
+            blocked_ = true;
+            enterHold(now, position);  // hold where it stopped, never push into the jam
         }
-    } else if (phase_ == Phase::FINAL) {
-        // True SEAT needs BOTH close enough (LIFT_SEAT_ZERO_DEG, tighter than the 6 deg that gated
-        // entry here) AND still, for LIFT_SEAT_STILL_MS -- that is the actual fix: "slow somewhere
-        // under 6 deg" is no longer good enough on its own to call it seated.
-        bool reachedZero = false;
-        if (std::fabs(velocity_) > config::LIFT_SEAT_STILL_DEG_PER_S) {
-            seatStillSince_ = now;
-        } else if (position <= config::LIFT_SEAT_ZERO_DEG &&
-                  now - seatStillSince_ >= static_cast<std::uint32_t>(config::LIFT_SEAT_STILL_MS)) {
-            reachedZero = true;
-        }
-        if (reachedZero) {
-            enterSeat(now, false);  // the real thing: reached 0 and went still there
-        } else if (now - phaseStart_ >= static_cast<std::uint32_t>(config::LIFT_SEAT_MAX_MS)) {
-            // FINAL's time budget ran out before it ever got there -- a genuine jam, not just
-            // friction. Give up right here rather than grinding forever; LIFT_SEAT_MV still holds it
-            // down so it cannot bounce, and SEAT(short) on the brain says it did not reach 0.
-            enterSeat(now, true);
-        }
+    } else if (phase_ == Phase::FINAL && now - phaseStart_ >= static_cast<std::uint32_t>(config::LIFT_FINAL_FORCE_MS)) {
+        // TIME-BASED, ON PURPOSE: force at LIFT_FINAL_DEG_PER_S/LIFT_FINAL_MAX_MV for the whole window
+        // regardless of how settled the arm looks partway through, then judge by POSITION alone, once,
+        // right here -- within LIFT_SEAT_ZERO_DEG of 0 is a true SEAT, anything more is SEAT(short) (a
+        // genuine jam, not just friction; LIFT_SEAT_MV still holds it down either way).
+        enterSeat(now, position > config::LIFT_SEAT_ZERO_DEG);
     }
 
     // --- output ---
@@ -1143,7 +1132,7 @@ void Lift::startTask() {
                 std::printf("LIFT trace: ms phase(D=drive B=brake A=approach H=hold V=descend R=return "
                             "Z=final S=seat P=press r=release U=unstick M=manual h=homing F=fault I=idle) "
                             "pos*10 goal*10 vel(deg/s) out(mV) | L2 only: v/base%% lag*10 effort(mV) "
-                            "trg(0=- 1=stall 2=lag 3=effort 4=speed)\n");
+                            "trg(0=- 1=stall 2=lag 3=effort 4=speed 5=height)\n");
                 while (true) {
                     traceDrain();
                     pros::delay(20);

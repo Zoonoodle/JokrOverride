@@ -103,18 +103,27 @@ makes rapid L1 taps merge: `setTarget()` on a move already in flight *only moves
 never restart the move, because that wipes the velocity integral and resets the approach clock. A **descent**
 (a non-precise goal at or below `LIFT_BOTTOM_GOAL_DEG`: L2's run home, B, auton DOWN, R2 in clamped
 mode) is DESCEND (three position-banded speeds — `LIFT_DESCENT_TOP_PCT`, `_MID_PCT` through the middle,
-`_SLOW_PCT` below `LIFT_DESCENT_SLOW_ZONE_DEG`, ramped between, down to `LIFT_SEAT_DETECT_DEG`) → FINAL
-(a dedicated closed-loop push at a constant `LIFT_FINAL_DEG_PER_S` with up to `LIFT_FINAL_MAX_MV` of
+an **approach cruise** `_SLOW_PCT` (30%, ≈45 deg/s — retuned 2026-10-02, was 12%/18 deg/s) below
+`LIFT_DESCENT_SLOW_ZONE_DEG` (14°, was 20°), ramped at `LIFT_DESCENT_RAMP_DEG_PER_S2` (1200, was 800 —
+had to get firmer so the arm actually finishes decelerating before the floor instead of still carrying
+~70 deg/s into FINAL) → FINAL (below `LIFT_FINAL_START_DEG`, 3° — was `LIFT_SEAT_DETECT_DEG`, 6°; a
+dedicated closed-loop push at a constant `LIFT_FINAL_DEG_PER_S` with up to `LIFT_FINAL_MAX_MV` of
 downward authority — more force than SEAT's hold, so it can push through a cup caught in the intake or
-plain six-bar/chain friction a few degrees short of 0, which is what "stopped under `LIFT_SEAT_DETECT_DEG`"
-used to get mistaken for seated; hands over once the arm is within `LIFT_SEAT_ZERO_DEG` of 0 **and**
-still, or gives up after `LIFT_SEAT_MAX_MS` and seats wherever it stopped, shown as `SEAT(short)`) → SEAT
-(a constant `LIFT_SEAT_MV` pressed into the hard stop, so it does not park above the frame and cannot
-bounce). An **L2 score** is
+plain six-bar/chain friction a few degrees short of 0, which is what "stopped under 6°" used to get
+mistaken for seated). **FINAL is TIME-BASED (2026-10-02 retune):** it forces at that speed/authority for
+a fixed `LIFT_FINAL_FORCE_MS` (1.5 s, "a second or two") regardless of how settled it looks partway
+through, then judges once by position — within `LIFT_SEAT_ZERO_DEG` of 0 is plain SEAT, anything more is
+`SEAT(short)` — rather than the earlier conditional version (seat early once "close and still", else
+give up after a budget), which `LIFT_SEAT_MAX_MS`/`LIFT_SEAT_STILL_*` belonged to and are now gone. →
+SEAT (a constant `LIFT_SEAT_MV`, −1500 pressed into the hard stop, so it does not park above the frame
+and cannot bounce). An **L2 score** is
 a third kind: `Lift::startScore()` → PRESS (push the pin onto the stack with the jaws **shut**, capped
-at `L2_PRESS_MAX_MV`) → contact, decided by `subsystems::ContactDetector` → REL (the lift raises
-`needsClawRelease()`; **Scoring** opens the claw, the lift never touches a cylinder) → the freed check
-→ UNSTK up `L2_UNSTICK_UP_DEG` and retry if the claw is caught → the descent above at
+at `L2_PRESS_MAX_MV`) → contact, decided by `subsystems::ContactDetector` **OR** forced by
+`L2_AUTO_RELEASE_DEG` (32°, 2026-10-02) the moment PRESS crosses that height with nothing detected —
+there is no more "pressed to the bottom with nothing released"; level 1 (31°) is already below it, so
+L2 at level 1 releases on the first tick → REL (the lift raises `needsClawRelease()`, shown as `REL(32)`
+if the height rule fired it; **Scoring** opens the claw, the lift never touches a cylinder) → the freed
+check → UNSTK up `L2_UNSTICK_UP_DEG` and retry if the claw is caught → the descent above at
 `L2_RETURN_SPEED_PCT`. **The detector's rule, learned the hard way:** never threshold against the
 *nominal command* — the first version did, and could never fire, because this six-bar often cannot make
 the commanded descent speed at all (the arm swings up and *back*, so gravity resists the descent over
@@ -122,8 +131,13 @@ much of the arc and the press cap limits the push). Every signal is measured aga
 baseline of what the arm was actually doing a moment ago**: a leaky integral of the position shortfall
 (`LAG`), the loop's effort over the free-descent baseline (`EFFORT`), and a speed-ratio / near-stop
 backstop. The baselines track slow gravity drift but **freeze** below `L2_CONTACT_FREEZE_FRAC` so they
-cannot follow a gentle landing down and mask it. No stack under it → `NO CONTACT`, nothing released, seated with the pin still
-clamped. Out of unstick tries → `SCORE STUCK`, holds where it is, never grinds. Nothing re-drives
+cannot follow a gentle landing down and mask it. **AGREEMENT (2026-10-02):** a lone `LAG`/`EFFORT`/
+`SPEED` signal is no longer enough — at least two of the three must be over threshold on the *same*
+tick (`STALL` is exempt). Fix for the robot false-firing in plain free descent: this six-bar's gravity
+torque swings up and back past vertical fast enough to move one signal alone, with nothing under the
+arm at all. Since `L2_AUTO_RELEASE_DEG` now guarantees a release regardless, the detector is allowed to
+be the more conservative side of that trade. Out of unstick tries → `SCORE STUCK`, holds where it is,
+never grinds. Nothing re-drives
 or re-chases: the hold *is* the correction. Four earlier designs are in `git log` and must not come
 back: `d2978c7` (jumped setpoint, high kP), `6b8165c` (trapezoid + leash + fixed `LIFT_KG`), `3723ef2`
 (`LIFT_BRAKE_DECEL_DEG_PER_S2 = 2000` asked for more braking than the arm can do, and handing a

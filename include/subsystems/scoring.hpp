@@ -35,11 +35,11 @@
  *                 when to open the claw (Lift::needsClawRelease(), polled every tick here). The split
  *                 is deliberate: only the lift can see the measured-vs-commanded speed gap contact
  *                 detection is made on, and only this class is allowed to touch a cylinder. Read
- *                 "SCORING WITH L2" in lift.hpp for the phases (PRESS / REL / UNSTK / RETURN).
- *                 It ends in IDLE when the arm is seated at the bottom -- including the NO CONTACT
- *                 case, where nothing was ever released and the pin is still clamped -- or
- *                 immediately if the lift reports SCORE STUCK, so L1 / R1 / B work again while the
- *                 lift holds where it stopped.
+ *                 "SCORING WITH L2" in lift.hpp for the phases (PRESS / REL / UNSTK / RETURN). The
+ *                 lift ALWAYS releases now -- a real detection, or Lift's own L2_AUTO_RELEASE_DEG
+ *                 forcing it by height if nothing was ever detected -- so this ends in IDLE once the
+ *                 arm is seated at the bottom with the pin off, or immediately if the lift reports
+ *                 SCORE STUCK, so L1 / R1 / B work again while the lift holds where it stopped.
  *                 The pivot is already OUT at every stack level and OUT is the default down position,
  *                 so it does not move (if the driver had toggled it BACK up there, it is put back
  *                 OUT, without waiting). L2 at the bottom never enters this state -- see score().
@@ -76,8 +76,9 @@
  *      which the pivot is forbidden to be OUT or BACK.
  *   3. Nothing is ever dropped from height. scoreOrMatchload() waits CLAW_OPEN_TIME_MS before the arm
  *      moves away. L2's score() goes further: the jaws stay SHUT for the whole descent onto the stack
- *      and only open at the moment the lift detects the pin has landed -- and if it never detects a
- *      landing, they do not open at all (NO CONTACT, pin still clamped, arm seated at the bottom).
+ *      and only open at the moment the lift decides the pin has landed -- a real detection, or (if
+ *      nothing is ever detected) Lift's own guaranteed release at L2_AUTO_RELEASE_DEG, so the jaws
+ *      always open somewhere above the floor, never at it.
  *   4. R1 never pulls a held pin back down to the intake: it is a no-op while the claw is CLAMPED
  *      (shut by L1, A, L2 at the bottom, or the autoclamp). This claw's unpowered position is OPEN,
  *      so power-on is never clamped and R1 works straight away. Starting a match with a pin in the

@@ -226,50 +226,70 @@ inline constexpr float LIFT_HOLD_MAX_MV = 7000.0f;           // TUNE: most the h
 // --- The descent to the bottom (L2, B, auton DOWN, and R2 in clamped mode) --
 // Three speed bands on the way down, as % of the free speed, so the arm walks itself onto its hard
 // stop instead of falling onto it. Band boundaries are read off the arm's POSITION (degrees above 0):
-//   top    : from wherever the descent started, down to the mid boundary -> LIFT_DESCENT_TOP_PCT
-//   middle : from the mid boundary down to LIFT_DESCENT_SLOW_ZONE_DEG   -> LIFT_DESCENT_MID_PCT
-//   slow   : LIFT_DESCENT_SLOW_ZONE_DEG down to the stop                -> LIFT_DESCENT_SLOW_PCT
-// The mid boundary is a FRACTION of the travel between the start height and the slow zone, not a fixed
-// height, so "the middle" really is the middle of this particular descent whether it starts at level 1
-// or level 5: mid boundary = SLOW_ZONE + LIFT_DESCENT_MID_FRACTION * (start height - SLOW_ZONE).
-// Band changes are short ramps at LIFT_DESCENT_RAMP_DEG_PER_S2, never stops.
-// SPEEDS WENT UP (50/75 -> 80/95) once L2 stopped being "lower away from a pin we just dropped". The
-// pin is already seated in the stack by the time the arm comes home now, so the trip down is purely
-// "get out of the way" -- for L2's return, for B's stow and for an auton move to DOWN alike. The ramp
-// went 300 -> 800 deg/s^2 to match: at 95% the reference has to fall from ~142 deg/s to the slow
-// band's ~18 inside LIFT_DESCENT_SLOW_ZONE_DEG, which needs about (142-18)/0.8s^-1 ... concretely
-// 800 deg/s^2 gets there in 0.155 s and about 12 deg of travel, comfortably inside the 20 deg zone.
-// At 300 it took 0.41 s and ~33 deg, i.e. it would still have been doing 100 deg/s at the frame.
+//   top      : from wherever the descent started, down to the mid boundary -> LIFT_DESCENT_TOP_PCT
+//   middle   : from the mid boundary down to LIFT_DESCENT_SLOW_ZONE_DEG    -> LIFT_DESCENT_MID_PCT
+//   approach : LIFT_DESCENT_SLOW_ZONE_DEG down to LIFT_FINAL_START_DEG     -> LIFT_DESCENT_SLOW_PCT
+// then FINAL (see "Seating on the hard stop" below) takes over at LIFT_FINAL_START_DEG. The mid
+// boundary is a FRACTION of the travel between the start height and the slow zone, not a fixed height,
+// so "the middle" really is the middle of this particular descent whether it starts at level 1 or
+// level 5: mid boundary = SLOW_ZONE + LIFT_DESCENT_MID_FRACTION * (start height - SLOW_ZONE). Band
+// changes are short ramps at LIFT_DESCENT_RAMP_DEG_PER_S2, never stops.
+//
+// RETUNED 2026-10-02: the arm was crawling the whole bottom 0-20 deg (SLOW_PCT was 12%, ~18 deg/s, from
+// 20 deg all the way to the old 6 deg FINAL handover) and the user asked for it to "stay fast much
+// lower". The fix is to shrink the approach zone AND raise its speed, moving the real slowdown to the
+// last ~14 deg instead of the last ~20, with FINAL now starting at 3 deg (LIFT_FINAL_START_DEG) instead
+// of 6:
+//   LIFT_DESCENT_SLOW_ZONE_DEG   20 -> 14   (approach band starts later -- fast bands run longer)
+//   LIFT_DESCENT_SLOW_PCT        12 -> 30   (~45 deg/s instead of ~18 -- a real cruise, not a crawl)
+//   LIFT_DESCENT_RAMP_DEG_PER_S2 800 -> 1200 (see why below)
+// WHY THE RAMP HAD TO GET FIRMER. Distance to decelerate from v1 to v2 at rate a is (v1^2-v2^2)/(2a).
+// Worst case entering the approach zone is the MID band's ~142 deg/s (95%). At the OLD ramp (800),
+// decelerating 142 -> 45 takes (142^2-45^2)/1600 = 11.3 deg -- almost the entire new 14-to-3 deg zone
+// (11 deg) on its own, leaving no room to then decelerate 45 -> FINAL's 12 deg/s before hitting
+// LIFT_FINAL_START_DEG, i.e. the arm would still be doing ~70+ deg/s AT 3 deg and FINAL would have to
+// brake it hard right at the floor. At the NEW ramp (1200): 142 -> 45 takes (20164-2025)/2400 = 7.56
+// deg, landing around position 14-7.56 = 6.4 deg, which leaves a real ~3.4 deg CRUISE at 45 deg/s down
+// to the 3 deg mark; then 45 -> 12 (FINAL's target) takes only (2025-144)/2400 = 0.78 deg, settling by
+// position ~2.2 deg with ~2.2 deg left to cruise into the stop at a steady 12 deg/s -- comfortable
+// margin, no slam. 1200 deg/s^2 is not an arbitrary new number either: it is the same braking rate
+// already proven safe for position moves (LIFT_DECEL_DEG_PER_S2, used since the original lift tuning).
 //   Falls too fast off a high level: lower LIFT_DESCENT_TOP_PCT / LIFT_DESCENT_MID_PCT.
-//   Still arrives at the bottom with a thump: raise LIFT_DESCENT_SLOW_ZONE_DEG, lower
-//     LIFT_DESCENT_SLOW_PCT, or raise LIFT_DESCENT_RAMP_DEG_PER_S2 so the slowdown happens sooner.
-//   The whole descent takes too long: raise LIFT_DESCENT_MID_PCT, lower LIFT_DESCENT_SLOW_ZONE_DEG.
+//   Still arrives at the approach band going faster than the approach speed (overshoots into FINAL
+//     hot): raise LIFT_DESCENT_RAMP_DEG_PER_S2 further, or raise LIFT_DESCENT_SLOW_ZONE_DEG so there is
+//     more room to decelerate.
+//   The whole descent takes too long: raise LIFT_DESCENT_MID_PCT, lower LIFT_DESCENT_SLOW_ZONE_DEG, or
+//     raise LIFT_DESCENT_SLOW_PCT (the approach cruise itself).
 inline constexpr double LIFT_DESCENT_TOP_PCT = 80.0;         // TUNE: ~120 deg/s
 inline constexpr double LIFT_DESCENT_MID_PCT = 95.0;         // TUNE: ~142 deg/s
-inline constexpr double LIFT_DESCENT_SLOW_PCT = 12.0;        // TUNE: ~18 deg/s, the constant slow final descent
-inline constexpr double LIFT_DESCENT_SLOW_ZONE_DEG = 20.0;   // TUNE: slow zone starts this many deg above 0
+inline constexpr double LIFT_DESCENT_SLOW_PCT = 30.0;        // TUNE: ~45 deg/s, the approach cruise (was 12% / 18 deg/s)
+inline constexpr double LIFT_DESCENT_SLOW_ZONE_DEG = 14.0;   // TUNE: approach zone starts this many deg above 0 (was 20)
 inline constexpr double LIFT_DESCENT_MID_FRACTION = 0.5;     // TUNE: 0.5 = the mid band is the lower half of the fast travel
-inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 800.0;// TUNE: how quickly the reference may change between bands
+inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 1200.0;// TUNE: how quickly the reference may change between bands (was 800)
 
 // --- Seating on the hard stop (phases FINAL, then SEAT) ---------------------
-// The point of the slow final descent is that the arm does not STOP above the frame -- it keeps
-// walking down until it physically cannot, and then stays pressed there so it cannot bounce back up.
+// The point of the final descent is that the arm does not STOP above the frame -- it keeps walking
+// down until it physically cannot, and then stays pressed there so it cannot bounce back up.
 //
-// TWO STEPS, not one -- this used to be a single check ("stopped under LIFT_SEAT_DETECT_DEG" ==
-// "seated") and that was the bug: a cup caught in the intake, or plain six-bar/chain friction, can
-// stall the arm a few degrees above the true hard stop, read as "stopped", and get declared SEATed
-// right there -- after which only LIFT_SEAT_MV (a HOLD voltage, meant to fight bounce, not resistance)
-// was ever applied again, so the arm simply parked short of 0 forever.
-// Below LIFT_SEAT_DETECT_DEG the arm now hands over from the ordinary DESCEND bands into FINAL: a
+// TWO STEPS, not one -- the original version used a single check ("stopped under 6 deg" == "seated")
+// and that was a bug: a cup caught in the intake, or plain six-bar/chain friction, can stall the arm a
+// few degrees above the true hard stop, read as "stopped", and get declared SEATed right there -- after
+// which only LIFT_SEAT_MV (a HOLD voltage, meant to fight bounce, not resistance) was ever applied
+// again, so the arm simply parked short of 0.
+// Below LIFT_FINAL_START_DEG the arm hands over from the ordinary DESCEND bands into FINAL: a
 // dedicated closed-loop push at a constant LIFT_FINAL_DEG_PER_S, with up to LIFT_FINAL_MAX_MV of
 // downward authority -- more force than the SEAT hold, less than DESCEND's full 12000 mV so a real
-// hard-stop contact doesn't slam -- specifically to push through that last bit of resistance. Only
-// once the arm is BOTH within LIFT_SEAT_ZERO_DEG of 0 AND still (under LIFT_SEAT_STILL_DEG_PER_S for
-// LIFT_SEAT_STILL_MS) does it hand over to true SEAT.
-// TIME BUDGET: FINAL gets up to LIFT_SEAT_MAX_MS of real pushing. If it still has not reached
-// LIFT_SEAT_ZERO_DEG by then (a genuine jam, not just friction), it gives up and seats wherever it
-// stopped -- LIFT_SEAT_MV still holds it down so it cannot bounce -- and the brain shows `SEAT(short)`
-// instead of `SEAT`, so the driver can tell it did not actually reach 0.
+// hard-stop contact doesn't slam -- specifically to force through that last bit of resistance.
+// TIME-BASED, ON PURPOSE (2026-10-02 retune): FINAL now always runs for a FIXED LIFT_FINAL_FORCE_MS
+// window -- it does not early-exit the moment it looks settled, it just forces at
+// LIFT_FINAL_DEG_PER_S/LIFT_FINAL_MAX_MV for that whole window ("force its way down for a second or
+// two," the user's words), because a cup/friction stall can look momentarily still without actually
+// being seated. Once the window ends, it hands over to SEAT: plain `SEAT` if the arm is within
+// LIFT_SEAT_ZERO_DEG of 0 at that moment, `SEAT(short)` otherwise (a genuine jam, not just friction --
+// LIFT_SEAT_MV still holds it down either way so it cannot bounce). This replaced an earlier
+// conditional version (seat early once "both close and still", else give up after LIFT_SEAT_MAX_MS) --
+// LIFT_SEAT_MAX_MS, and the still-detection constants LIFT_SEAT_STILL_DEG_PER_S/LIFT_SEAT_STILL_MS it
+// needed, are gone with it; a straight timer needs neither.
 // After a true SEAT the lift holds LIFT_SEAT_MV forever (or until something physically disturbs it,
 // see LIFT_SEAT_UNSEAT_DEG below).
 // HEAT: -1500 mV is 12.5% of full volts -- a stalled V5 motor there still draws well under an amp (the
@@ -278,22 +298,28 @@ inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 800.0;// TUNE: how quickl
 // brain's TEMP line the first time, and LIFT_SEAT_TEMP_LIMIT_C drops the seat to a plain brake-hold if
 // a lift motor ever does get that hot.
 //   Still stops short of 0 / shows SEAT(short) every time: raise LIFT_FINAL_MAX_MV first (5000 -> 6500),
-//     then LIFT_SEAT_MAX_MS. Check the brain's ANGLE line reads HOMED first -- "0" is only true against
-//     a homed zero; an un-homed seed can read short even when the arm is physically all the way down.
+//     then LIFT_FINAL_FORCE_MS. Check the brain's ANGLE line reads HOMED first -- "0" is only true
+//     against a homed zero; an un-homed seed can read short even when the arm is physically all the way
+//     down.
 //   Thumps into the frame during FINAL: lower LIFT_FINAL_DEG_PER_S.
 //   Bounces back up off the stop once truly seated: raise the magnitude of LIFT_SEAT_MV further (-1800).
-//   Motors warm up while parked at the bottom: lower LIFT_SEAT_MV's magnitude (e.g. -1000).
-//   Declares true SEAT while still visibly short: lower LIFT_SEAT_ZERO_DEG, lower
-//     LIFT_SEAT_STILL_DEG_PER_S, or raise LIFT_SEAT_STILL_MS.
+//   Motors warm up while parked at the bottom: lower LIFT_SEAT_MV's magnitude (e.g. -1000), or
+//     LIFT_FINAL_FORCE_MS if the motors are warming during FINAL itself (unlikely at 1.5 s).
+//   Declares true SEAT while still visibly short: lower LIFT_SEAT_ZERO_DEG.
 inline constexpr float LIFT_SEAT_MV = -1500.0f;              // TUNE: constant downward seating voltage
-inline constexpr double LIFT_SEAT_DETECT_DEG = 6.0;          // TUNE: this close to 0, hand DESCEND over to FINAL
+// Where DESCEND hands over to FINAL. Also doubles as the "close enough to re-check" threshold for
+// un-seating (see LIFT_SEAT_UNSEAT_DEG below) -- was a separate constant (LIFT_SEAT_DETECT_DEG, 6 deg)
+// before the 2026-10-02 retune moved the whole handover down to 3 so the fast bands run longer.
+inline constexpr double LIFT_FINAL_START_DEG = 3.0;          // TUNE: hand DESCEND over to FINAL this close to 0
 inline constexpr double LIFT_FINAL_DEG_PER_S = 12.0;         // TUNE: constant creep speed for the last stretch
 inline constexpr float LIFT_FINAL_MAX_MV = 5000.0f;          // TUNE: magnitude, downward authority during FINAL
-inline constexpr double LIFT_SEAT_ZERO_DEG = 1.0;            // TUNE: only this close to 0 may FINAL call it seated
-inline constexpr int LIFT_SEAT_MAX_MS = 2000;                // TUNE: FINAL's time budget before giving up in place
-inline constexpr double LIFT_SEAT_STILL_DEG_PER_S = 4.0;     // TUNE
-inline constexpr int LIFT_SEAT_STILL_MS = 150;               // TUNE
-// If something knocks a seated arm this far back up above LIFT_SEAT_DETECT_DEG, the descent restarts
+// FINAL forces at the above speed/authority for exactly this long, then hands to SEAT regardless of
+// where it ended up (see LIFT_SEAT_ZERO_DEG for how that is judged). ~1.2 deg of this 1.5 s is normally
+// spent just closing the remaining 3 deg at LIFT_FINAL_DEG_PER_S; the rest is pure forcing time against
+// resistance.
+inline constexpr int LIFT_FINAL_FORCE_MS = 1500;             // TUNE: "a second or two" of forcing, per the user
+inline constexpr double LIFT_SEAT_ZERO_DEG = 1.0;            // TUNE: within this of 0 when FINAL ends = true SEAT
+// If something knocks a seated arm this far back up above LIFT_FINAL_START_DEG, the descent restarts
 // (DESCEND, then FINAL again) and walks it back down rather than leaving it hanging.
 inline constexpr double LIFT_SEAT_UNSEAT_DEG = 4.0;          // TUNE
 inline constexpr double LIFT_SEAT_TEMP_LIMIT_C = 50.0;       // safety net, not a tuning knob
@@ -356,12 +382,12 @@ inline constexpr double LIFT_VEL_FILTER = 0.8;
 //             voltage over to the next move, so no move ever starts by guessing it.
 //
 // A DESCENT (a non-precise goal at or below LIFT_BOTTOM_GOAL_DEG: L2, B, auton DOWN, R2 in clamped
-// mode) is DESCEND -> FINAL -> SEAT: the three speed bands above, then (below LIFT_SEAT_DETECT_DEG) a
+// mode) is DESCEND -> FINAL -> SEAT: the three speed bands above, then (below LIFT_FINAL_START_DEG) a
 // dedicated closed-loop push at LIFT_FINAL_DEG_PER_S with up to LIFT_FINAL_MAX_MV of authority -- more
-// force than the seat hold, enough to push through a cup or friction a few degrees short of 0 -- for up
-// to LIFT_SEAT_MAX_MS, and only then a constant LIFT_SEAT_MV pressed into the hard stop. It does not
-// stop above the frame and it does not bounce; see "Seating on the hard stop" below for why the old
-// single-step version could park short.
+// force than the seat hold, enough to push through a cup or friction a few degrees short of 0 -- for a
+// fixed LIFT_FINAL_FORCE_MS, and only then a constant LIFT_SEAT_MV pressed into the hard stop. It does
+// not stop above the frame and it does not bounce; see "Seating on the hard stop" below for why the
+// original single-step version could park short.
 //
 // THE MANUAL INPUT (D-pad Up/Down, and R1 in clamped mode) is plain voltage straight into the same
 // loop, ahead of everything else; it cancels any target and any homing instantly, and letting go
@@ -386,7 +412,7 @@ inline constexpr double LIFT_VEL_FILTER = 0.8;
 // moved less than STALL_DEG in STALL_MS = it can't get there (preset above the real top, or jammed).
 // The lift gives up on that target, holds where it is and the brain shows BLOCKED. It is NOT checked
 // once the final approach has tapered the reference below 5 deg/s (where slow progress is the plan,
-// not a jam), nor in HOLD, nor below LIFT_SEAT_DETECT_DEG during a descent -- an arm that has stopped
+// not a jam), nor in HOLD, nor below LIFT_FINAL_START_DEG during a descent -- an arm that has stopped
 // down there is seated, which is the goal, not a fault. It cannot false-trip: 5 deg/s covers 0.5 deg
 // in 100 ms, a fifth of the window.
 //   Shows BLOCKED on a normal move: first check for a real jam or a preset above the top. Then raise
@@ -411,8 +437,9 @@ inline constexpr double LIFT_FAULT_DEG = 8.0;                // TUNE
 // VS Code -> PROS -> "Brain Terminal" (or `pros terminal`), press a lift button, paste the lines back.
 // Columns: `LIFT <ms> <phase> <pos*10> <goal*10> <vel deg/s> <out mV>`; phase is D=DRIVE, B=BRAKE,
 // A=APPROACH (the final crawl), H=HOLD, V=DESCEND (a banded trip to the bottom), R=RETURN (L2's fast
-// run home, same bands as V), Z=FINAL (the push-to-0 step below LIFT_SEAT_DETECT_DEG), S=SEAT (pressed
-// onto the hard stop, or holding short -- see LIFT_SEAT_MAX_MS), M=manual (D-pad, or R1 in clamped
+// run home, same bands as V), Z=FINAL (the forced push-to-0 step below LIFT_FINAL_START_DEG, always
+// LIFT_FINAL_FORCE_MS long), S=SEAT (pressed onto the hard stop, or holding short -- see
+// LIFT_SEAT_ZERO_DEG), M=manual (D-pad, or R1 in clamped
 // mode), h=homing, F=fault, I=idle. Integers only (no float formatting on the
 // control task), sampled every LIFT_TRACE_EVERY_TICKS, written from a separate low-priority task that
 // drains a ring buffer -- the 10 ms control loop never calls printf. Keeps going LIFT_TRACE_TAIL_MS
@@ -515,12 +542,8 @@ inline constexpr int L1_AUTO_INTAKE_MAX_MS = 1500;           // TUNE
 // AUTO-OUTTAKE ON L2 SCORE. While an L2 score descent is running (Scoring::isScoreDescent(): RELEASING
 // with scoreToHome_ set -- the sensing scorer, not L2's at-the-bottom clamp toggle) and the arm is
 // below this height, run the rollers OUT at L2_OUTTAKE_PCT so anything still in the intake ejects
-// instead of riding the lift down. Covers the whole trip through PRESS / REL / UNSTK / RETURN / FINAL,
-// not just the final run home -- whichever phase the arm happens to be under this height in -- and
-// keeps running through the WHOLE slow final descent (DESCEND's slow band, then FINAL pushing for true
-// 0, see the lift's "Seating on the hard stop" above) rather than cutting off at LIFT_BOTTOM_GOAL_DEG:
-// a cup sitting in the intake can be exactly what is blocking the arm from reaching the bottom, so the
-// rollers need to still be clearing it while FINAL is forcing the last few degrees.
+// instead of riding the lift down. Covers the whole trip through PRESS / REL / UNSTK / RETURN,
+// whichever phase the arm happens to be under this height in.
 //   NOTE: stack level 1 (31.0 deg) is already below this, so scoring at level 1 outtakes from the
 //   start of the press, not partway down. That is this constant as specified, not a bug.
 //   Pin/cup gets knocked loose too early: lower it. Rollers start too late to clear the handoff
@@ -529,15 +552,16 @@ inline constexpr double L2_OUTTAKE_BELOW_DEG = 40.0;         // TUNE: arm degree
 // % of full intake power (config::INTAKE_MV) the rollers run OUT at during the above. Lower than
 // R2's full-power outtake on purpose -- this runs unattended during a score, not under driver thumb.
 inline constexpr double L2_OUTTAKE_PCT = 60.0;               // TUNE: % of INTAKE_MV
-// Stop condition is now "actually SEATed" (lift.isSeated(), true SEAT or SEAT(short) alike), not a
-// position threshold -- see main.cpp -- plus this much extra afterward, so a cup that only clears once
-// the arm stops pressing on it still gets ejected rather than left riding along at the very end.
-inline constexpr int L2_OUTTAKE_AFTER_SEAT_MS = 500;         // TUNE
-// Safety net: the rollers stop after this long no matter what, so a score that stalls while under
-// L2_OUTTAKE_BELOW_DEG (BLOCKED, FAULT, stuck claw) can't leave them spinning for the rest of the match.
-// Sized for the longer worst case now: DESCEND's slow band + FINAL's full LIFT_SEAT_MAX_MS budget +
-// L2_OUTTAKE_AFTER_SEAT_MS, with margin.
-inline constexpr int L2_OUTTAKE_MAX_MS = 4000;               // TUNE
+// Stop condition (2026-10-02 retune): as soon as the lift reaches LIFT_FINAL_START_DEG -- tied
+// directly to it, not a separate guess, because that is also where the lift's own FINAL phase takes
+// over forcing the arm the rest of the way down at real authority (see "Seating on the hard stop" in
+// the LIFT TUNING block above). The roller does not need to keep running while FINAL does that forcing;
+// if a cup really was the obstruction it has already been cleared by then. main.cpp uses this constant
+// directly (see L2_OUTTAKE_STOP_DEG below) rather than position-matching LIFT_FINAL_START_DEG by eye.
+inline constexpr double L2_OUTTAKE_STOP_DEG = LIFT_FINAL_START_DEG;
+// Safety net: the rollers stop after this long no matter what, so a score that stalls above
+// L2_OUTTAKE_STOP_DEG (BLOCKED, FAULT, stuck claw) can't leave them spinning for the rest of the match.
+inline constexpr int L2_OUTTAKE_MAX_MS = 3000;               // TUNE
 
 // ---------------------------------------------------------------------------
 // Pivot + claw timing. See include/subsystems/scoring.hpp.
@@ -627,33 +651,54 @@ inline constexpr float L2_PRESS_MAX_MV = 5000.0f;            // TUNE: magnitude,
 // descent settling at 50 deg/s never armed the relative trigger (50 < 76.5) and never tripped the
 // absolute one (50 > 8); the landing then slowed it to 15, still over 8. Nothing could ever fire.
 // Every signal below is now measured against WHAT THE ARM WAS ACTUALLY DOING a moment ago -- a learned
-// baseline -- not against what it was told to do. Three signals, any one of which fires:
+// baseline -- not against what it was told to do. Three signals:
 //   LAG     a leaky one-sided integral of the speed shortfall against the baseline, in arm degrees:
 //           "how far behind where it would have been the arm now is". The POSITION-vs-EXPECTED signal,
 //           and the sensitive one -- it catches a landing that only slows the arm by a quarter.
 //   EFFORT  the loop pushing DOWN harder than the free descent needed. The MOTOR-WORK signal: it
 //           catches a pin being forced into the tower even while it still creeps.
-//   SPEED   measured below a fraction of the baseline, or an absolute near-stop. The backstop; the
-//           absolute one needs no baseline, so it still catches a pin already resting on the stack.
-// Which one fired is on the brain (REL(lag) / REL(eff) / REL(spd) / REL(stall)) and in the trace's
-// `trg` column, so the next trace says exactly which signal moved.
+//   SPEED   measured below a fraction of the baseline. The absolute near-stop (STALL) is a separate,
+//           unconditional backstop that needs no baseline at all, so it still catches a pin already
+//           resting on the stack by itself.
+// AGREEMENT, added 2026-10-02: a lone LAG/EFFORT/SPEED signal is no longer enough -- at least TWO of
+// the three must be over threshold on the SAME tick (STALL is exempt, see contact_detector.hpp for
+// why). This is the fix for the robot false-firing in plain free descent: this six-bar's gravity torque
+// swings up and back past vertical, which can move a single signal fast enough to look like a landing
+// with nothing under the arm at all. On top of AGREEMENT, PRESS also has a GUARANTEED release height
+// (L2_AUTO_RELEASE_DEG, below) -- so a real but gentle landing the detector is slow to confirm is no
+// longer a lost score, just a later one.
+// Which one fired is on the brain (REL(lag) / REL(eff) / REL(spd) / REL(stall), or REL(32) if nothing
+// was ever detected and L2_AUTO_RELEASE_DEG forced it) and in the trace's `trg` column, so the next
+// trace says exactly which signal moved -- or that none did.
 //
-//   Releases early, with the pin still in the air: raise L2_CONTACT_MS (20 -> 40), lower
-//     L2_CONTACT_SPEED_FRAC (0.70 -> 0.60), raise L2_CONTACT_LAG_DEG (1.5 -> 2.5). Read the trace's
-//     `trg` column first -- fix the signal that actually fired, not all three.
-//   Presses on after the pin has landed: lower L2_CONTACT_SPEED_FRAC is NOT the fix (that makes it
-//     later); lower L2_CONTACT_LAG_DEG (-> 1.0) and L2_CONTACT_EFFORT_MV (-> 1400), which are the
-//     early-warning signals, and lower L2_CONTACT_MS.
-//   Never detects contact: lower L2_CONTACT_LAG_DEG and L2_CONTACT_EFFORT_MV, and raise
-//     L2_CONTACT_SPEED_FRAC toward 0.8. Check the trace: if `lag` and `eff` both stay near 0 through
-//     the landing, the arm is not actually slowing OR working harder -- the claw is sliding along the
-//     pin, which is a mechanical problem, not a threshold one.
-inline constexpr double L2_CONTACT_LAG_DEG = 1.5;            // TUNE: arm degrees of accumulated shortfall
+//   Releases early, with the pin still in the air: raise L2_CONTACT_MS (30 -> 50), lower
+//     L2_CONTACT_SPEED_FRAC (0.55 -> 0.45), raise L2_CONTACT_LAG_DEG (2.2 -> 3.0). Read the trace's
+//     `trg` column first -- fix the signal that actually fired, not all three. Remember AGREEMENT (see
+//     contact_detector.hpp) means this is now rare: a lone signal can no longer fire by itself.
+//   Presses on after the pin has landed / never releases until L2_AUTO_RELEASE_DEG forces it anyway:
+//     lower L2_CONTACT_LAG_DEG and L2_CONTACT_EFFORT_MV together (raising just one won't help once
+//     agreement needs two), and lower L2_CONTACT_MS. Check the trace: if only ONE of `lag`/`eff`/`v-b`
+//     ever crosses its threshold, that is AGREEMENT doing its job on a real landing too, which means
+//     the thresholds are too tight for this stack's actual landing signature -- loosen the one that
+//     stays furthest from firing, not all three.
+//   False-fires in plain free descent with nothing under the arm: this is the failure mode AGREEMENT
+//     and the 2026-10-02 retune exist to fix (six-bar gravity torque swings up and back past vertical,
+//     moving speed/effort faster than the 200 ms baselines adapt). If it still false-fires, raise
+//     L2_CONTACT_MS further, or lower L2_CONTACT_FREEZE_FRAC (0.82 -> 0.75) so the baseline keeps
+//     tracking a genuine swing longer before it locks and starts measuring a shortfall against it.
+//     AGREEMENT itself (contact_detector.hpp) is doing most of the real work here, not these three
+//     thresholds alone -- they were only moved moderately (not all the way to the first-draft numbers
+//     this comment used to suggest) because the host test's own creep-landing case stopped firing
+//     altogether past a certain point: AGREEMENT plus thresholds that are TOO strict together can
+//     reject a genuinely gentle landing as readily as a false one. L2_AUTO_RELEASE_DEG is the backstop
+//     for whatever this still misses.
+inline constexpr double L2_CONTACT_LAG_DEG = 2.2;            // TUNE: arm degrees of accumulated shortfall (was 1.5)
 inline constexpr double L2_CONTACT_LAG_LEAK_MS = 200.0;      // TUNE: makes LAG measure a change, not a drift
-inline constexpr double L2_CONTACT_EFFORT_MV = 2000.0;       // TUNE: extra downward push over the baseline
-inline constexpr double L2_CONTACT_SPEED_FRAC = 0.70;        // TUNE: measured / baseline that counts as contact
-inline constexpr double L2_CONTACT_STALL_DEG_PER_S = 6.0;    // TUNE: absolute near-stop, needs no baseline
-inline constexpr int L2_CONTACT_MS = 20;                     // TUNE: confirm window -- short, so the release is fast
+inline constexpr double L2_CONTACT_EFFORT_MV = 1800.0;       // TUNE: extra downward push over the baseline (was 2000 --
+                                                              // LOWERED, not raised: see the AGREEMENT note above)
+inline constexpr double L2_CONTACT_SPEED_FRAC = 0.55;        // TUNE: measured / baseline that counts as contact (was 0.70)
+inline constexpr double L2_CONTACT_STALL_DEG_PER_S = 6.0;    // TUNE: absolute near-stop, needs no baseline, no AGREEMENT
+inline constexpr int L2_CONTACT_MS = 30;                     // TUNE: confirm window (was 20 -- see AGREEMENT below)
 // How long the press gets to reach a steady descent speed before the baseline is snapshotted and the
 // baseline-relative signals come alive. The absolute near-stop is live before this (after the dead
 // time below), so a pin that is already resting is still caught immediately.
@@ -665,11 +710,16 @@ inline constexpr int L2_CONTACT_SETTLE_MS = 200;             // TUNE
 // host test has a scenario for each half of it.
 inline constexpr double L2_CONTACT_BASELINE_TAU_MS = 200.0;  // TUNE
 inline constexpr double L2_CONTACT_OUTPUT_TAU_MS = 50.0;     // TUNE: low-pass on the mV, for EFFORT
-inline constexpr double L2_CONTACT_FREEZE_FRAC = 0.90;       // TUNE: loose gate -- stops LEARNING, never fires
-// Dead time at the very start of the press before any trigger may fire. Short on purpose: the
-// baseline's settle time is what really protects the spin-up, and a long dead time would miss a pin
-// that lands immediately.
-inline constexpr int L2_CONTACT_IGNORE_MS = 60;              // TUNE
+// Lowered 0.90 -> 0.82 (2026-10-02): freeze LESS aggressively, so the baseline keeps tracking a real
+// but transient gravity-torque swing a little longer before locking onto a stale value and reading the
+// swing's continuation as an ever-growing shortfall. See AGREEMENT in contact_detector.hpp -- this and
+// the threshold changes above are parts of the same false-fire fix, and AGREEMENT is the one doing
+// most of the work; this just gives the baseline a little more rope first.
+inline constexpr double L2_CONTACT_FREEZE_FRAC = 0.82;       // TUNE: loose gate -- stops LEARNING, never fires (was 0.90)
+// Dead time at the very start of the press before any trigger may fire. Longer than before (60 -> 80)
+// now that AGREEMENT does most of the false-fire rejection -- this just gives the baseline's own
+// settle time (above) a little more cushion against a rough handover from HOLD.
+inline constexpr int L2_CONTACT_IGNORE_MS = 80;              // TUNE (was 60)
 // After the release, the arm has to be clearly moving again (faster than L2_CONTACT_STALL_DEG_PER_S)
 // for this long to count as "the claw came off the pin". Then it goes home. The RELEASE phase uses
 // this plain speed test rather than the full detector: with the jaws open the arm either moves or it
@@ -679,7 +729,7 @@ inline constexpr int L2_FREE_MS = 100;                       // TUNE
 inline constexpr int L2_STUCK_MS = 250;                      // TUNE
 // If the release is never acknowledged (Scoring not running, e.g. an auton that never calls
 // Scoring::update()), carry on anyway after this long rather than pressing down forever. Worst case
-// the arm goes home with the pin still clamped, which is the same safe outcome as NO CONTACT.
+// the arm goes home with the pin still clamped either way.
 inline constexpr int L2_RELEASE_ACK_MS = 400;
 // STUCK RECOVERY. Still stalled after the jaws opened = the claw is hooked on the pin. Lift UP this
 // far (claw open) and try pressing down again, up to L2_MAX_UNSTICK_TRIES times. After that it stops,
@@ -688,11 +738,29 @@ inline constexpr double L2_UNSTICK_UP_DEG = 20.0;            // TUNE: arm degree
 inline constexpr double L2_UNSTICK_SPEED_PCT = 40.0;         // TUNE: ~60 deg/s, it is only a short hop
 inline constexpr int L2_UNSTICK_TIMEOUT_MS = 1200;           // safety net: don't grind upward either
 inline constexpr int L2_MAX_UNSTICK_TRIES = 2;               // TUNE
-// If the press reaches this height without ever detecting contact there was no stack under the arm.
-// Nothing is released -- the arm slows into the bottom and SEATs with the pin still clamped, and the
-// brain shows NO CONTACT. (L2 again at the bottom then releases it; that is the clamp toggle.)
-// Lower than any plausible landing height for stack level 1 (31.0) and above the seat zone.
-inline constexpr double L2_NO_CONTACT_DEG = 12.0;            // TUNE
+// GUARANTEED RELEASE HEIGHT (2026-10-02, replaces L2_NO_CONTACT_DEG and the old "NO CONTACT: keep the
+// pin, seat with it still clamped" behaviour). The detector is a real sensor reading a real stack, but
+// it is not the only thing allowed to decide the pin has to come off any more: the moment PRESS crosses
+// down through this height WITHOUT a detection, it releases anyway, exactly as if the detector had
+// fired (claw opens, keep pushing so the jaws slide off, same freed/UNSTK handling, same fast run
+// home). If the detector fires ABOVE this height first, that still wins and releases immediately -- this
+// is strictly a floor under it, never a delay. Below any plausible landing height would defeat the
+// point (it has to be ABOVE the lowest real stack), and level 1 (31.0) is barely above it on purpose:
+// L2 pressed with the arm already at or below this height releases on the very first PRESS tick, i.e.
+// scoring level 1 no longer has a press-and-sense feel at all, it just lets go immediately. Flagged for
+// the user to confirm.
+//   Pin dropped from a bit too high / too early on a real stack: raise it only a little -- raising it a
+//     lot just turns more of the press into a guaranteed-release, no-sensing region.
+//   Height rule fires before a real landing that the detector should have caught: that is a tuning
+//     problem in the CONTACT_* block above, not this constant -- the detector is supposed to win first.
+inline constexpr double L2_AUTO_RELEASE_DEG = 32.0;          // TUNE: arm degrees
+// Safety floor for the RELEASE phase only (separate from the auto-release height above, and much
+// lower): if the jaws still haven't resolved free-or-stuck by the time the arm has pressed down to
+// this height -- a slow claw-open, a borderline UNSTICK retry -- stop treating this as a press and hand
+// over to the fast run-home descent right there, instead of grinding further down with
+// L2_PRESS_MAX_MV's authority. Below any plausible landing height and below L2_AUTO_RELEASE_DEG, so it
+// can only ever matter once a release (by either path) has already happened.
+inline constexpr double L2_RELEASE_FLOOR_DEG = 10.0;         // TUNE: arm degrees
 // The run home once the claw is free: % of free speed for the top and middle bands of the ordinary
 // descent (the slow final zone and the SEAT are unchanged, so it still cannot slam or bounce).
 //   "Don't hesitate to be going down faster than we currently are going when we are done scoring."

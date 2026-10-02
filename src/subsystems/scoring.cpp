@@ -289,8 +289,8 @@ void Scoring::update() {
                     enter(State::IDLE);
                     break;
                 }
-                // Done once the arm is actually seated on its hard stop at the bottom. NO CONTACT ends
-                // here too -- seated, with the pin still clamped, nothing dropped.
+                // Done once the arm is actually seated on its hard stop at the bottom -- by now the pin
+                // has always been released, either detected or forced by Lift's L2_AUTO_RELEASE_DEG.
                 if (liftArrived(preset::DOWN)) {
                     scoreToHome_ = false;
                     enter(State::IDLE);

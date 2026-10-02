@@ -18,7 +18,8 @@
  * and the arm presses on until it reaches the bottom and reports NO CONTACT.
  *
  * So EVERY signal here is measured against what the arm was ACTUALLY DOING a moment ago -- a learned
- * baseline -- not against what it was told to do. Three signals, any one of which fires:
+ * baseline -- not against what it was told to do. Three signals (see AGREEMENT further down for how
+ * they combine -- it is no longer "any one of which fires"):
  *
  *   LAG     a LEAKY one-sided integral of the speed SHORTFALL against the baseline, in degrees: how
  *           far behind where it would have been the arm now is. This is the "position vs expected
@@ -47,12 +48,29 @@
  * exactly the thing they are supposed to catch. The host test caught this too: a landing that only
  * slowed the arm to 70% went undetected because the baseline had quietly moved to meet it.
  * So there are two levels:
- *   freezeFrac  (loose, 0.90) -- the moment the arm is even slightly below baseline, STOP LEARNING.
+ *   freezeFrac  (loose, 0.80) -- the moment the arm drops meaningfully below baseline, STOP LEARNING.
  *               Cheap, and wrong only in the harmless direction: a brief dip just pauses adaptation.
- *   speedFrac   (strict, 0.70) -- and the LAG / EFFORT thresholds. These FIRE.
+ *   speedFrac   (strict, 0.50) -- and the LAG / EFFORT thresholds. These, PLUS AGREEMENT below, FIRE.
  * A slow gravity sag never reaches freezeFrac (the baseline trails a 12 deg/s-per-second sag by only
  * a few percent), so adaptation continues; a landing crosses it immediately, adaptation stops, and the
  * shortfall then accumulates against a baseline that is holding still.
+ *
+ * AGREEMENT, added 2026-10-02 after the robot false-fired in plain free descent (no stack under the
+ * arm at all). ROOT CAUSE: this six-bar's gravity torque does not change gently with angle -- the arm
+ * swings up and back PAST VERTICAL, so over a press of only a few tens of degrees the torque can swing
+ * from resisting to assisting (or back), and with it the speed and motor effort the velocity loop needs
+ * to hold its reference. That swing can be faster than the baselines' own adaptation (baselineTauMs,
+ * 200 ms): the arm slows for a few hundred ms exactly the way LAG and EFFORT are built to notice, then
+ * speeds back up as the torque swings the other way -- a real but ENTIRELY TRANSIENT event that used to
+ * cross LAG_DEG/EFFORT_MV/SPEED_FRAC on its own and fire, with nothing ever touching the arm.
+ * A real landing is not transient: speed and effort move together AND stay moved, because the pin is
+ * genuinely in the way. So now a single signal is no longer enough (except STALL, the absolute
+ * near-stop, which needs no baseline and is what a pin already resting on the stack trips): LAG, EFFORT
+ * and SPEED must have AT LEAST TWO of the three over their threshold on the SAME tick before a
+ * candidate is even opened. A gravity swing that only ever moves one signal past its (now also higher)
+ * threshold never opens a candidate at all; a real landing moves the position-shortfall, the motor
+ * effort and the speed ratio together, so two-of-three is typically true almost immediately. See the
+ * host test's gravity-swing scenarios for exactly this.
  */
 
 #include <algorithm>
@@ -147,9 +165,19 @@ class ContactDetector {
             effort_ = baseMv_ - outFilt_;
             ratio_ = baseSpeed_ > 1.0 ? measured / baseSpeed_ : 1.0;
 
-            if (which == Trigger::NONE && lag_ >= cfg.lagDeg) which = Trigger::LAG;
-            if (which == Trigger::NONE && effort_ >= cfg.effortMv) which = Trigger::EFFORT;
-            if (which == Trigger::NONE && ratio_ < cfg.speedFrac) which = Trigger::SPEED;
+            // AGREEMENT (see the class comment): LAG/EFFORT/SPEED only count once at least two of the
+            // three are over their own threshold on this SAME tick -- a lone signal, however far over,
+            // is not enough any more. A real landing moves all three together; a transient gravity
+            // swing on this six-bar has repeatedly shown it can move just one.
+            const bool lagOver = lag_ >= cfg.lagDeg;
+            const bool effOver = effort_ >= cfg.effortMv;
+            const bool spdOver = ratio_ < cfg.speedFrac;
+            const int agree = (lagOver ? 1 : 0) + (effOver ? 1 : 0) + (spdOver ? 1 : 0);
+            if (which == Trigger::NONE && agree >= 2) {
+                // Report whichever single signal actually tripped, same priority as before, purely so
+                // the brain/trace still says something specific -- the GATE is agree >= 2, not this.
+                which = lagOver ? Trigger::LAG : (effOver ? Trigger::EFFORT : Trigger::SPEED);
+            }
 
             // Learn the baselines only while nothing looks even slightly wrong -- the loose freeze
             // gate, well below any firing threshold. See "TWO-LEVEL GATE" in the class comment: this

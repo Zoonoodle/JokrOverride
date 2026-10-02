@@ -75,9 +75,10 @@ void Lift::zero() {
     descendHeld_ = descendOwned_ = descendRequest_ = false;
     seatHot_ = false;
     score_ = returnFast_ = scoreStuck_ = noContact_ = false;
-    clawReleaseWanted_ = clawReleased_ = contactArmed_ = false;
+    clawReleaseWanted_ = clawReleased_ = false;
+    contact_.reset();
+    contactTrigger_ = ContactDetector::Trigger::NONE;
     unstickTries_ = 0;
-    lastRatio_ = 0.0;
     faulted_ = false;
     blocked_ = false;
     stallStart_ = 0;
@@ -377,7 +378,16 @@ const char* Lift::phaseName() const {
         case Phase::DESCEND: return returnFast_ ? "RETURN" : "DESCEND";
         case Phase::SEAT: return seatHot_ ? "SEAT(hot)" : "SEAT";
         case Phase::PRESS: return "PRESS";
-        case Phase::RELEASE: return "REL";
+        case Phase::RELEASE:
+            // Which signal fired is the first thing worth knowing when tuning, so it goes on the line.
+            switch (contactTrigger_) {
+                case ContactDetector::Trigger::STALL: return "REL(stall)";
+                case ContactDetector::Trigger::LAG: return "REL(lag)";
+                case ContactDetector::Trigger::EFFORT: return "REL(eff)";
+                case ContactDetector::Trigger::SPEED: return "REL(spd)";
+                case ContactDetector::Trigger::NONE: break;
+            }
+            return "REL";
         case Phase::UNSTICK: return "UNSTK";
     }
     return "";
@@ -581,11 +591,11 @@ void Lift::startScore() {
     noContact_ = false;
     clawReleaseWanted_ = false;
     clawReleased_ = false;
-    contactArmed_ = false;
-    contactSince_ = 0;
+    contact_.reset();
+    contactTrigger_ = ContactDetector::Trigger::NONE;
     freeSince_ = 0;
+    stuckSince_ = 0;
     unstickTries_ = 0;
-    lastRatio_ = 0.0;
     pressRef_ = std::max(-velocity_, 0.0);  // ramp on from whatever the arm is already doing
     velI_ = gravityMv_;
     phase_ = Phase::PRESS;
@@ -620,8 +630,11 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
     const double maxStep = config::LIFT_DESCENT_RAMP_DEG_PER_S2 * dt;
     pressRef_ += std::clamp(commanded - pressRef_, -maxStep, maxStep);
     lastVRef_ = unsticking ? pressRef_ : -pressRef_;  // up while unsticking, down otherwise
-    lastRatio_ = commanded > 1.0 ? std::fabs(velocity_) / commanded : 0.0;
-    const int auxPct = static_cast<int>(lastRatio_ * 100.0);
+
+    // The arm's DESCENT speed, unsigned: an arm moving up is not descending slowly, it is stopped or
+    // worse, so it floors at 0.
+    const double descendSpeed = std::max(-velocity_, 0.0);
+    TraceAux aux{};
 
     // Runaway guard, for the pressing phases only: we are commanding DOWN, so the arm must not climb
     // away from where the sequence started. (UNSTICK climbs on purpose, so it is exempt, and it moves
@@ -632,7 +645,7 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         clawReleaseWanted_ = false;
         motors_.brake();
         lastOutput_ = 0.0;
-        trace(now, 'F', position, 0.0, true, auxPct);
+        trace(now, 'F', position, 0.0, true);
         return;
     }
 
@@ -642,47 +655,43 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         const bool timedOut = now - phaseStart_ >= static_cast<std::uint32_t>(config::L2_UNSTICK_TIMEOUT_MS);
         if (there || timedOut) {
             // Back to pressing down and re-judging. The claw is open, so this is a RELEASE-phase
-            // press: a recovery of speed means free, a fresh stall means try again or give up.
+            // press: the arm getting moving again means free, staying stopped means try again or give up.
             phase_ = Phase::RELEASE;
             phaseStart_ = now;
             pressRef_ = 0.0;
-            contactArmed_ = false;
-            contactSince_ = 0;
             freeSince_ = 0;
+            stuckSince_ = 0;
             descentStart_ = position;
             clawReleasedAt_ = now;  // restart the "jaws have had time to open" clock from here
             velI_ = gravityMv_;
             lastVRef_ = 0.0;  // this one tick commands a standstill; the ramp takes over next tick
         } else {
             const double mv = runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, config::LIFT_VEL_MAX_MV);
-            trace(now, 'U', position, mv, true, auxPct);
+            trace(now, 'U', position, mv, true);
             return;
         }
     }
 
-    // --- Contact / freedom detector, shared by PRESS and RELEASE. ------------------------------
-    // Two triggers, both commanded-vs-measured, never position alone:
-    //   relative: below L2_CONTACT_SPEED_FRAC of the reference, but only once the arm has actually
-    //             reached L2_CONTACT_ARM_FRAC of it at least once -- so a spin-up can never count,
-    //             however far the arm has to travel before it meets the stack.
-    //   absolute: essentially stopped while being told to do ~90 deg/s. The backstop for a pin that
-    //             lands before the arm ever got up to speed, where the relative trigger never arms.
-    if (!contactArmed_ && std::fabs(velocity_) >= config::L2_CONTACT_ARM_FRAC * commanded) contactArmed_ = true;
-    const bool past = now - phaseStart_ >= static_cast<std::uint32_t>(config::L2_CONTACT_IGNORE_MS);
-    const bool slow = (contactArmed_ && std::fabs(velocity_) < config::L2_CONTACT_SPEED_FRAC * pressRef_) ||
-                      std::fabs(velocity_) < config::L2_CONTACT_STALL_DEG_PER_S;
-    if (slow) {
-        if (contactSince_ == 0) contactSince_ = now;
-        freeSince_ = 0;
-    } else {
-        contactSince_ = 0;
-        if (freeSince_ == 0) freeSince_ = now;
-    }
-    const bool heldSlow = past && contactSince_ != 0 &&
-                          now - contactSince_ >= static_cast<std::uint32_t>(config::L2_CONTACT_MS);
-    const bool heldFree = freeSince_ != 0 && now - freeSince_ >= static_cast<std::uint32_t>(config::L2_FREE_MS);
-
     if (phase_ == Phase::PRESS) {
+        // --- Has the pin landed? subsystems::ContactDetector decides (pure, host-tested -- see its
+        // header and test/contact_detector_test.cpp). It is fed the PREVIOUS tick's output, which is
+        // what lastOutput_ still holds here: the effort signal compares the voltage the loop actually
+        // sent while descending against the voltage a free descent needed, and this tick's has not
+        // been computed yet.
+        const ContactDetector::Config cfg{
+            config::L2_CONTACT_SETTLE_MS,        config::L2_CONTACT_IGNORE_MS,
+            config::L2_CONTACT_MS,               config::L2_CONTACT_BASELINE_TAU_MS,
+            config::L2_CONTACT_OUTPUT_TAU_MS,    config::L2_CONTACT_LAG_DEG,
+            config::L2_CONTACT_LAG_LEAK_MS,      config::L2_CONTACT_EFFORT_MV,
+            config::L2_CONTACT_SPEED_FRAC,       config::L2_CONTACT_FREEZE_FRAC,
+            config::L2_CONTACT_STALL_DEG_PER_S,
+        };
+        const ContactDetector::Trigger fired = contact_.step(dt, descendSpeed, lastOutput_, cfg);
+        aux.ratioPct = static_cast<int>(contact_.speedRatio() * 100.0);
+        aux.lag10 = static_cast<int>(contact_.lagDeg() * 10.0);
+        aux.effortMv = static_cast<int>(contact_.effortMv());
+        aux.trigger = ContactDetector::triggerCode(contact_.firedTrigger());
+
         if (position <= config::L2_NO_CONTACT_DEG) {
             // Pressed all the way down and never met a stack: there was nothing to score onto. Do NOT
             // release -- that would drop the pin on the floor. Slow into the bottom and seat with it
@@ -691,17 +700,26 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             endScore(now, position, config::LIFT_DESCENT_TOP_PCT, config::LIFT_DESCENT_MID_PCT);
             return;
         }
-        if (heldSlow) {
-            // CONTACT. The pin has landed on the stack and the arm is now pressing it into the tower.
-            // Ask Scoring for the jaws (it owns the claw) and keep pushing down so they slide off.
+        if (fired != ContactDetector::Trigger::NONE) {
+            // CONTACT, this tick. Ask Scoring for the jaws (it owns the claw) and keep pushing down so
+            // they slide off. Scoring polls needsClawRelease() in the same 10 ms driver loop, so the
+            // cylinder is commanded within a tick of the trigger -- there is no handshake to wait on.
             clawReleaseWanted_ = true;
             clawReleased_ = false;
+            contactTrigger_ = fired;
             phase_ = Phase::RELEASE;
             phaseStart_ = now;
-            contactSince_ = 0;
             freeSince_ = 0;
+            stuckSince_ = 0;
+            aux.trigger = ContactDetector::triggerCode(fired);
         }
     } else {  // Phase::RELEASE
+        // Carry the detector's last readings so the r lines show what fired and what it saw.
+        aux.ratioPct = static_cast<int>(contact_.speedRatio() * 100.0);
+        aux.lag10 = static_cast<int>(contact_.lagDeg() * 10.0);
+        aux.effortMv = static_cast<int>(contact_.effortMv());
+        aux.trigger = ContactDetector::triggerCode(contactTrigger_);
+
         // Don't judge anything until the jaws have actually had time to open. If nobody ever
         // acknowledges the request (no Scoring::update() running, e.g. a bare auton), carry on after
         // L2_RELEASE_ACK_MS rather than pressing down forever.
@@ -711,29 +729,38 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         }
         const bool jawsOpen = clawReleased_ &&
                               now - clawReleasedAt_ >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS);
+        // With the jaws open the arm either moves or it does not -- nothing subtle to detect, so this
+        // is a plain speed test rather than the full detector.
+        if (descendSpeed >= config::L2_CONTACT_STALL_DEG_PER_S) {
+            if (freeSince_ == 0) freeSince_ = now;
+            stuckSince_ = 0;
+        } else {
+            freeSince_ = 0;
+            if (stuckSince_ == 0) stuckSince_ = now;
+        }
         if (position <= config::L2_NO_CONTACT_DEG) {
             endScore(now, position, config::L2_RETURN_SPEED_PCT, config::L2_RETURN_SPEED_PCT);  // already home
             return;
         }
-        if (jawsOpen && heldFree) {
+        if (jawsOpen && freeSince_ != 0 &&
+            now - freeSince_ >= static_cast<std::uint32_t>(config::L2_FREE_MS)) {
             // The claw came off the pin and the arm is running freely again: go home, fast.
             endScore(now, position, config::L2_RETURN_SPEED_PCT, config::L2_RETURN_SPEED_PCT);
             return;
         }
-        if (jawsOpen && heldSlow) {
-            // Still stalled with the jaws open: the claw is hooked on the pin.
+        if (jawsOpen && stuckSince_ != 0 && now - stuckSince_ >= static_cast<std::uint32_t>(config::L2_STUCK_MS)) {
+            // Still stopped with the jaws open: the claw is hooked on the pin.
             if (unstickTries_ < config::L2_MAX_UNSTICK_TRIES) {
                 ++unstickTries_;
                 phase_ = Phase::UNSTICK;
                 phaseStart_ = now;
                 pressRef_ = std::max(velocity_, 0.0);
                 unstickGoal_ = std::min(position + config::L2_UNSTICK_UP_DEG, config::lift_preset::MAX);
-                contactArmed_ = false;
-                contactSince_ = 0;
                 freeSince_ = 0;
+                stuckSince_ = 0;
                 velI_ = gravityMv_;
                 const double mv = runVelocityLoop(pressRef_, dt, config::LIFT_VEL_MAX_MV, config::LIFT_VEL_MAX_MV);
-                trace(now, 'U', position, mv, true, auxPct);
+                trace(now, 'U', position, mv, true, aux);
                 return;
             }
             // Out of tries. Stop, hold where it is, and report it -- never keep grinding.
@@ -749,7 +776,7 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
 
     // Pressing down, with the push capped so the loop cannot crush the stack while the arm slows.
     const double mv = runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, config::L2_PRESS_MAX_MV);
-    trace(now, phase_ == Phase::PRESS ? 'P' : 'r', position, mv, true, auxPct);
+    trace(now, phase_ == Phase::PRESS ? 'P' : 'r', position, mv, true, aux);
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,7 +1046,7 @@ void Lift::update() {
 // ---------------------------------------------------------------------------
 // Trace: lift task pushes, trace task prints. Single producer / single consumer ring.
 // ---------------------------------------------------------------------------
-void Lift::trace(std::uint32_t now, char phase, double position, double mv, bool moving, int aux) {
+void Lift::trace(std::uint32_t now, char phase, double position, double mv, bool moving, const TraceAux& aux) {
     if (!config::LIFT_TRACE) return;
     if (moving) traceUntil_ = now + static_cast<std::uint32_t>(config::LIFT_TRACE_TAIL_MS);
     else if (now > traceUntil_) return;  // quiet: nothing has moved for LIFT_TRACE_TAIL_MS
@@ -1035,7 +1062,10 @@ void Lift::trace(std::uint32_t now, char phase, double position, double mv, bool
     s.goal10 = active_ ? toI16(goal_ * 10.0) : static_cast<std::int16_t>(-1);
     s.vel = toI16(velocity_);
     s.mv = toI16(mv);
-    s.aux = toI16(aux);
+    s.ratio = toI16(aux.ratioPct);
+    s.lag10 = toI16(aux.lag10);
+    s.eff = toI16(aux.effortMv);
+    s.trg = toI16(aux.trigger);
     traceHead_.store(head + 1, std::memory_order_release);
 }
 
@@ -1045,8 +1075,8 @@ void Lift::traceDrain() {
     if (tail == head) return;
     while (tail != head) {
         const TraceSample& s = trace_[tail % kTraceSize];
-        std::printf("LIFT %u %c %d %d %d %d %d\n", static_cast<unsigned>(s.ms), s.phase, s.pos10, s.goal10, s.vel,
-                    s.mv, s.aux);
+        std::printf("LIFT %u %c %d %d %d %d %d %d %d %d\n", static_cast<unsigned>(s.ms), s.phase, s.pos10,
+                    s.goal10, s.vel, s.mv, s.ratio, s.lag10, s.eff, s.trg);
         ++tail;
     }
     traceTail_.store(tail, std::memory_order_release);
@@ -1066,7 +1096,8 @@ void Lift::startTask() {
             [this] {
                 std::printf("LIFT trace: ms phase(D=drive B=brake A=approach H=hold V=descend R=return "
                             "S=seat P=press r=release U=unstick M=manual h=homing F=fault I=idle) "
-                            "pos*10 goal*10 vel(deg/s) out(mV) aux(=measured/commanded %% in P/r/U)\n");
+                            "pos*10 goal*10 vel(deg/s) out(mV) | L2 only: v/base%% lag*10 effort(mV) "
+                            "trg(0=- 1=stall 2=lag 3=effort 4=speed)\n");
                 while (true) {
                     traceDrain();
                     pros::delay(20);

@@ -470,6 +470,18 @@ inline constexpr bool CLAW_AUTOCLAMP_AT_START = false;       // Y toggles it in 
 inline constexpr int8_t INTAKE_PORT = 12;
 inline constexpr float INTAKE_MV = 12000.0f;
 
+// AUTO-INTAKE ON L1. An L1 press that starts a rise FROM THE FLOOR -- the arm at or below
+// LIFT_BOTTOM_GOAL_DEG, seated, or sitting at the INTAKE handoff -- also runs the rollers IN, from
+// the press itself (so they are already going during the CLAW_CLOSE_TIME_MS clamp wait) until the arm
+// climbs past this height. The point is to sweep up whatever is at floor level while the arm is on
+// its way up anyway, without the driver having to hold R1 at the same time as tapping L1.
+//   Cups get left behind / it stops sweeping too early: raise it.
+//   The intake is still running when the arm is clear of the floor: lower it.
+inline constexpr double L1_AUTO_INTAKE_UNTIL_DEG = 20.0;     // TUNE: arm degrees
+// Safety net: the rollers stop after this long no matter what, so a rise that never gets to
+// L1_AUTO_INTAKE_UNTIL_DEG (jam, BLOCKED lift, a preset below it) can't leave them spinning.
+inline constexpr int L1_AUTO_INTAKE_MAX_MS = 1500;           // TUNE
+
 // ---------------------------------------------------------------------------
 // Pivot + claw timing. See include/subsystems/scoring.hpp.
 // ---------------------------------------------------------------------------
@@ -546,31 +558,68 @@ inline constexpr double L2_SCORE_SPEED_PCT = 60.0;           // TUNE: ~90 deg/s
 //   The stack gets pushed over / the cup crumples: LOWER it (3500).
 //   The pin does not seat fully before the release: raise it (6500).
 inline constexpr float L2_PRESS_MAX_MV = 5000.0f;            // TUNE: magnitude, downward
-// CONTACT DETECTION. Two independent triggers, both "commanded vs measured", never position alone:
-//   relative -- measured speed below L2_CONTACT_SPEED_FRAC of the commanded speed. Only armed once
-//               the arm has actually reached L2_CONTACT_ARM_FRAC of the commanded speed at least
-//               once, so a slow spin-up can never read as contact however far the arm has to fall.
-//   absolute -- measured speed below L2_CONTACT_STALL_DEG_PER_S while being told to do ~90. This is
-//               the backstop for a pin that lands before the arm ever got up to speed (a drop of only
-//               a few degrees), where the relative trigger would never arm.
-// Either one has to hold for L2_CONTACT_MS before it counts.
-//   Releases early, with the pin still in the air (false contact): LOWER L2_CONTACT_SPEED_FRAC
-//     (0.35), raise L2_CONTACT_MS (120).
-//   Presses on well after the pin has landed (crushes, or the trace shows the ratio at 0 for a while
-//     before REL): RAISE L2_CONTACT_SPEED_FRAC (0.55), lower L2_CONTACT_MS (60).
-//   Never detects contact at all (ends NO CONTACT every time): raise L2_CONTACT_SPEED_FRAC, and check
-//     the `aux` column of the trace -- it is the measured/commanded ratio in percent.
-inline constexpr double L2_CONTACT_SPEED_FRAC = 0.45;        // TUNE: 0.45 * 90 = 40 deg/s
-inline constexpr double L2_CONTACT_ARM_FRAC = 0.85;          // TUNE: arm the relative trigger here
-inline constexpr double L2_CONTACT_STALL_DEG_PER_S = 8.0;    // TUNE: absolute backstop
-inline constexpr int L2_CONTACT_MS = 80;                     // TUNE: 8 ticks -- rejects a noisy sample
-// Dead time at the very start of the press before either trigger is even looked at, so the first few
-// ramp ticks cannot register. Short on purpose: the relative trigger's arming requirement is what
-// really protects the spin-up, and a long dead time would miss a pin that lands immediately.
-inline constexpr int L2_CONTACT_IGNORE_MS = 150;             // TUNE
-// After the release, the arm has to run freely again for this long to count as "the claw came off the
-// pin". Then it goes home.
+// CONTACT DETECTION. Implemented by subsystems::ContactDetector (include/subsystems/contact_detector.hpp),
+// which is a PURE class with host-side tests in test/ -- run test/run.sh on the Mac after changing any
+// of these, it proves the thresholds against synthetic landings before anything is uploaded.
+//
+// WHY THE FIRST VERSION NEVER FIRED, and what changed. It compared the measured speed against the
+// NOMINAL commanded speed (~90 deg/s): a relative trigger armed only once the arm reached 85% of it,
+// and an absolute trigger at 8 deg/s. Both are dead if the arm simply cannot make 90 deg/s -- and on
+// this six-bar it often cannot, because the arm swings up and BACK, so over much of the arc gravity
+// RESISTS the descent and the loop can only push down with L2_PRESS_MAX_MV of authority. A free
+// descent settling at 50 deg/s never armed the relative trigger (50 < 76.5) and never tripped the
+// absolute one (50 > 8); the landing then slowed it to 15, still over 8. Nothing could ever fire.
+// Every signal below is now measured against WHAT THE ARM WAS ACTUALLY DOING a moment ago -- a learned
+// baseline -- not against what it was told to do. Three signals, any one of which fires:
+//   LAG     a leaky one-sided integral of the speed shortfall against the baseline, in arm degrees:
+//           "how far behind where it would have been the arm now is". The POSITION-vs-EXPECTED signal,
+//           and the sensitive one -- it catches a landing that only slows the arm by a quarter.
+//   EFFORT  the loop pushing DOWN harder than the free descent needed. The MOTOR-WORK signal: it
+//           catches a pin being forced into the tower even while it still creeps.
+//   SPEED   measured below a fraction of the baseline, or an absolute near-stop. The backstop; the
+//           absolute one needs no baseline, so it still catches a pin already resting on the stack.
+// Which one fired is on the brain (REL(lag) / REL(eff) / REL(spd) / REL(stall)) and in the trace's
+// `trg` column, so the next trace says exactly which signal moved.
+//
+//   Releases early, with the pin still in the air: raise L2_CONTACT_MS (20 -> 40), lower
+//     L2_CONTACT_SPEED_FRAC (0.70 -> 0.60), raise L2_CONTACT_LAG_DEG (1.5 -> 2.5). Read the trace's
+//     `trg` column first -- fix the signal that actually fired, not all three.
+//   Presses on after the pin has landed: lower L2_CONTACT_SPEED_FRAC is NOT the fix (that makes it
+//     later); lower L2_CONTACT_LAG_DEG (-> 1.0) and L2_CONTACT_EFFORT_MV (-> 1400), which are the
+//     early-warning signals, and lower L2_CONTACT_MS.
+//   Never detects contact: lower L2_CONTACT_LAG_DEG and L2_CONTACT_EFFORT_MV, and raise
+//     L2_CONTACT_SPEED_FRAC toward 0.8. Check the trace: if `lag` and `eff` both stay near 0 through
+//     the landing, the arm is not actually slowing OR working harder -- the claw is sliding along the
+//     pin, which is a mechanical problem, not a threshold one.
+inline constexpr double L2_CONTACT_LAG_DEG = 1.5;            // TUNE: arm degrees of accumulated shortfall
+inline constexpr double L2_CONTACT_LAG_LEAK_MS = 200.0;      // TUNE: makes LAG measure a change, not a drift
+inline constexpr double L2_CONTACT_EFFORT_MV = 2000.0;       // TUNE: extra downward push over the baseline
+inline constexpr double L2_CONTACT_SPEED_FRAC = 0.70;        // TUNE: measured / baseline that counts as contact
+inline constexpr double L2_CONTACT_STALL_DEG_PER_S = 6.0;    // TUNE: absolute near-stop, needs no baseline
+inline constexpr int L2_CONTACT_MS = 20;                     // TUNE: confirm window -- short, so the release is fast
+// How long the press gets to reach a steady descent speed before the baseline is snapshotted and the
+// baseline-relative signals come alive. The absolute near-stop is live before this (after the dead
+// time below), so a pin that is already resting is still caught immediately.
+inline constexpr int L2_CONTACT_SETTLE_MS = 200;             // TUNE
+// Baseline EMA time constants. The baselines must track the slow, genuine sag in a free descent's
+// speed and cost as the gravity torque changes with angle -- otherwise LAG drifts into a false
+// trigger -- but they FREEZE as soon as the arm is below L2_CONTACT_FREEZE_FRAC of the baseline, so
+// they can never chase a developing landing and mask it. That two-level gate is the whole trick; the
+// host test has a scenario for each half of it.
+inline constexpr double L2_CONTACT_BASELINE_TAU_MS = 200.0;  // TUNE
+inline constexpr double L2_CONTACT_OUTPUT_TAU_MS = 50.0;     // TUNE: low-pass on the mV, for EFFORT
+inline constexpr double L2_CONTACT_FREEZE_FRAC = 0.90;       // TUNE: loose gate -- stops LEARNING, never fires
+// Dead time at the very start of the press before any trigger may fire. Short on purpose: the
+// baseline's settle time is what really protects the spin-up, and a long dead time would miss a pin
+// that lands immediately.
+inline constexpr int L2_CONTACT_IGNORE_MS = 60;              // TUNE
+// After the release, the arm has to be clearly moving again (faster than L2_CONTACT_STALL_DEG_PER_S)
+// for this long to count as "the claw came off the pin". Then it goes home. The RELEASE phase uses
+// this plain speed test rather than the full detector: with the jaws open the arm either moves or it
+// does not, and there is nothing subtle to catch.
 inline constexpr int L2_FREE_MS = 100;                       // TUNE
+// ...and conversely, this long below that speed with the jaws open means the claw is hooked on the pin.
+inline constexpr int L2_STUCK_MS = 250;                      // TUNE
 // If the release is never acknowledged (Scoring not running, e.g. an auton that never calls
 // Scoring::update()), carry on anyway after this long rather than pressing down forever. Worst case
 // the arm goes home with the pin still clamped, which is the same safe outcome as NO CONTACT.

@@ -86,18 +86,23 @@
  *   PRESS     descend at L2_SCORE_SPEED_PCT of free speed with the claw still
  *             SHUT, pushing the pin down onto the stack, with the downward push
  *             capped at L2_PRESS_MAX_MV so the loop cannot crush the tower while
- *             the arm slows. Watch the rotation sensor for CONTACT: the measured
- *             speed falling below L2_CONTACT_SPEED_FRAC of the commanded speed
- *             (only once the arm has actually reached L2_CONTACT_ARM_FRAC of it,
- *             so a spin-up can never count), or an absolute near-stop, held for
- *             L2_CONTACT_MS. Reaching L2_NO_CONTACT_DEG with no contact means
- *             there was no stack under the arm: nothing is released, and it slows
- *             into the bottom and SEATs with the pin still held (NO CONTACT).
- *   RELEASE   contact found: needsClawRelease() goes true for Scoring to act on,
- *             and the arm KEEPS pressing down at the same speed so the jaws slide
- *             off the pin. Once the jaws have had CLAW_OPEN_TIME_MS to open, the
- *             same detector decides: speed recovered for L2_FREE_MS -> free, go
- *             home; still stalled -> the claw is hooked on the pin -> UNSTICK.
+ *             the arm slows. CONTACT is decided by subsystems::ContactDetector
+ *             (its own header, pure and host-tested): a leaky integral of the
+ *             POSITION SHORTFALL against a learned baseline, the loop's EFFORT
+ *             against a learned baseline, and a speed-ratio / near-stop backstop
+ *             -- all measured against what the arm was actually doing a moment
+ *             ago, never against the nominal command, which is what made the
+ *             first version unable to fire at all. Reaching L2_NO_CONTACT_DEG
+ *             with no contact means there was no stack under the arm: nothing is
+ *             released, and it slows into the bottom and SEATs with the pin still
+ *             held (NO CONTACT).
+ *   RELEASE   contact found: needsClawRelease() goes true for Scoring to act on
+ *             IN THE SAME TICK the trigger fires, and the arm KEEPS pressing down
+ *             at the same speed so the jaws slide off the pin. Once the jaws have
+ *             had CLAW_OPEN_TIME_MS to open, a plain speed test decides (with the
+ *             jaws open the arm either moves or it does not): clearly moving for
+ *             L2_FREE_MS -> free, go home; still stopped for L2_STUCK_MS -> the
+ *             claw is hooked on the pin -> UNSTICK.
  *   UNSTICK   lift L2_UNSTICK_UP_DEG with the claw open, then press again. At
  *             most L2_MAX_UNSTICK_TRIES times; after that it stops, holds where
  *             it is and reports SCORE STUCK rather than grinding.
@@ -148,6 +153,7 @@
  */
 
 #include "config.hpp"
+#include "subsystems/contact_detector.hpp"
 #include "pros/motor_group.hpp"
 #include "pros/rotation.hpp"
 #include "pros/rtos.hpp"
@@ -327,9 +333,14 @@ class Lift {
     /** The press reached the bottom without ever finding a stack. Nothing was released -- the pin is
      *  still clamped and the arm is seated. Cleared by the next command. */
     bool hadNoContact() const { return noContact_; }
-    /** measured / commanded arm speed during PRESS and RELEASE, 0..1+ -- the number contact detection
-     *  is actually made on. 0 outside those phases. Also the trace's `aux` column, as a percentage. */
-    double getSpeedRatio() const { return lastRatio_; }
+    /** What the contact detector currently sees, for the brain screen and the trace: the measured /
+     *  BASELINE speed ratio, the accumulated position shortfall in arm degrees, and the extra downward
+     *  push over the free-descent baseline in mV. Only meaningful during PRESS. */
+    double getSpeedRatio() const { return contact_.speedRatio(); }
+    double getContactLagDeg() const { return contact_.lagDeg(); }
+    double getContactEffortMv() const { return contact_.effortMv(); }
+    /** Which signal actually fired the release ("lag" / "eff" / "spd" / "stall", "" if none yet). */
+    const char* contactTriggerName() const { return ContactDetector::triggerName(contactTrigger_); }
 
     /**
      * Driver manual override: -1..1 of LIFT_MAX_MV, plain motor power, no feedforward. The D-pad uses
@@ -397,12 +408,20 @@ class Lift {
     struct TraceSample {
         std::uint32_t ms;
         char phase;
-        std::int16_t pos10, goal10, vel, mv, aux;
+        std::int16_t pos10, goal10, vel, mv, ratio, lag10, eff, trg;
     };
     static constexpr std::size_t kTraceSize = 128;  // power of two
-    /** aux is a per-phase extra: during PRESS/RELEASE/UNSTICK it is the measured/commanded speed
-     *  ratio in percent (the number contact detection is made on), 0 everywhere else. */
-    void trace(std::uint32_t now, char phase, double position, double mv, bool moving, int aux = 0);
+    /** The four score-only columns: what the contact detector saw this tick. All 0 outside PRESS /
+     *  RELEASE / UNSTICK, so a normal move's trace lines end in four zeros. Deliberately no default
+     *  member initializers: a nested class's NSDMIs cannot be used in a default argument inside the
+     *  enclosing class, and `TraceAux{}` zero-initializes every member anyway. */
+    struct TraceAux {
+        int ratioPct;   // measured / baseline speed, percent
+        int lag10;      // accumulated position shortfall, arm deg x10
+        int effortMv;   // extra downward push over the free-descent baseline
+        int trigger;    // 0 none, 1 stall, 2 lag, 3 effort, 4 speed (latched once fired)
+    };
+    void trace(std::uint32_t now, char phase, double position, double mv, bool moving, const TraceAux& aux = TraceAux{});
     void traceDrain();
 
     pros::MotorGroup motors_;
@@ -449,13 +468,13 @@ class Lift {
     bool clawReleaseWanted_ = false;     // the lift is asking Scoring to open the jaws
     bool clawReleased_ = false;          // Scoring acknowledged (clawReleaseDone())
     std::uint32_t clawReleasedAt_ = 0;
-    bool contactArmed_ = false;          // the arm reached L2_CONTACT_ARM_FRAC of the press speed once
-    std::uint32_t contactSince_ = 0;     // when the speed first dropped below threshold (0 = above it)
-    std::uint32_t freeSince_ = 0;        // when the speed first recovered after the release
+    ContactDetector contact_;            // the landing detector, PRESS only (pure, see its header)
+    ContactDetector::Trigger contactTrigger_ = ContactDetector::Trigger::NONE;  // which signal fired
+    std::uint32_t freeSince_ = 0;        // when the arm was first seen clearly moving after the release
+    std::uint32_t stuckSince_ = 0;       // when it was first seen stopped after the release
     double pressRef_ = 0.0;              // ramped press/unstick speed reference, unsigned deg/s
     double unstickGoal_ = 0.0;           // height the unstick hop is climbing to
     int unstickTries_ = 0;
-    double lastRatio_ = 0.0;             // measured / commanded, see getSpeedRatio()
 
     double manualPower_ = 0.0;  // -1..1 from driverPower(), 0 = driver not overriding
     bool wasManual_ = false;

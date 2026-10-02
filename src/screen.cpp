@@ -13,6 +13,7 @@ namespace screen {
 
 DriverDebug driverDebug;
 RMode rMode = RMode::IDLE;
+bool autoIntake = false;
 bool calibrated = false;
 
 using namespace robot;
@@ -147,11 +148,13 @@ void draw() {
     pros::screen::print(pros::E_TEXT_MEDIUM, 7, "LIFT err %.1f  vel %.0f/s  out %.0f mV", lift.getError(),
                         lift.getVelocity(), lift.getOutput());
 
-    // 8: the speed reference the velocity loop is tracking this tick (0 in HOLD/SEAT), the hold loop's
-    // learned gravity voltage OR -- while an L2 score is pressing -- the measured/commanded speed
-    // ratio as a percentage, which is the single number contact detection is made on (it falls toward
-    // 0 as the pin lands, and the release fires when it has been under
-    // L2_CONTACT_SPEED_FRAC for L2_CONTACT_MS). Then the claw distance sensor.
+    // 8: the speed reference the velocity loop is tracking this tick (0 in HOLD/SEAT), then the hold
+    // loop's learned gravity voltage OR -- while an L2 score is running -- ALL THREE things the contact
+    // detector is watching: `lag` the accumulated position shortfall in arm degrees (fires at
+    // L2_CONTACT_LAG_DEG), `eff` the extra downward push over the free-descent baseline in mV (fires at
+    // L2_CONTACT_EFFORT_MV), and `v/b` the measured/baseline speed ratio as a percentage (fires under
+    // L2_CONTACT_SPEED_FRAC). Watching these three while scoring is how you tell which signal is
+    // actually moving when the pin lands -- and the phase name on line 6 says which one fired.
     {
         char dist[26] = "";
         if (const char* p = portProblem(config::CLAW_DISTANCE_PORT, pros::DeviceType::distance)) {
@@ -162,8 +165,9 @@ void draw() {
             else std::snprintf(dist, sizeof(dist), "%dmm%s", mm, mm <= config::CLAW_DETECT_MM ? " PIN" : "");
         }
         if (lift.isScoring())
-            pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT ref %.0f/s  v/cmd %.0f%%      DIST %s",
-                                lift.getSpeedRef(), lift.getSpeedRatio() * 100.0, dist);
+            pros::screen::print(pros::E_TEXT_MEDIUM, 8, "L2 lag %.2f eff %.0f v/b %.0f%%   DIST %s",
+                                lift.getContactLagDeg(), lift.getContactEffortMv(),
+                                lift.getSpeedRatio() * 100.0, dist);
         else
             pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT ref %.0f/s  grav %.0f mV   DIST %s",
                                 lift.getSpeedRef(), lift.getGravityMv(), dist);
@@ -185,13 +189,14 @@ void draw() {
     pros::screen::print(pros::E_TEXT_MEDIUM, 11, "TEMP  L %.0f  R %.0f  lift %.0f  intake %.0f", hottest(leftDrive),
                         hottest(rightDrive), lift.getTemperature(), intake.getTemperature());
 
-    // 12: driver loop heartbeat. "not started" = opcontrol never ran (not enabled / stuck before it).
+    // 12: driver loop heartbeat, plus INT:AUTO while L1's auto-intake is sweeping during a rise off
+    // the floor. "not started" = opcontrol never ran (not enabled / stuck before it).
     if (driverDebug.loops == 0)
         pros::screen::print(pros::E_TEXT_MEDIUM, 12, "DRV   not started %s", calibrated ? "" : "(calibrating)");
     else
-        pros::screen::print(pros::E_TEXT_MEDIUM, 12, "DRV #%u fwd %d trn %d Up %d Dn %d",
+        pros::screen::print(pros::E_TEXT_MEDIUM, 12, "DRV #%u fwd %d trn %d Up %d Dn %d%s",
                             static_cast<unsigned>(driverDebug.loops), driverDebug.forward, driverDebug.turn,
-                            driverDebug.up, driverDebug.down);
+                            driverDebug.up, driverDebug.down, autoIntake ? "  INT:AUTO" : "");
 }
 
 }  // namespace

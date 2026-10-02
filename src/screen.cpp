@@ -123,12 +123,17 @@ void draw() {
     // --- Lift section (lines 6-10): everything needed to judge a move at a glance. ---
 
     // 6: position -> goal, which named preset (if any) is active, which phase the move is in
-    // (DRIVE / BRAKE / APPROACH / HOLD / DESCEND / SEAT), and SETTLED / BLOCKED / FAULT.
+    // (DRIVE / BRAKE / APPROACH / HOLD / DESCEND / RETURN / SEAT / PRESS / REL / UNSTK), and
+    // SCORE STUCK / NO CONTACT / FAULT / BLOCKED / SETTLED. SCORE STUCK and NO CONTACT are the two
+    // ways an L2 score can end without having scored, and they are shown ahead of BLOCKED/SETTLED
+    // because they are the more specific answer to "why did that not do what I expected".
     //   LIFT 61.4 -> 128.3  STACK 5  DRIVE
     // means "goal is level 5, the arm is at 61.4 and still under full voltage".
     {
-        char status[12] = "";
+        char status[14] = "";
         if (lift.isFaulted()) std::snprintf(status, sizeof(status), "FAULT");
+        else if (lift.isScoreStuck()) std::snprintf(status, sizeof(status), "SCORE STUCK");
+        else if (lift.hadNoContact()) std::snprintf(status, sizeof(status), "NO CONTACT");
         else if (lift.isBlocked()) std::snprintf(status, sizeof(status), "BLOCKED");
         else if (lift.isSettled()) std::snprintf(status, sizeof(status), "SETTLED");
         if (lift.hasActiveTarget())
@@ -143,7 +148,10 @@ void draw() {
                         lift.getVelocity(), lift.getOutput());
 
     // 8: the speed reference the velocity loop is tracking this tick (0 in HOLD/SEAT), the hold loop's
-    // learned gravity voltage, then the claw distance sensor.
+    // learned gravity voltage OR -- while an L2 score is pressing -- the measured/commanded speed
+    // ratio as a percentage, which is the single number contact detection is made on (it falls toward
+    // 0 as the pin lands, and the release fires when it has been under
+    // L2_CONTACT_SPEED_FRAC for L2_CONTACT_MS). Then the claw distance sensor.
     {
         char dist[26] = "";
         if (const char* p = portProblem(config::CLAW_DISTANCE_PORT, pros::DeviceType::distance)) {
@@ -153,8 +161,12 @@ void draw() {
             if (mm <= 0 || mm >= 9999) std::snprintf(dist, sizeof(dist), "--");
             else std::snprintf(dist, sizeof(dist), "%dmm%s", mm, mm <= config::CLAW_DETECT_MM ? " PIN" : "");
         }
-        pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT ref %.0f/s  grav %.0f mV   DIST %s", lift.getSpeedRef(),
-                            lift.getGravityMv(), dist);
+        if (lift.isScoring())
+            pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT ref %.0f/s  v/cmd %.0f%%      DIST %s",
+                                lift.getSpeedRef(), lift.getSpeedRatio() * 100.0, dist);
+        else
+            pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT ref %.0f/s  grav %.0f mV   DIST %s",
+                                lift.getSpeedRef(), lift.getGravityMv(), dist);
     }
 
     // 9: the headline motion constants, read straight from config.hpp's "LIFT TUNING -- start here"

@@ -97,19 +97,33 @@ inline constexpr double DOWN = 0.0;                          // resting / start 
 inline constexpr double INTAKE = 1.1;                        // TODO(team): re-measure, see above (photo IMG_6089)
 inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covered by the reference photos yet
 // L1 taps: tap 1 -> level 1, tap 2 -> level 2 ... tap 5 -> level 5 (stays at 5, the top). One entry
-// per pin-stack height, measured from photos IMG_6090..IMG_6094 (score levels 1-5), 2026-09-30.
+// per pin-stack height.
+//
+// MEASURED ON THE ROBOT, 2026-10-01, and these replace the photo-derived numbers below. The driver
+// drove the arm to each scoring height with the D-pad and read the brain's LIFT / ROT line, so they
+// are ARM DEGREES -- the UNBRACKETED number on both of those lines. (The bracketed figure on the ROT
+// line is raw SENSOR degrees, 4x bigger and printed with no decimal: level 5 used to read
+// "ROT 128.3 [513]". The values here have one decimal and are in the 31..107 range, so they are the
+// arm-degree column; read as sensor degrees they would divide down to 8..27 arm deg, which is less
+// than one old stack level of total travel.)
+//
+// The old photo-measured set was 26.6 / 54.4 / 72.8 / 116.3 / 128.3. Those were taken on a build whose
+// Lift::zero() still reset the sensor at every boot, so they all carried whatever offset the arm was
+// sitting at that session -- exactly the caveat written below. These are measured against the real
+// absolute zero with homing working, which is why the top is 107 rather than 128.
 inline constexpr int STACK_LEVEL_COUNT = 5;
 inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
-    26.6,   // measured from photo IMG_6090, 2026-09-30 (level 1)
-    54.4,   // measured from photo IMG_6091, 2026-09-30 (level 2)
-    72.8,   // measured from photo IMG_6092, 2026-09-30 (level 3)
-    116.3,  // measured from photo IMG_6093, 2026-09-30 (level 4)
-    128.3,  // measured from photo IMG_6094, 2026-09-30 (level 5, the top)
+    31.0,   // measured on the robot 2026-10-01 (level 1)
+    59.0,   // measured on the robot 2026-10-01 (level 2)
+    74.6,   // measured on the robot 2026-10-01 (level 3)
+    87.3,   // measured on the robot 2026-10-01 (level 4)
+    106.9,  // measured on the robot 2026-10-01 (level 5, the top)
 };
-// Software hard stop: top level (128.3, IMG_6094) + 5 deg of margin. setTarget()/moveTo() clamp to
-// this, so it also doubles as "never command past here" -- raise it only once a higher level is
-// actually measured and added above, never just to let a bad preset through.
-inline constexpr double MAX = 133.3;
+// Software hard stop: top level (106.9) + 5 deg of margin. setTarget()/moveTo() clamp to this, so it
+// also doubles as "never command past here" -- raise it only once a higher level is actually measured
+// and added above, never just to let a bad preset through. (The D-pad is raw voltage and is NOT
+// clamped by this; it is only a limit on commanded heights.)
+inline constexpr double MAX = 111.9;
 }  // namespace lift_preset
 
 // ===========================================================================
@@ -219,15 +233,23 @@ inline constexpr float LIFT_HOLD_MAX_MV = 7000.0f;           // TUNE: most the h
 // height, so "the middle" really is the middle of this particular descent whether it starts at level 1
 // or level 5: mid boundary = SLOW_ZONE + LIFT_DESCENT_MID_FRACTION * (start height - SLOW_ZONE).
 // Band changes are short ramps at LIFT_DESCENT_RAMP_DEG_PER_S2, never stops.
+// SPEEDS WENT UP (50/75 -> 80/95) once L2 stopped being "lower away from a pin we just dropped". The
+// pin is already seated in the stack by the time the arm comes home now, so the trip down is purely
+// "get out of the way" -- for L2's return, for B's stow and for an auton move to DOWN alike. The ramp
+// went 300 -> 800 deg/s^2 to match: at 95% the reference has to fall from ~142 deg/s to the slow
+// band's ~18 inside LIFT_DESCENT_SLOW_ZONE_DEG, which needs about (142-18)/0.8s^-1 ... concretely
+// 800 deg/s^2 gets there in 0.155 s and about 12 deg of travel, comfortably inside the 20 deg zone.
+// At 300 it took 0.41 s and ~33 deg, i.e. it would still have been doing 100 deg/s at the frame.
 //   Falls too fast off a high level: lower LIFT_DESCENT_TOP_PCT / LIFT_DESCENT_MID_PCT.
-//   Still arrives at the bottom with a thump: raise LIFT_DESCENT_SLOW_ZONE_DEG, lower LIFT_DESCENT_SLOW_PCT.
+//   Still arrives at the bottom with a thump: raise LIFT_DESCENT_SLOW_ZONE_DEG, lower
+//     LIFT_DESCENT_SLOW_PCT, or raise LIFT_DESCENT_RAMP_DEG_PER_S2 so the slowdown happens sooner.
 //   The whole descent takes too long: raise LIFT_DESCENT_MID_PCT, lower LIFT_DESCENT_SLOW_ZONE_DEG.
-inline constexpr double LIFT_DESCENT_TOP_PCT = 50.0;         // TUNE: ~75 deg/s
-inline constexpr double LIFT_DESCENT_MID_PCT = 75.0;         // TUNE: ~112 deg/s
+inline constexpr double LIFT_DESCENT_TOP_PCT = 80.0;         // TUNE: ~120 deg/s
+inline constexpr double LIFT_DESCENT_MID_PCT = 95.0;         // TUNE: ~142 deg/s
 inline constexpr double LIFT_DESCENT_SLOW_PCT = 12.0;        // TUNE: ~18 deg/s, the constant slow final descent
 inline constexpr double LIFT_DESCENT_SLOW_ZONE_DEG = 20.0;   // TUNE: slow zone starts this many deg above 0
 inline constexpr double LIFT_DESCENT_MID_FRACTION = 0.5;     // TUNE: 0.5 = the mid band is the lower half of the fast travel
-inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 300.0;// TUNE: how quickly the reference may change between bands
+inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 800.0;// TUNE: how quickly the reference may change between bands
 
 // --- Seating on the hard stop (phase SEAT) ---------------------------------
 // The point of the slow final descent is that the arm does not STOP above the frame -- it keeps
@@ -496,13 +518,78 @@ inline constexpr int PIVOT_TIME_MS = 250;                    // TUNE: never meas
 //   The gap between the first L1 tap and the arm moving annoys you: lower it, carefully.
 // (Every L1 tap AFTER the first one commands the next level immediately -- no wait.)
 inline constexpr int CLAW_CLOSE_TIME_MS = 150;               // TUNE: never measured on the real claw
-// Jaws open before the arm lowers -- only for scoreOrMatchload()'s path (not currently on a button).
-// L2's score() uses L2_RELEASE_WAIT_MS below instead.
+// How long the jaws take to actually open. Two users: scoreOrMatchload() waits it out before the arm
+// moves away, and L2's scorer starts its "did the claw come free" check this long after it asked for
+// the release (see L2_FREE_MS). Too short and L2 judges freedom while the jaws are still closing.
 inline constexpr int CLAW_OPEN_TIME_MS = 200;                // TUNE: never measured on the real claw
-// L2 (score). The jaws open, and the arm then stands completely still for this long before the descent
-// starts, so the pin is free and settled in the cup before the end effector moves away from it.
-//   The pin gets dragged / knocked as the arm leaves: raise it.
-//   Scoring feels sluggish and the pin is clearly free: lower it (150).
-inline constexpr int L2_RELEASE_WAIT_MS = 250;               // TUNE
+// ---------------------------------------------------------------------------
+// L2 — the sensing scorer. See "Scoring with L2" in lift.hpp and README.
+// ---------------------------------------------------------------------------
+// L2 above the bottom with a pin held no longer opens the jaws and lowers. It presses the pin DOWN
+// onto the stack with the claw still SHUT, watches the rotation sensor for the moment the pin lands
+// (the arm stops descending as fast as it is being told to), releases the claw at that instant, keeps
+// pushing down to slide the jaws off the pin, checks the arm really is free, and only then runs home
+// fast. Every phase of that lives in Lift::update() (phases PRESS / REL / UNSTK, then the ordinary
+// DESCEND -> SEAT for the run home); Scoring still owns the claw and opens it when the lift asks.
+//
+// PRESS-DOWN SPEED, % of the free speed. The user's starting point. It is closed-loop on the measured
+// arm speed, which is what makes contact detectable at all: an open-loop descent would just slow down
+// against the stack and nothing would know.
+//   Slams the pin into the stack / knocks the tower: LOWER it (45, 35).
+//   Scoring feels slow: raise it, but contact detection gets less sensitive as the gap between
+//   "moving" and "stopped" shrinks relative to the noise.
+inline constexpr double L2_SCORE_SPEED_PCT = 60.0;           // TUNE: ~90 deg/s
+// Most the loop may push DOWNWARD (magnitude, mV) while pressing. This is the crush limit: the
+// velocity loop has 12000 mV of authority and an integral that winds up, so without a cap it would
+// keep increasing the push until it moved -- i.e. flatten the stack. 5000 mV through the 4:1 is about
+// 40% of stall torque: firm enough to seat a pin, not enough to crumple a tower.
+//   The stack gets pushed over / the cup crumples: LOWER it (3500).
+//   The pin does not seat fully before the release: raise it (6500).
+inline constexpr float L2_PRESS_MAX_MV = 5000.0f;            // TUNE: magnitude, downward
+// CONTACT DETECTION. Two independent triggers, both "commanded vs measured", never position alone:
+//   relative -- measured speed below L2_CONTACT_SPEED_FRAC of the commanded speed. Only armed once
+//               the arm has actually reached L2_CONTACT_ARM_FRAC of the commanded speed at least
+//               once, so a slow spin-up can never read as contact however far the arm has to fall.
+//   absolute -- measured speed below L2_CONTACT_STALL_DEG_PER_S while being told to do ~90. This is
+//               the backstop for a pin that lands before the arm ever got up to speed (a drop of only
+//               a few degrees), where the relative trigger would never arm.
+// Either one has to hold for L2_CONTACT_MS before it counts.
+//   Releases early, with the pin still in the air (false contact): LOWER L2_CONTACT_SPEED_FRAC
+//     (0.35), raise L2_CONTACT_MS (120).
+//   Presses on well after the pin has landed (crushes, or the trace shows the ratio at 0 for a while
+//     before REL): RAISE L2_CONTACT_SPEED_FRAC (0.55), lower L2_CONTACT_MS (60).
+//   Never detects contact at all (ends NO CONTACT every time): raise L2_CONTACT_SPEED_FRAC, and check
+//     the `aux` column of the trace -- it is the measured/commanded ratio in percent.
+inline constexpr double L2_CONTACT_SPEED_FRAC = 0.45;        // TUNE: 0.45 * 90 = 40 deg/s
+inline constexpr double L2_CONTACT_ARM_FRAC = 0.85;          // TUNE: arm the relative trigger here
+inline constexpr double L2_CONTACT_STALL_DEG_PER_S = 8.0;    // TUNE: absolute backstop
+inline constexpr int L2_CONTACT_MS = 80;                     // TUNE: 8 ticks -- rejects a noisy sample
+// Dead time at the very start of the press before either trigger is even looked at, so the first few
+// ramp ticks cannot register. Short on purpose: the relative trigger's arming requirement is what
+// really protects the spin-up, and a long dead time would miss a pin that lands immediately.
+inline constexpr int L2_CONTACT_IGNORE_MS = 150;             // TUNE
+// After the release, the arm has to run freely again for this long to count as "the claw came off the
+// pin". Then it goes home.
+inline constexpr int L2_FREE_MS = 100;                       // TUNE
+// If the release is never acknowledged (Scoring not running, e.g. an auton that never calls
+// Scoring::update()), carry on anyway after this long rather than pressing down forever. Worst case
+// the arm goes home with the pin still clamped, which is the same safe outcome as NO CONTACT.
+inline constexpr int L2_RELEASE_ACK_MS = 400;
+// STUCK RECOVERY. Still stalled after the jaws opened = the claw is hooked on the pin. Lift UP this
+// far (claw open) and try pressing down again, up to L2_MAX_UNSTICK_TRIES times. After that it stops,
+// holds where it is and shows SCORE STUCK -- it never keeps grinding.
+inline constexpr double L2_UNSTICK_UP_DEG = 20.0;            // TUNE: arm degrees
+inline constexpr double L2_UNSTICK_SPEED_PCT = 40.0;         // TUNE: ~60 deg/s, it is only a short hop
+inline constexpr int L2_UNSTICK_TIMEOUT_MS = 1200;           // safety net: don't grind upward either
+inline constexpr int L2_MAX_UNSTICK_TRIES = 2;               // TUNE
+// If the press reaches this height without ever detecting contact there was no stack under the arm.
+// Nothing is released -- the arm slows into the bottom and SEATs with the pin still clamped, and the
+// brain shows NO CONTACT. (L2 again at the bottom then releases it; that is the clamp toggle.)
+// Lower than any plausible landing height for stack level 1 (31.0) and above the seat zone.
+inline constexpr double L2_NO_CONTACT_DEG = 12.0;            // TUNE
+// The run home once the claw is free: % of free speed for the top and middle bands of the ordinary
+// descent (the slow final zone and the SEAT are unchanged, so it still cannot slam or bounce).
+//   "Don't hesitate to be going down faster than we currently are going when we are done scoring."
+inline constexpr double L2_RETURN_SPEED_PCT = 95.0;          // TUNE
 
 }  // namespace config

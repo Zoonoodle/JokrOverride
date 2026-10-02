@@ -101,10 +101,16 @@ loop's own integral). **Those first three are chosen fresh from (distance, speed
 latched** (hysteresis: `LIFT_DRIVE_RESUME_DEG_PER_S`); only arrival into HOLD latches. That is what
 makes rapid L1 taps merge: `setTarget()` on a move already in flight *only moves `goal_`* — it must
 never restart the move, because that wipes the velocity integral and resets the approach clock. A **descent**
-(a non-precise goal at or below `LIFT_BOTTOM_GOAL_DEG`: L2, B, auton DOWN, R2 in clamped mode) is
-DESCEND (three position-banded speeds — `LIFT_DESCENT_TOP_PCT`, `_MID_PCT` through the middle,
+(a non-precise goal at or below `LIFT_BOTTOM_GOAL_DEG`: L2's run home, B, auton DOWN, R2 in clamped
+mode) is DESCEND (three position-banded speeds — `LIFT_DESCENT_TOP_PCT`, `_MID_PCT` through the middle,
 `_SLOW_PCT` below `LIFT_DESCENT_SLOW_ZONE_DEG`, ramped between) → SEAT (a constant `LIFT_SEAT_MV`
-pressed into the hard stop, so it does not park above the frame and cannot bounce). Nothing re-drives
+pressed into the hard stop, so it does not park above the frame and cannot bounce). An **L2 score** is
+a third kind: `Lift::startScore()` → PRESS (push the pin onto the stack with the jaws **shut**, capped
+at `L2_PRESS_MAX_MV`) → contact detected from *measured vs commanded* speed → REL (the lift raises
+`needsClawRelease()`; **Scoring** opens the claw, the lift never touches a cylinder) → the freed check
+→ UNSTK up `L2_UNSTICK_UP_DEG` and retry if the claw is caught → the descent above at
+`L2_RETURN_SPEED_PCT`. No stack under it → `NO CONTACT`, nothing released, seated with the pin still
+clamped. Out of unstick tries → `SCORE STUCK`, holds where it is, never grinds. Nothing re-drives
 or re-chases: the hold *is* the correction. Four earlier designs are in `git log` and must not come
 back: `d2978c7` (jumped setpoint, high kP), `6b8165c` (trapezoid + leash + fixed `LIFT_KG`), `3723ef2`
 (`LIFT_BRAKE_DECEL_DEG_PER_S2 = 2000` asked for more braking than the arm can do, and handing a

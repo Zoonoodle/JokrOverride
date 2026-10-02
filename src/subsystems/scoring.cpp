@@ -88,18 +88,19 @@ void Scoring::enter(State next) {
         case State::CLAMPING: claw_.clamp(); break;
         case State::STACKING: break;       // update() drives the lift + pivot
         case State::RELEASING:
-            claw_.disarm();  // jaws open now, autoclamp off so it can't re-grab the stack
             if (scoreToHome_) {
-                // L2 score: the jaws open THIS tick and the arm then stands completely still for
-                // config::L2_RELEASE_WAIT_MS before the descent is commanded (update() below), so the
-                // pin is free and settled in the cup before the end effector moves away from it. The
-                // lift is still holding its stack level, so "stands still" costs nothing: no target is
-                // sent here at all.
+                // L2 SCORE. The jaws stay SHUT: the lift presses the pin down onto the stack and
+                // tells us when to open them (Lift::needsClawRelease(), polled in update() below).
+                // Do NOT disarm the claw here -- opening it now would drop the pin from stack height,
+                // which is exactly what the old sequence did.
                 // The pivot is already OUT at every stack level and OUT is the default down position,
                 // so normally nothing happens here; if the driver had toggled it BACK with X, put it
                 // OUT now, without waiting for it -- there is no height at which the pivot may not be
                 // OUT (see interlock 2 in scoring.hpp).
                 setPivot(true);
+                lift_.startScore();
+            } else {
+                claw_.disarm();  // scoreOrMatchload(): jaws open now, autoclamp off
             }
             break;
         case State::MOVING:
@@ -272,11 +273,24 @@ void Scoring::update() {
 
         case State::RELEASING:
             if (scoreToHome_) {
-                // score(): the jaws opened on entry. Hold still for L2_RELEASE_WAIT_MS, THEN command
-                // the descent (the lift's own banded, seating trip to the bottom -- see lift.hpp).
-                // Drop into IDLE once the arm is actually seated on its stop.
-                if (elapsed < static_cast<std::uint32_t>(config::L2_RELEASE_WAIT_MS)) break;
-                command(preset::DOWN);
+                // L2 SCORE. The lift owns the whole press / sense / release / run-home motion (see
+                // "SCORING WITH L2" in lift.hpp). All this class does is own the claw: the instant the
+                // lift says the pin has landed on the stack, open the jaws and tell it so. The split
+                // is deliberate -- only the lift can see the measured-vs-commanded speed gap that
+                // contact detection is made on, and only this class is allowed to touch a cylinder.
+                if (lift_.needsClawRelease()) {
+                    claw_.release();  // RELEASED, so the autoclamp can't re-grab the stack either
+                    lift_.clawReleaseDone();
+                }
+                // The lift gave up (claw still caught after every unstick try): let go of the macro so
+                // L1 / R1 / B work again. The lift holds where it is and keeps showing SCORE STUCK.
+                if (lift_.isScoreStuck()) {
+                    scoreToHome_ = false;
+                    enter(State::IDLE);
+                    break;
+                }
+                // Done once the arm is actually seated on its hard stop at the bottom. NO CONTACT ends
+                // here too -- seated, with the pin still clamped, nothing dropped.
                 if (liftArrived(preset::DOWN)) {
                     scoreToHome_ = false;
                     enter(State::IDLE);

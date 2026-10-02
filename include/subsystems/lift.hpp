@@ -76,11 +76,40 @@
  *             degrees above the frame any more. If a lift motor ever reaches
  *             LIFT_SEAT_TEMP_LIMIT_C the seat drops to a plain brake-hold.
  *
+ * SCORING WITH L2 is a third kind of move, started by startScore() and run as
+ * phases PRESS -> RELEASE -> (UNSTICK) -> the DESCENT above. It is the only
+ * part of the lift that needs anything from another subsystem, and the split is:
+ * the lift decides WHEN the claw must open (it is the only thing that can -- it
+ * owns the velocity estimate and the commanded speed), and Scoring, which owns
+ * the claw, actually opens it. The lift never touches a cylinder.
+ *
+ *   PRESS     descend at L2_SCORE_SPEED_PCT of free speed with the claw still
+ *             SHUT, pushing the pin down onto the stack, with the downward push
+ *             capped at L2_PRESS_MAX_MV so the loop cannot crush the tower while
+ *             the arm slows. Watch the rotation sensor for CONTACT: the measured
+ *             speed falling below L2_CONTACT_SPEED_FRAC of the commanded speed
+ *             (only once the arm has actually reached L2_CONTACT_ARM_FRAC of it,
+ *             so a spin-up can never count), or an absolute near-stop, held for
+ *             L2_CONTACT_MS. Reaching L2_NO_CONTACT_DEG with no contact means
+ *             there was no stack under the arm: nothing is released, and it slows
+ *             into the bottom and SEATs with the pin still held (NO CONTACT).
+ *   RELEASE   contact found: needsClawRelease() goes true for Scoring to act on,
+ *             and the arm KEEPS pressing down at the same speed so the jaws slide
+ *             off the pin. Once the jaws have had CLAW_OPEN_TIME_MS to open, the
+ *             same detector decides: speed recovered for L2_FREE_MS -> free, go
+ *             home; still stalled -> the claw is hooked on the pin -> UNSTICK.
+ *   UNSTICK   lift L2_UNSTICK_UP_DEG with the claw open, then press again. At
+ *             most L2_MAX_UNSTICK_TRIES times; after that it stops, holds where
+ *             it is and reports SCORE STUCK rather than grinding.
+ *   then      the ordinary DESCENT, with L2_RETURN_SPEED_PCT as both of its fast
+ *             bands, so the run home is quick but still slows and seats.
+ *
  * THE MANUAL INPUT (driverPower(): D-pad Up/Down at full send, and R1 at
  * R_LIFT_UP_PCT while a pin is clamped) is plain voltage fed into this same
- * loop ahead of everything else. R2 in clamped mode is not manual at all --
- * descendManual() runs the DESCENT above with R_LIFT_DOWN_PCT as its top band,
- * so holding R2 to the bottom seats the arm exactly like L2 does.
+ * loop ahead of everything else, and it cancels a score sequence at any stage.
+ * R2 in clamped mode is not manual at all -- descendManual() runs the DESCENT
+ * above with R_LIFT_DOWN_PCT as its top band, so holding R2 to the bottom seats
+ * the arm exactly like L2 does.
  *
  * HOMING. The arm often powers on sitting well above the bottom, and zero() can
  * only seed from the sensor's folded absolute angle, which is unambiguous within
@@ -145,7 +174,7 @@ class Lift {
     /** Where a commanded move is (see the class comment). DRIVE/BRAKE/APPROACH/HOLD are a position
      *  move; DESCEND/SEAT are a trip to the bottom. For a position move the first three are chosen
      *  fresh from (distance, speed) every tick -- only arrival into HOLD latches. */
-    enum class Phase { DRIVE, BRAKE, APPROACH, HOLD, DESCEND, SEAT };
+    enum class Phase { DRIVE, BRAKE, APPROACH, HOLD, DESCEND, SEAT, PRESS, RELEASE, UNSTICK };
 
     Lift();
 
@@ -276,6 +305,32 @@ class Lift {
     /** True while the arm is pressed down onto its hard stop (phase SEAT). */
     bool isSeated() const { return phase_ == Phase::SEAT; }
 
+    // -----------------------------------------------------------------------
+    // L2 scoring (see "SCORING WITH L2" in the class comment). Scoring owns the
+    // claw; the lift owns the motion and decides when the claw has to open.
+    // -----------------------------------------------------------------------
+    /** L2 with a pin held above the bottom: start the press / sense / release / go-home sequence.
+     *  Never blocks. Cancelled instantly by driverPower(), cancel(), or any new setTarget(). */
+    void startScore();
+    /** True while a score sequence is running (PRESS / RELEASE / UNSTICK). */
+    bool isScoring() const { return score_; }
+    /** TRUE WHEN THE LIFT NEEDS THE JAWS OPENED, right now: the pin has landed on the stack. The
+     *  owner of the claw (Scoring) polls this every tick, opens the claw, and calls
+     *  clawReleaseDone(). The lift keeps pushing down meanwhile. */
+    bool needsClawRelease() const { return clawReleaseWanted_ && !clawReleased_; }
+    /** Acknowledge needsClawRelease(): the jaws have been commanded open as of now. The lift waits
+     *  config::CLAW_OPEN_TIME_MS from this moment before judging whether the claw came free. */
+    void clawReleaseDone();
+    /** The score sequence gave up: the claw is still caught after L2_MAX_UNSTICK_TRIES. The lift is
+     *  holding where it stopped and will not push again. Cleared by the next command. */
+    bool isScoreStuck() const { return scoreStuck_; }
+    /** The press reached the bottom without ever finding a stack. Nothing was released -- the pin is
+     *  still clamped and the arm is seated. Cleared by the next command. */
+    bool hadNoContact() const { return noContact_; }
+    /** measured / commanded arm speed during PRESS and RELEASE, 0..1+ -- the number contact detection
+     *  is actually made on. 0 outside those phases. Also the trace's `aux` column, as a percentage. */
+    double getSpeedRatio() const { return lastRatio_; }
+
     /**
      * Driver manual override: -1..1 of LIFT_MAX_MV, plain motor power, no feedforward. The D-pad uses
      * +-1.0 (full send); R1 in clamped mode uses +R_LIFT_UP_PCT / 100. Non-zero input immediately
@@ -312,6 +367,10 @@ class Lift {
     void enterHold(std::uint32_t now, double holdAt);
     void enterDescend(std::uint32_t now, double position, double topPct, double midPct);
     void enterSeat(std::uint32_t now);
+    /** Hand a running score sequence over to the trip home (freed, or nothing was ever there). */
+    void endScore(std::uint32_t now, double position, double topPct, double midPct);
+    /** One tick of PRESS / RELEASE / UNSTICK. Writes the motors and traces. */
+    void updateScore(std::uint32_t now, double dt, double position);
     /** Stall guard window: true once the arm has made less than LIFT_STALL_DEG of progress for
      *  LIFT_STALL_MS. Resets itself whenever the arm does move. Only ever called with a speed
      *  reference that really wants motion -- see the guard notes in config.hpp. */
@@ -321,7 +380,9 @@ class Lift {
     double speedProfile(double dist, double dir) const;
     /** One tick of the velocity loop: pushes the motors toward `vRef` (signed deg/s) and returns the
      *  mV it sent. The only place LIFT_VEL_KP/KI are used. */
-    double runVelocityLoop(double vRef, double dt);
+    /** Limits are asymmetric because L2's press needs a tight DOWNWARD cap (the crush limit) while
+     *  still being allowed full upward authority to hold the arm back against gravity. */
+    double runVelocityLoop(double vRef, double dt, double upMaxMv, double downMaxMv);
     /** One tick of the damped position hold (LIFT_HOLD_KP/KI/KD). Writes the motors and traces. */
     void runHold(std::uint32_t now, double dt, double position);
     /** One tick of a trip to the bottom: DESCEND's bands and ramp, the seat detector, and SEAT's
@@ -336,10 +397,12 @@ class Lift {
     struct TraceSample {
         std::uint32_t ms;
         char phase;
-        std::int16_t pos10, goal10, vel, mv;
+        std::int16_t pos10, goal10, vel, mv, aux;
     };
     static constexpr std::size_t kTraceSize = 128;  // power of two
-    void trace(std::uint32_t now, char phase, double position, double mv, bool moving);
+    /** aux is a per-phase extra: during PRESS/RELEASE/UNSTICK it is the measured/commanded speed
+     *  ratio in percent (the number contact detection is made on), 0 everywhere else. */
+    void trace(std::uint32_t now, char phase, double position, double mv, bool moving, int aux = 0);
     void traceDrain();
 
     pros::MotorGroup motors_;
@@ -377,6 +440,22 @@ class Lift {
     std::uint32_t seatStillSince_ = 0;  // when the arm was last seen moving near the bottom
     bool seatHot_ = false;          // a lift motor passed LIFT_SEAT_TEMP_LIMIT_C: brake-hold instead of pressing
     int seatTempTick_ = 0;          // temperature is only read every 50th SEAT tick
+
+    // L2 scoring
+    bool score_ = false;                 // a press/sense/release sequence is running
+    bool returnFast_ = false;            // this DESCEND is a post-score run home (for the phase name)
+    bool scoreStuck_ = false;            // gave up: claw still caught after every unstick try
+    bool noContact_ = false;             // pressed to the bottom and never found a stack
+    bool clawReleaseWanted_ = false;     // the lift is asking Scoring to open the jaws
+    bool clawReleased_ = false;          // Scoring acknowledged (clawReleaseDone())
+    std::uint32_t clawReleasedAt_ = 0;
+    bool contactArmed_ = false;          // the arm reached L2_CONTACT_ARM_FRAC of the press speed once
+    std::uint32_t contactSince_ = 0;     // when the speed first dropped below threshold (0 = above it)
+    std::uint32_t freeSince_ = 0;        // when the speed first recovered after the release
+    double pressRef_ = 0.0;              // ramped press/unstick speed reference, unsigned deg/s
+    double unstickGoal_ = 0.0;           // height the unstick hop is climbing to
+    int unstickTries_ = 0;
+    double lastRatio_ = 0.0;             // measured / commanded, see getSpeedRatio()
 
     double manualPower_ = 0.0;  // -1..1 from driverPower(), 0 = driver not overriding
     bool wasManual_ = false;

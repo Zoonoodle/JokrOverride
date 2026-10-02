@@ -138,8 +138,10 @@ standing person. All preset heights are in **lift-arm degrees from that resting 
 DOWN           0.0    resting / start
 INTAKE         1.1    claw at the intake handoff (R1 tap)
 MATCHLOAD     15.0    claw at matchload height -- TUNE, not yet measured
-STACK_LEVELS  26.6 / 54.4 / 72.8 / 116.3 / 128.3   levels 1..5 (L1 steps through these)
-MAX          133.3    software hard stop: top level (128.3) + 5 deg margin
+STACK_LEVELS  31.0 / 59.0 / 74.6 / 87.3 / 106.9   levels 1..5 (L1 steps through these)
+                       MEASURED ON THE ROBOT 2026-10-01 (arm degrees, the unbracketed LIFT/ROT
+                       number), replacing the photo-derived set below
+MAX          111.9    software hard stop: top level (106.9) + 5 deg margin
 ```
 
 `DOWN`, `INTAKE` and the 5 `STACK_LEVELS` are measured, not guessed -- see "Lift levels" below
@@ -167,7 +169,15 @@ the brain's `LIFT` line (already converted to lift-arm degrees). Photos:
 | [`levels/3-score-L2.jpg`](photos/levels/3-score-L2.jpg) | score level 2 | `LIFT 54.4 -> none` | `STACK_LEVELS[1] = 54.4` |
 | [`levels/4-score-L3.jpg`](photos/levels/4-score-L3.jpg) | score level 3 | `LIFT 72.8 -> none` | `STACK_LEVELS[2] = 72.8` |
 | [`levels/5-score-L4.jpg`](photos/levels/5-score-L4.jpg) | score level 4 | `LIFT 116.3 -> none` | `STACK_LEVELS[3] = 116.3` |
-| [`levels/6-score-L5.jpg`](photos/levels/6-score-L5.jpg) | score level 5 (top) | `LIFT 128.3 -> none` | `STACK_LEVELS[4] = 128.3` |
+| [`levels/6-score-L5.jpg`](photos/levels/6-score-L5.jpg) | score level 5 (top) | `LIFT 128.3 -> none` | superseded: `STACK_LEVELS[4] = 106.9` |
+
+> **The photo-derived numbers in this table are superseded.** They were read on a build whose
+> `Lift::zero()` still reset the rotation sensor at every boot, so every one of them carries whatever
+> offset the arm happened to be sitting at during that session -- the caveat written below. On
+> 2026-10-01, with homing working and the sensor's own absolute zero in use, the driver drove to each
+> scoring height and read the brain's `LIFT` line: **31.0 / 59.0 / 74.6 / 87.3 / 106.9** arm degrees.
+> Those are what `config::lift_preset::STACK_LEVELS` holds. The photos are still the right reference
+> for *what each level looks like*, just not for the numbers.
 
 The readings rise the whole way from `DOWN` to the top, which is the direction check too --
 confirms `LIFT_ROTATION_REVERSED = false` is correct as committed.
@@ -247,10 +257,13 @@ I still could not count the cylinders on the end effector itself from these angl
   the intake the pivot is BACK inside it and OUT above it, so it swings BACK as R1 brings the arm
   down into the zone and OUT as L1 lifts it out (or when the arm arrives at the level). It never
   gates the lift.
-- Timing knobs: `PIVOT_TIME_MS = 250`, `CLAW_CLOSE_TIME_MS = 150`, `CLAW_OPEN_TIME_MS = 200`,
-  `L2_RELEASE_WAIT_MS = 250`. **None of the first three has ever been measured against the cylinder
-  it now controls** -- they were tuned while the ports were crossed, so treat all of them as `TUNE`
-  starting values. `CLAW_CLOSE_TIME_MS` was put back up from 100 to 150 for exactly that reason.
+- Timing knobs: `PIVOT_TIME_MS = 250`, `CLAW_CLOSE_TIME_MS = 150`, `CLAW_OPEN_TIME_MS = 200`.
+  **None of them has ever been measured against the cylinder it now controls** -- they were tuned
+  while the ports were crossed, so treat all of them as `TUNE` starting values.
+  `CLAW_CLOSE_TIME_MS` was put back up from 100 to 150 for exactly that reason. `CLAW_OPEN_TIME_MS`
+  matters more than it used to: L2's scorer starts its "did the claw come free of the pin" check that
+  long after it asks for the release, so if it is shorter than the real jaw-open time L2 will judge
+  freedom while the jaws are still closing.
 
 ## Game elements: the pin and the cup
 

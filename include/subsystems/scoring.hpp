@@ -29,15 +29,20 @@
  *   CLAMPING      jaws closing; waits CLAW_CLOSE_TIME_MS so the lift doesn't pull out of an open claw
  *   STACKING      holding a pin, lift at STACK_LEVELS[level-1], pivot OUT (it swings OUT once the arm
  *                 has risen out of the handoff zone, INTAKE + PIVOT_HANDOFF_ZONE_DEG, or has arrived)
- *   RELEASING     L2/score() with something held above the bottom: the jaws open the instant this
- *                 state is entered, then the arm stands completely still for config::L2_RELEASE_WAIT_MS
- *                 (it is still holding its stack level, so this costs nothing) so the pin is free and
- *                 settled in the cup before the end effector moves away from it. Only then is DOWN
- *                 commanded -- which is the lift's banded, seating descent (see lift.hpp), not a
- *                 position move. The pivot is already OUT at every stack level and OUT is the default
- *                 down position, so it does not move (if the driver had toggled it BACK up there, it
- *                 is put back OUT, without waiting). Settles into IDLE once the arm is actually SEATED
- *                 on its hard stop. L2 at the bottom never enters this state any more -- see score().
+ *   RELEASING     L2/score() with something held above the bottom -- THE SENSING SCORER. The jaws
+ *                 stay SHUT and Lift::startScore() takes over the motion: it presses the pin down
+ *                 onto the stack, watches the rotation sensor for the landing, and tells this class
+ *                 when to open the claw (Lift::needsClawRelease(), polled every tick here). The split
+ *                 is deliberate: only the lift can see the measured-vs-commanded speed gap contact
+ *                 detection is made on, and only this class is allowed to touch a cylinder. Read
+ *                 "SCORING WITH L2" in lift.hpp for the phases (PRESS / REL / UNSTK / RETURN).
+ *                 It ends in IDLE when the arm is seated at the bottom -- including the NO CONTACT
+ *                 case, where nothing was ever released and the pin is still clamped -- or
+ *                 immediately if the lift reports SCORE STUCK, so L1 / R1 / B work again while the
+ *                 lift holds where it stopped.
+ *                 The pivot is already OUT at every stack level and OUT is the default down position,
+ *                 so it does not move (if the driver had toggled it BACK up there, it is put back
+ *                 OUT, without waiting). L2 at the bottom never enters this state -- see score().
  *                 scoreOrMatchload() (not on a button) still uses the older CLAW_OPEN_TIME_MS wait
  *                 then a move to INTAKE_POS, unchanged.
  *   MOVING        scoreOrMatchload()/goTo*() only: claw open, lift to the destination -- INTAKE or
@@ -69,8 +74,10 @@
  *      written for the opposite pivot meaning and would have forbidden the very positions the driver
  *      wants (pivot BACK near the bottom at INTAKE, OUT at the bottom after L2). There is no height at
  *      which the pivot is forbidden to be OUT or BACK.
- *   3. The arm never moves away from the goal until the jaws have had time to open: CLAW_OPEN_TIME_MS
- *      for scoreOrMatchload(), L2_RELEASE_WAIT_MS for L2's score().
+ *   3. Nothing is ever dropped from height. scoreOrMatchload() waits CLAW_OPEN_TIME_MS before the arm
+ *      moves away. L2's score() goes further: the jaws stay SHUT for the whole descent onto the stack
+ *      and only open at the moment the lift detects the pin has landed -- and if it never detects a
+ *      landing, they do not open at all (NO CONTACT, pin still clamped, arm seated at the bottom).
  *   4. R1 never pulls a held pin back down to the intake: it is a no-op while the claw is CLAMPED
  *      (shut by L1, A, L2 at the bottom, or the autoclamp). This claw's unpowered position is OPEN,
  *      so power-on is never clamped and R1 works straight away. Starting a match with a pin in the
@@ -115,10 +122,11 @@ class Scoring {
     void stepUp();
     /** L2: at the bottom (seated, or within LIFT_BOTTOM_GOAL_DEG of it) and not mid-move -- the CLAMP
      *  TRIGGER: toggles the claw in place through the same logical API A / toggleClaw() uses, and
-     *  touches neither the lift nor the pivot. Above the bottom, holding a pin -> score (open the
-     *  jaws and lower all the way to DOWN in one motion, pivot OUT) and reset the level count so the
-     *  next L1 starts at level 1 again; not holding anything -> no matchload fallback on this button
-     *  any more, see scoreOrMatchload(). */
+     *  touches neither the lift nor the pivot. Above the bottom, holding a pin -> THE SENSING SCORER
+     *  (RELEASING + Lift::startScore(): press the pin onto the stack with the jaws shut, release at
+     *  the detected landing, slide off, run home fast and seat) and reset the level count so the next
+     *  L1 starts at level 1 again; not holding anything -> no matchload fallback on this button any
+     *  more, see scoreOrMatchload(). L2 pressed again mid-sequence is ignored. */
     void score();
     /** Not currently wired to a driver button (previously Down/L2 when empty). Holding a pin ->
      *  same as score() but lowers to INTAKE instead of DOWN. Empty -> go to the matchload position.

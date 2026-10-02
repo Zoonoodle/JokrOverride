@@ -44,9 +44,14 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *               resume whatever preset or macro step was active before.
  *   L1          intake macro: step up a stack level (1st tap clamps + goes to level 1; each
  *               tap after goes up one level, staying at the top once reached)
- *   L2          intake macro: SCORE -- open the jaws, stand still for L2_RELEASE_WAIT_MS so the pin
- *               is free, then run the lift's banded descent all the way down and SEAT the arm on its
- *               hard stop (pivot stays OUT). Resets the level count so the next L1 starts at level 1.
+ *   L2          intake macro: THE SENSING SCORER (above the bottom, holding a pin). Presses the pin
+ *               DOWN onto the stack with the claw still SHUT at L2_SCORE_SPEED_PCT, watches the
+ *               rotation sensor for the landing (measured speed vs commanded speed), releases the
+ *               claw at that instant and keeps pushing so the jaws slide off, checks the arm is
+ *               really free (lifting L2_UNSTICK_UP_DEG and retrying if the claw is caught), then runs
+ *               home fast and SEATs. Pivot stays OUT. Resets the level count. Nothing under the arm
+ *               -> NO CONTACT: it seats at the bottom with the pin STILL CLAMPED, dropping nothing.
+ *               At the bottom instead, L2 toggles the claw (clamp / release) and moves nothing.
  *
  *   R1 / R2 have TWO modes, and which one is in force is latched when the button goes down (see
  *   rModeFor() below; the brain's CLAW line shows `R:INTAKE` / `R:LIFT` / `R:wait`):

@@ -56,8 +56,8 @@ allowed to own the lift motors.
 | **D-pad Up** (hold) | lift **up**, full power (manual, cancels any preset/macro target) |
 | **D-pad Down** (hold) | lift **down**, full power (same) |
 | let go of Up/Down | lift motors HOLD where they are (no target resumes) |
-| **L1** | intake macro: step up a stack level (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached) |
-| **L2** | intake macro: holding a pin → **SCORE**. The jaws open, the arm stands **still** for `L2_RELEASE_WAIT_MS` (250 ms) so the pin is free, then the arm runs the banded descent all the way down and **seats** on its hard stop. Pivot stays **OUT** throughout. Resets the level count so the next L1 starts at level 1 |
+| **L1** | intake macro: step up a stack level (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached). If the claw is already `CLAMPED` (L2 just clamped it at the bottom), the first tap skips the clamp wait and rises immediately |
+| **L2** | intake macro, **above the bottom**: holding a pin → **SCORE**. The jaws open, the arm stands **still** for `L2_RELEASE_WAIT_MS` (250 ms) so the pin is free, then the arm runs the banded descent all the way down and **seats** on its hard stop. Pivot stays **OUT** throughout. Resets the level count so the next L1 starts at level 1. **At the bottom** (seated, or within `LIFT_BOTTOM_GOAL_DEG` of it) and not mid-move: L2 is instead the **clamp trigger** -- not clamped → clamp, clamped → release -- the same toggle A uses. It does not move the lift or the pivot |
 | **B** | **stow**: pivot **OUT**, lift straight down to `DOWN` and seated (the same descent as L2, without the claw), cancel the intake macro |
 | **A** | claw clamp / open. The claw is physically **OPEN at power-on** -- it needs air to grip: the `CLAW` line shows `OPEN D[0]` and A closes it. `CLAW_CLOSED_IS_ADI_HIGH` (`true`) says which ADI level is closed; if A *opens* the jaws while the line says `CLAMPED`, flip it |
 | **X** | pivot **OUT** / **BACK** (the brain's `CLAW` line shows `PIV OUT C[0]` / `PIV BACK C[1]`: word, port letter, raw ADI level) |

@@ -155,28 +155,44 @@ void Scoring::stepUp() {
         case State::RELEASING: break;  // mid-score, ignore
         default:
             level_ = 1;
-            enter(State::CLAMPING);
+            // The claw can already be CLAMPED here -- L2's down-state clamp (score(), above) shuts it
+            // with the arm still at the bottom, well before this tap lands. CLAMPING's
+            // CLAW_CLOSE_TIME_MS wait exists so the lift doesn't pull out of jaws that are still
+            // physically closing; a claw that was already shut has nothing left to wait for, so skip
+            // straight to STACKING and let the arm rise this tick. Taps after this one still land in
+            // the STACKING case above and stack normally.
+            enter(claw_.isClamped() ? State::STACKING : State::CLAMPING);
             break;
     }
 }
 
 void Scoring::score() {
-    // Already parked at the bottom: there is nothing to score and nowhere to descend to, so L2 is a
-    // NO-OP -- it must not touch the claw.
+    // Mid-move: a score/stow descent is already running (RELEASING), the jaws are still physically
+    // closing (CLAMPING), or the arm is travelling to INTAKE/MATCHLOAD (MOVING). Ignore L2 until
+    // whichever of those finishes -- same as before this change.
+    if (state_ == State::RELEASING || state_ == State::CLAMPING || state_ == State::MOVING) return;
+
+    // At the bottom (seated on the hard stop, or within LIFT_BOTTOM_GOAL_DEG of it) and not mid-move:
+    // L2 is now the CLAMP TRIGGER, not a no-op. Toggle the claw through the exact same logical API A /
+    // toggleClaw() uses -- not clamped -> clamp, clamped -> release -- and touch nothing else: the
+    // lift stays put and the pivot stays OUT (toggleClaw() never reaches either).
     //
-    // This is the bug behind "tapping L2 while all the way down activates the clamp and deactivates".
-    // The claw can legitimately be left CLAMPED with the arm at 0, because the two things that bring
-    // the arm home without scoring -- B (stow()) and the D-pad manual override, which calls reset() --
-    // both deliberately leave the claw alone so they can't drop a pin. The macro forgets it was holding
-    // anything (state_ goes back to IDLE) but the jaws are still shut. L2 then saw isClamped() == true,
-    // entered RELEASING, fired the jaws open and ran a zero-length "descent" that arrived instantly:
-    // one cylinder actuation, with the arm already down and nothing to score. Use A to open the jaws
-    // down here -- that is the claw button.
-    if (lift_.getPosition() <= config::LIFT_BOTTOM_GOAL_DEG) return;
-    // Holding a pin (clamped, or mid-clamp/stacking): open the jaws and lower all the way to DOWN (via
-    // RELEASING), resetting the level for next time. Nothing held: no matchload fallback here any more
-    // (see scoreOrMatchload()) -- just do nothing.
-    if (!(claw_.isClamped() || state_ == State::CLAMPING || state_ == State::STACKING)) return;
+    // This replaces the old "L2 at the bottom does nothing" rule. That rule existed only because L2
+    // used to fire the claw open and run a zero-length "descent" whenever the arm was already down --
+    // the claw can legitimately be left CLAMPED with the arm at 0 (B's stow() and the D-pad manual
+    // override both bring the arm home without touching the claw), and the old score() saw
+    // isClamped() == true and ran its score sequence for nothing. Now that case is a deliberate clamp
+    // toggle instead: a driver with a pin sitting at floor level, or wanting to let one go down here,
+    // has a button for it without reaching for A.
+    if (lift_.getPosition() <= config::LIFT_BOTTOM_GOAL_DEG || lift_.isSeated()) {
+        toggleClaw();
+        return;
+    }
+
+    // Holding a pin (clamped, or mid-stacking) above the bottom: open the jaws and lower all the way
+    // to DOWN (via RELEASING), resetting the level for next time. Nothing held: no matchload fallback
+    // here any more (see scoreOrMatchload()) -- just do nothing.
+    if (!(claw_.isClamped() || state_ == State::STACKING)) return;
     scoreToHome_ = true;
     enter(State::RELEASING);
 }

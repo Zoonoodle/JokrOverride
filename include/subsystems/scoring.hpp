@@ -15,6 +15,10 @@
  *    └──────────────────────────────────────────── RELEASING (claw open + lift descent to DOWN,
  *                                                               both at once; pivot stays OUT)
  *
+ *   L2 while the arm is already at the bottom (IDLE or INTAKE_POS, not mid-move) is a special case
+ *   handled entirely inside score() without a state change: it toggles the claw in place -- see
+ *   score() below and RELEASING's note. The diagram's L2 arrow is everywhere else, above the bottom.
+ *
  *   IDLE          power-on state, and also where the manual override leaves it. Nothing moves
  *                 until the driver presses something (or the manual override, which bypasses
  *                 this macro entirely). Resets level back to 1.
@@ -25,14 +29,15 @@
  *   CLAMPING      jaws closing; waits CLAW_CLOSE_TIME_MS so the lift doesn't pull out of an open claw
  *   STACKING      holding a pin, lift at STACK_LEVELS[level-1], pivot OUT (it swings OUT once the arm
  *                 has risen out of the handoff zone, INTAKE + PIVOT_HANDOFF_ZONE_DEG, or has arrived)
- *   RELEASING     L2/score(): the jaws open the instant this state is entered, then the arm stands
- *                 completely still for config::L2_RELEASE_WAIT_MS (it is still holding its stack
- *                 level, so this costs nothing) so the pin is free and settled in the cup before the
- *                 end effector moves away from it. Only then is DOWN commanded -- which is the lift's
- *                 banded, seating descent (see lift.hpp), not a position move. The pivot is already
- *                 OUT at every stack level and OUT is the default down position, so it does not move
- *                 (if the driver had toggled it BACK up there, it is put back OUT, without waiting).
- *                 Settles into IDLE once the arm is actually SEATED on its hard stop.
+ *   RELEASING     L2/score() with something held above the bottom: the jaws open the instant this
+ *                 state is entered, then the arm stands completely still for config::L2_RELEASE_WAIT_MS
+ *                 (it is still holding its stack level, so this costs nothing) so the pin is free and
+ *                 settled in the cup before the end effector moves away from it. Only then is DOWN
+ *                 commanded -- which is the lift's banded, seating descent (see lift.hpp), not a
+ *                 position move. The pivot is already OUT at every stack level and OUT is the default
+ *                 down position, so it does not move (if the driver had toggled it BACK up there, it
+ *                 is put back OUT, without waiting). Settles into IDLE once the arm is actually SEATED
+ *                 on its hard stop. L2 at the bottom never enters this state any more -- see score().
  *                 scoreOrMatchload() (not on a button) still uses the older CLAW_OPEN_TIME_MS wait
  *                 then a move to INTAKE_POS, unchanged.
  *   MOVING        scoreOrMatchload()/goTo*() only: claw open, lift to the destination -- INTAKE or
@@ -67,9 +72,9 @@
  *   3. The arm never moves away from the goal until the jaws have had time to open: CLAW_OPEN_TIME_MS
  *      for scoreOrMatchload(), L2_RELEASE_WAIT_MS for L2's score().
  *   4. R1 never pulls a held pin back down to the intake: it is a no-op while the claw is CLAMPED
- *      (shut by L1, A or the autoclamp). This claw's unpowered position is OPEN, so power-on is never
- *      clamped and R1 works straight away. Starting a match with a pin in the claw: press A or L1
- *      first, because the claw needs air to grip it at all.
+ *      (shut by L1, A, L2 at the bottom, or the autoclamp). This claw's unpowered position is OPEN,
+ *      so power-on is never clamped and R1 works straight away. Starting a match with a pin in the
+ *      claw: press A or L1 first, because the claw needs air to grip it at all.
  *   5. The manual override always wins: main.cpp calls reset() whenever D-pad Up/Down is held, so
  *      this macro can never re-command the lift out from under a manual nudge (it does not touch
  *      the claw or pivot, which stay physically where they were).
@@ -104,11 +109,16 @@ class Scoring {
     /** R1 (new-press): put the claw at the intake handoff (ignored while holding a pin or mid-score). */
     void goToIntake();
     /** L1: first tap clamps and lifts to level 1; every tap after goes up one level, staying at
-     *  STACK_LEVEL_COUNT (the top) once reached. */
+     *  STACK_LEVEL_COUNT (the top) once reached. If the claw is already CLAMPED (L2 clamped it at the
+     *  bottom, see score() below), the first tap skips CLAW_CLOSE_TIME_MS's wait and rises straight
+     *  away, since the jaws have nothing left to close. */
     void stepUp();
-    /** L2: holding a pin -> score (open the jaws and lower all the way to DOWN in one motion, pivot
-     *  OUT) and reset the level count so the next L1 starts at level 1 again. Not holding anything:
-     *  no-op -- there is no matchload fallback on this button any more, see scoreOrMatchload(). */
+    /** L2: at the bottom (seated, or within LIFT_BOTTOM_GOAL_DEG of it) and not mid-move -- the CLAMP
+     *  TRIGGER: toggles the claw in place through the same logical API A / toggleClaw() uses, and
+     *  touches neither the lift nor the pivot. Above the bottom, holding a pin -> score (open the
+     *  jaws and lower all the way to DOWN in one motion, pivot OUT) and reset the level count so the
+     *  next L1 starts at level 1 again; not holding anything -> no matchload fallback on this button
+     *  any more, see scoreOrMatchload(). */
     void score();
     /** Not currently wired to a driver button (previously Down/L2 when empty). Holding a pin ->
      *  same as score() but lowers to INTAKE instead of DOWN. Empty -> go to the matchload position.

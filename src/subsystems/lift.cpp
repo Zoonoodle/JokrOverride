@@ -123,6 +123,15 @@ void Lift::requestHome() {
     // Only ever from IDLE: a second request after a run has homed, failed or been cancelled is a
     // no-op, which is what makes "auton then opcontrol" home exactly once per program run.
     if (home_ != Home::IDLE) return;
+    // Homing is switched OFF on this robot (config::LIFT_HOME_ON_ENABLE, the driver's decision
+    // 2026-10-03: the arm is set at its hard stop every time, so zero()'s absolute-angle seed is
+    // already right and a route should be able to start lifting immediately). Gated HERE, in the one
+    // place every caller goes through, so autonomous() and opcontrol() are both covered and neither
+    // can move the arm on enable. The brain says HOME SKIPPED.
+    if (!config::LIFT_HOME_ON_ENABLE) {
+        home_ = Home::SKIPPED;
+        return;
+    }
     if (!rotation_) {
         home_ = Home::SKIPPED;  // nothing to home against; do NOT move the arm blind
         return;

@@ -638,6 +638,22 @@ inline constexpr int LIFT_TRACE_TAIL_MS = 500;
 // 10 ms task is still the only thing that writes the lift motors, nothing blocks on it, and holding
 // D-pad Up/Down cancels it instantly (safety rule 3 is untouched). Lift targets asked for during
 // homing are queued and run the moment it finishes.
+// IS HOMING RUN AT ALL? OFF since 2026-10-03, by the driver's decision: "the thing that calibrates
+// the lift and moves it down at the bottom, needs to stop rn for auton, we are correctly at bottom
+// each time for auton now. we no longer need that, so we can immeditatly start liftng at start of
+// auton." With the arm genuinely at its hard stop at setup, Lift::zero()'s seed from the rotation
+// sensor's own calibrated absolute zero is already correct, and homing is just a second of the arm
+// driving down before the route can start.
+// WITH THIS FALSE, Lift::requestHome() does nothing but record Home::SKIPPED (the brain's LIFT line
+// says HOME SKIPPED), so NEITHER autonomous() NOR opcontrol() moves the arm on enable -- important,
+// because turning it off only in auton would have made opcontrol's own call live, and the arm would
+// have driven itself down at the start of driver control, possibly holding a pin.
+// TURN IT BACK ON (true) IF: the arm is ever powered on more than ~45 ARM degrees above the bottom.
+// That is the one case the seed cannot resolve -- past +-45 arm deg (+-180 sensor deg) it lands on the
+// wrong turn of the 4:1-geared sensor and every preset is off by a whole sensor revolution, which is
+// the "our arm always starts up too much" problem homing was written for. Everything below still
+// works and is still tuned; only this switch gates it.
+inline constexpr bool LIFT_HOME_ON_ENABLE = false;           // the driver's call, 2026-10-03
 inline constexpr float LIFT_HOME_MV = -4000.0f;              // TUNE: steady downward drive while homing (negative = down)
 // Don't start looking for "stopped" until the arm has been driving this long, so a sticky start isn't
 // mistaken for the bottom.

@@ -812,7 +812,20 @@ show `pos` holding within a degree with no sign change in `vel`. Any oscillation
 | R1/R2 run the intake when you wanted lift (or vice versa) | read `R:` on the brain's `CLAW` line. `R:LIFT` needs the claw `CLAMPED`; `R:wait` means the clamp changed while the button was held -- let go and press again |
 | A button seems to do nothing | read the brain's `CLAW` line first. `CLAMPED` makes R1's go-to-intake a no-op (interlock 4) and turns R1/R2 into lift up/down, and `MACRO STACKING` means the macro thinks it is holding a pin. `B` resets the macro; `A` opens the jaws |
 
-## Lift homing (automatic, every program run)
+## Lift homing (currently SWITCHED OFF)
+> **`config::LIFT_HOME_ON_ENABLE` is `false` since 2026-10-03** -- the driver's call: "we are
+> correctly at bottom each time for auton now. we no longer need that, so we can immeditatly start
+> liftng at start of auton." With the arm genuinely on its hard stop at setup, `Lift::zero()`'s seed
+> from the rotation sensor's own calibrated absolute zero is already correct, so homing only cost a
+> second of the arm driving down before the route could start. `Lift::requestHome()` now records
+> `HOME SKIPPED` and moves nothing, in **both** autonomous and driver control (gating it in auton
+> alone would have made opcontrol's own call live, and the arm would have driven itself down at the
+> start of driver). **Set it back to `true` if the arm is ever powered on more than ~45 arm degrees
+> above the bottom** -- past that the seed lands on the wrong turn of the 4:1-geared sensor and every
+> preset is off by a whole sensor revolution, which is what homing was written for. Everything below
+> still works and is still tuned; the switch just gates it.
+
+## Lift homing, when it is enabled
 The arm often powers on sitting well above the bottom. `Lift::zero()` can only seed the position
 counter from the rotation sensor's folded absolute angle, which is unambiguous **only within ±45 arm
 deg (±180 sensor deg)** of the true bottom — past that every preset is off by a whole sensor

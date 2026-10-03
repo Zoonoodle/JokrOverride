@@ -228,8 +228,51 @@ inline constexpr double LIFT_DRIVE_RESUME_DEG_PER_S = 20.0;  // TUNE
 inline constexpr float LIFT_HOLD_KP = 180.0f;                // TUNE: mV per deg of sag
 inline constexpr float LIFT_HOLD_KI = 400.0f;                // TUNE: mV per deg per second (learns gravity)
 inline constexpr float LIFT_HOLD_KD = 90.0f;                 // TUNE: mV per deg/s -- the anti-bounce term
-inline constexpr double LIFT_HOLD_DEADBAND_DEG = 0.8;        // TUNE: inside this, only the learned gravity term acts
 inline constexpr float LIFT_HOLD_MAX_MV = 7000.0f;           // TUNE: most the hold may push
+// THE SETTLE BAND (was LIFT_HOLD_DEADBAND_DEG = 0.8, which is most of why the arm hunted at a level --
+// see "Settling instead of hunting" below). Inside it the hold applies NO position correction and
+// FREEZES its integral: it just keeps pushing the gravity voltage it has already learned. 4 deg is
+// well inside the 5 deg arrival tolerance the driver is happy with at a stack level ("5-10 deg is
+// fine"), and the arm is simply left where it stopped instead of being argued with.
+//   Still creeps down out of the band over a few seconds: raise LIFT_HOLD_KI a little, NOT this.
+//   Visibly off the level: lower this (and LIFT_TOLERANCE_DEG with it).
+inline constexpr double LIFT_HOLD_DEADBAND_DEG = 4.0;        // TUNE: stack levels, MATCHLOAD, any custom height
+// INTAKE must still line up, so a PRECISE goal gets a tight band and keeps correcting right in.
+inline constexpr double LIFT_HOLD_PRECISE_DEADBAND_DEG = 0.5;  // TUNE: INTAKE only
+
+// --- Settling instead of hunting: the PARK phase ------------------------------
+// WHY. A damped position hold on a springy six-bar with 4:1 backlash cannot sit perfectly still: the
+// integral winds up against stiction until the arm breaks free, overshoots the 0.8 deg deadband, and
+// the integral then has to unwind -- a slow limit cycle, which is the "still oscillating a good
+// amount" the driver sees. Arrival also latches with up to LIFT_TOLERANCE_DEG of error and up to
+// LIFT_STOPPED_DEG_PER_S of speed, so the hold starts with something real to chase.
+// THE FIX, in the driver's own words ("id rather it just settle instead of keeping on trying to do
+// it"): stop using feedback at all once the arm is near enough. PARK is a CONSTANT voltage -- the
+// gravity feedforward the hold had learned, frozen at that instant -- with no P, no D and no integral
+// update. A constant voltage has no loop, so it physically cannot oscillate. Entered from HOLD either
+// as soon as the arm has been inside the settle band and slow for LIFT_PARK_CONFIRM_MS, or
+// unconditionally after LIFT_SETTLE_TIMEOUT_MS of holding, whichever comes first.
+//   It parks visibly off the level: lower LIFT_HOLD_DEADBAND_DEG, or raise LIFT_SETTLE_TIMEOUT_MS so
+//     the active hold gets longer to pull in first.
+//   It sags away after parking: raise LIFT_HOLD_KI (so the learned voltage it freezes is bigger), or
+//     lower LIFT_REENGAGE_DEG so the hold wakes sooner.
+//   It still oscillates: LOWER LIFT_SETTLE_TIMEOUT_MS and LIFT_PARK_CONFIRM_MS -- that parks sooner,
+//     i.e. less feedback for less time. This is the knob for "it still hunts".
+inline constexpr int LIFT_PARK_CONFIRM_MS = 150;             // TUNE: inside the band and slow for this long
+inline constexpr int LIFT_SETTLE_TIMEOUT_MS = 700;           // TUNE: ...or just hold this long, then park anyway
+// Once parked, the hold only wakes up again if the arm has really moved away from where it parked (a
+// knock, or a slow sag the frozen voltage could not carry). Deliberately large: waking for anything
+// smaller is exactly the hunting this exists to stop.
+inline constexpr double LIFT_REENGAGE_DEG = 8.0;             // TUNE
+// ...and never sooner than this after parking, so PARK and HOLD cannot ping-pong.
+inline constexpr int LIFT_PARK_COOLDOWN_MS = 300;            // TUNE
+// A position move that has not arrived by now has met something it cannot get past (a preset above the
+// real top, a jam the stall guard did not catch, a badly tuned loop): stop chasing it and PARK where
+// it is, shown as PARK(t/o). Sized from the longest legitimate move -- DOWN to level 5 is 107 deg,
+// which at the braked profile is well under a second -- plus a wide margin, and it has to cover a
+// CLAMPING/pivot wait in front of the move too.
+//   A real long move gets cut short: raise it.
+inline constexpr int LIFT_MOVE_TIMEOUT_MS = 2500;            // TUNE
 
 // --- The descent to the bottom (L2, B, auton DOWN, and R2 in clamped mode) --
 // Three speed bands on the way down, as % of the free speed, so the arm walks itself onto its hard
@@ -332,6 +375,34 @@ inline constexpr double LIFT_SEAT_ZERO_DEG = 1.0;            // TUNE: within thi
 inline constexpr double LIFT_SEAT_UNSEAT_DEG = 4.0;          // TUNE
 inline constexpr double LIFT_SEAT_TEMP_LIMIT_C = 50.0;       // safety net, not a tuning knob
 
+// --- REST: motors loose once the arm is settled at the bottom ---------------
+// THE DRIVER'S REQUEST, 2026-10-03: "turn off lift pid on default state once it settles and is in that
+// down state, keep motors loose so they arent being usefd and burn out." So SEAT is no longer the
+// final state at the bottom. Once the arm has been SEATed and genuinely still for LIFT_REST_AFTER_MS,
+// the lift enters REST: brake mode COAST and 0 V. No PID, no LIFT_SEAT_MV push, and not the firmware
+// brake-hold either (which is a position loop and does draw current) -- the motors are simply free.
+// The frame is holding the arm, not the motors. Brain: `REST`.
+// REST still counts as seated/settled everywhere (isSeated(), isSettled(), waitLiftSeated(), Scoring's
+// at-the-bottom tests), and ANY new command, the D-pad, or clamped-mode R1/R2 leaves it instantly and
+// puts the brake mode back.
+// COASTING IS ONLY EVER DONE AT THE BOTTOM. The power-on / no-target state is still a BRAKE-hold, so
+// an arm that powers on part-way up cannot fall (CLAUDE.md safety rule 1 is unchanged), and letting go
+// of the manual override still brake-holds where it is.
+// THE ONE RISK, and the guard. SEAT exists partly because the arm "does not park above the frame and
+// cannot bounce": the lift's rubber bands pull UP, hardest at the folded position, so with the motors
+// loose the arm may creep off its stop. If the arm rises past LIFT_REST_WAKE_DEG while resting, the
+// lift re-seats it (FINAL's forced push, then SEAT) and rests again -- at most LIFT_REST_MAX_WAKES
+// times, after which it stays in SEAT and keeps the gentle -1500 mV rather than pulsing forever.
+//   The arm creeps up off the stop, or the brain cycles REST -> FINAL -> SEAT -> REST: set
+//     LIFT_REST_AFTER_MS to 0, which TURNS REST OFF ENTIRELY and keeps the old always-seated
+//     behaviour. (Then watch the TEMP line instead: -1500 mV is about a watt per motor.)
+//   The motors still feel stiff at the bottom: check the brain says REST, not SEAT -- SEAT means the
+//     stillness test never passed, so raise LIFT_REST_STILL_DEG_PER_S.
+inline constexpr int LIFT_REST_AFTER_MS = 300;               // TUNE: still-at-the-stop time before coasting; 0 = never
+inline constexpr double LIFT_REST_STILL_DEG_PER_S = 3.0;     // TUNE: what counts as "not moving" for the above
+inline constexpr double LIFT_REST_WAKE_DEG = 4.0;            // TUNE: rising past this while resting = re-seat it
+inline constexpr int LIFT_REST_MAX_WAKES = 3;                // TUNE: then stay in SEAT instead of pulsing
+
 // --- The L1 GRAB at the intake handoff (see "SCORING WITH L2"'s sibling, "THE GRAB", in lift.hpp) --
 // L1 pressed while the macro is parked at the INTAKE handoff no longer just closes the jaws and
 // rises: the arm first FORCES ITSELF DOWN onto the pin for a moment, closes the jaws while it is
@@ -412,8 +483,13 @@ inline constexpr double LIFT_VEL_FILTER = 0.8;
 //   BRAKE     the velocity loop tracks min(cruise cap, braking curve) all the way in.
 //   APPROACH  the same loop, now tracking LIFT_APPROACH_KP_PER_S * (degrees left) capped at
 //             LIFT_APPROACH_DEG_PER_S, so the arm is down to a crawl before it stops.
-//   HOLD      the damped position hold (KP/KI/KD above). Its integral carries the learned gravity
-//             voltage over to the next move, so no move ever starts by guessing it.
+//   HOLD      the damped position hold (KP/KI/KD above), with no P correction and a FROZEN integral
+//             inside the settle band. Its integral carries the learned gravity voltage over to the
+//             next move, so no move ever starts by guessing it.
+//   PARK      settled: that learned voltage, frozen, pushed as a constant with no feedback at all, so
+//             it cannot hunt. Entered after LIFT_PARK_CONFIRM_MS inside the band or
+//             LIFT_SETTLE_TIMEOUT_MS of holding; a move that never arrives parks as PARK(t/o) after
+//             LIFT_MOVE_TIMEOUT_MS. Left only on a LIFT_REENGAGE_DEG drift or a new command.
 //
 // A DESCENT (a non-precise goal at or below LIFT_BOTTOM_GOAL_DEG: L2, B, auton DOWN, R2 in clamped
 // mode) is DESCEND -> FINAL -> SEAT: the three speed bands above, then (below LIFT_FINAL_START_DEG) a
@@ -421,7 +497,9 @@ inline constexpr double LIFT_VEL_FILTER = 0.8;
 // force than the seat hold, enough to push through a cup or friction a few degrees short of 0 -- for a
 // fixed LIFT_FINAL_FORCE_MS, and only then a constant LIFT_SEAT_MV pressed into the hard stop. It does
 // not stop above the frame and it does not bounce; see "Seating on the hard stop" below for why the
-// original single-step version could park short.
+// original single-step version could park short. Finally, once that seated arm has been still for
+// LIFT_REST_AFTER_MS, REST coasts the motors at 0 V so they draw nothing (see "REST" below) -- the
+// only place in the program that ever coasts.
 //
 // THE MANUAL INPUT (D-pad Up/Down, and R1 in clamped mode) is plain voltage straight into the same
 // loop, ahead of everything else; it cancels any target and any homing instantly, and letting go

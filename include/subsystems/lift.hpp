@@ -47,7 +47,8 @@
  *             LIFT_APPROACH_DEG_PER_S -- a crawl that tapers to nothing at the
  *             goal, so the arm is practically stopped before the hold takes it.
  *             This is what stops the six-bar springing on arrival.
- *   HOLD      a DAMPED position hold, not the firmware's brake-hold:
+ *   HOLD      a DAMPED position hold, not the firmware's brake-hold -- and only
+ *             for as long as it takes to settle (see PARK below):
  *               LIFT_HOLD_KP * (error outside the deadband)
  *               + integral(LIFT_HOLD_KI * error)      <- learns gravity
  *               - LIFT_HOLD_KD * velocity             <- absorbs the arrival
@@ -55,7 +56,22 @@
  *             so the next hold starts already knowing roughly what this arm
  *             costs to hold up, and enterBrake() seeds the velocity loop from
  *             it too. Nothing re-drives and nothing re-chases: the hold IS the
- *             correction, and it is gentle.
+ *             correction, and it is gentle. Inside holdDeadband() the P term is
+ *             silent AND the integral is FROZEN -- an integral that keeps
+ *             winding against stiction while P says nothing is a limit cycle,
+ *             which is what "still oscillating a good amount" was.
+ *   PARK      then it stops correcting altogether. Once the arm has been inside
+ *             the settle band and slow for LIFT_PARK_CONFIRM_MS, or the hold has
+ *             simply run LIFT_SETTLE_TIMEOUT_MS, PARK freezes the learned
+ *             gravity voltage and pushes exactly that -- no P, no D, no integral
+ *             update, no feedback of any kind, so it physically cannot hunt. The
+ *             hold only wakes again if the arm drifts LIFT_REENGAGE_DEG away
+ *             (and not within LIFT_PARK_COOLDOWN_MS, so the two cannot
+ *             ping-pong). A position move that has not arrived within
+ *             LIFT_MOVE_TIMEOUT_MS also parks, where it is, as PARK(t/o): it
+ *             stops chasing something it cannot reach. (Driver's request,
+ *             2026-10-03: "id rather it just settle instead of keeping on trying
+ *             to do it. neds a timeout.")
  *
  * A DESCENT -- a non-precise goal at or below LIFT_BOTTOM_GOAL_DEG, i.e. L2, B,
  * auton DOWN and R2 in clamped mode -- is DESCEND -> FINAL -> SEAT:
@@ -88,11 +104,24 @@
  *             LIFT_SEAT_ZERO_DEG of 0 at that moment, SEAT(short) otherwise (a
  *             genuine jam, not just friction) so the driver can tell it did not
  *             actually reach 0.
- *   SEAT      hold a constant LIFT_SEAT_MV pressed into the stop so the arm
- *             cannot bounce back up. It does NOT park a few degrees above the
- *             frame any more (that was FINAL's whole point). If a lift motor
- *             ever reaches LIFT_SEAT_TEMP_LIMIT_C the seat drops to a plain
- *             brake-hold.
+ *   SEAT      a constant LIFT_SEAT_MV pressed into the stop so the arm cannot
+ *             bounce back up. It does NOT park a few degrees above the frame
+ *             (that was FINAL's whole point). If a lift motor ever reaches
+ *             LIFT_SEAT_TEMP_LIMIT_C the seat drops to a plain brake-hold.
+ *   REST      and then the motors are let go entirely. Once the seated arm has
+ *             been still for LIFT_REST_AFTER_MS, REST sets the brake mode to
+ *             COAST and commands 0 V: no PID, no seat push, not even the
+ *             firmware hold (which is a position loop and does draw current).
+ *             The frame holds the arm; the motors draw nothing for the rest of
+ *             the match. (Driver's request, 2026-10-03: "keep motors loose so
+ *             they arent being usefd and burn out.") REST counts as seated and
+ *             settled everywhere. COASTING HAPPENS ONLY HERE: the no-target
+ *             state and every manual release are still brake-holds, so an arm
+ *             that is up cannot fall. Because this lift's bands pull UP hardest
+ *             at the folded position, a resting arm that creeps past
+ *             LIFT_REST_WAKE_DEG is re-seated (FINAL, SEAT, REST again), at most
+ *             LIFT_REST_MAX_WAKES times before it just stays SEATed.
+ *             LIFT_REST_AFTER_MS = 0 disables REST completely.
  *
  * SCORING WITH L2 is a third kind of move, started by startScore() and run as
  * phases PRESS -> RELEASE -> (UNSTICK) -> the DESCENT above. It is the only
@@ -238,6 +267,9 @@ class Lift {
         DRIVE, BRAKE, APPROACH, HOLD, DESCEND, FINAL, SEAT, PRESS, RELEASE, UNSTICK,
         GRAB,      // the L1/auton grab: a constant downward push while the jaws close (see THE GRAB)
         POSTPUSH,  // L2 press 1: still pressing down after the jaws were told to open
+        PARK,      // settled: a CONSTANT voltage (the learned gravity term, frozen). No loop at all,
+                   // so it cannot hunt. See "Settling instead of hunting" in config.hpp.
+        REST,      // settled AT THE BOTTOM: brake mode COAST and 0 V -- the motors are loose.
     };
 
     Lift();
@@ -343,7 +375,11 @@ class Lift {
 
     /** True once the lift has arrived on the active goal -- holding a height (HOLD), or seated on the
      *  hard stop at the bottom (SEAT), which is what arrival at DOWN means now. */
-    bool isSettled() const { return active_ && (phase_ == Phase::HOLD || phase_ == Phase::SEAT) && !blocked_; }
+    bool isSettled() const {
+        return active_ && !blocked_ &&
+               (phase_ == Phase::HOLD || phase_ == Phase::SEAT || phase_ == Phase::PARK ||
+                phase_ == Phase::REST);
+    }
     /** True if the last target couldn't be reached (stalled) and the lift is holding where it stopped. */
     bool isBlocked() const { return blocked_; }
     /** True if the runaway guard tripped. */
@@ -372,7 +408,12 @@ class Lift {
      *  that ended FINAL's forcing window above true 0 (see isSeatShort()). It is still "done trying"
      *  either way, which is what callers that just want "stop waiting" (e.g. main.cpp's L2 auto-
      *  outtake) should react to. */
-    bool isSeated() const { return phase_ == Phase::SEAT; }
+    bool isSeated() const { return phase_ == Phase::SEAT || phase_ == Phase::REST; }
+    /** True while the lift is PARKED: holding a height on a frozen constant voltage with no feedback
+     *  (see "Settling instead of hunting" in config.hpp). It is settled; it is just not correcting. */
+    bool isParked() const { return phase_ == Phase::PARK; }
+    /** True while the motors are RESTING: coasting at the bottom, drawing nothing. */
+    bool isResting() const { return phase_ == Phase::REST; }
     /** True if the current/last SEAT ended FINAL's forcing window (LIFT_FINAL_FORCE_MS) above
      *  LIFT_SEAT_ZERO_DEG of 0 -- shown as SEAT(short) on the brain. Meaningless unless isSeated() is
      *  also true. */
@@ -481,6 +522,19 @@ class Lift {
      *  arm still above LIFT_SEAT_ZERO_DEG (SEAT(short) on the brain); false (the default) is every
      *  other caller -- homing finding the real hard stop, and FINAL ending within LIFT_SEAT_ZERO_DEG. */
     void enterSeat(std::uint32_t now, bool shortSeat = false);
+    /** Settled: freeze the hold's learned gravity voltage and push exactly that, forever, with no
+     *  feedback of any kind. timedOut = true marks a move that was abandoned rather than arrived at
+     *  (PARK(t/o) on the brain). */
+    void enterPark(std::uint32_t now, double parkAt, bool timedOut);
+    /** Settled at the bottom: brake mode COAST, 0 V, motors loose. */
+    void enterRest(std::uint32_t now);
+    /** One tick of PARK. Returns true if it is still parked (and has written the motors); false if the
+     *  arm had drifted past LIFT_REENGAGE_DEG, in which case it has re-entered HOLD and the caller
+     *  must run that instead. */
+    bool updatePark(std::uint32_t now, double position);
+    /** Put the brake mode back to hold if REST had set it to coast. Called before anything else writes
+     *  the motors, so coasting can never leak out of REST. */
+    void wakeMotors();
     /** One tick of PRESS / RELEASE / POSTPUSH / UNSTICK. Writes the motors and traces. */
     void updateScore(std::uint32_t now, double dt, double position);
     /** One tick of the grab push. Writes the motors and traces. */
@@ -508,6 +562,8 @@ class Lift {
     double descentSpeed(double position) const;
     /** This goal's arrival band: LIFT_PRECISE_TOLERANCE_DEG (precise) else LIFT_TOLERANCE_DEG. */
     double arrivalTolerance() const;
+    /** This goal's settle band: LIFT_HOLD_PRECISE_DEADBAND_DEG (precise) else LIFT_HOLD_DEADBAND_DEG. */
+    double holdDeadband() const;
 
     // trace ring (single producer: the lift task; single consumer: the trace task)
     struct TraceSample {
@@ -564,6 +620,16 @@ class Lift {
     bool seatHot_ = false;          // a lift motor passed LIFT_SEAT_TEMP_LIMIT_C: brake-hold instead of pressing
     int seatTempTick_ = 0;          // temperature is only read every 50th SEAT tick
     bool seatShort_ = false;        // this SEAT ended FINAL's forcing window still above LIFT_SEAT_ZERO_DEG
+    std::uint32_t seatStillSince_ = 0;  // when the seated arm was first seen still (0 = moving)
+    int restWakes_ = 0;             // how many times REST has had to re-seat a creeping arm this command
+
+    // settling (PARK / REST)
+    bool coasting_ = false;         // the brake mode is currently COAST (REST only)
+    double parkMv_ = 0.0;           // the frozen constant voltage PARK pushes
+    double parkGoal_ = 0.0;         // the height PARK believes it is at (re-engage is measured from it)
+    bool parkTimeout_ = false;      // this PARK is an abandoned move, not an arrival
+    std::uint32_t holdSettleSince_ = 0;  // when the hold was first seen inside the band and slow
+    std::uint32_t moveStart_ = 0;   // when the current position move was commanded (LIFT_MOVE_TIMEOUT_MS)
 
     // L2 scoring
     bool score_ = false;                 // a press/sense/release sequence is running

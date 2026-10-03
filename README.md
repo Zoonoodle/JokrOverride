@@ -282,8 +282,9 @@ autonomous period.
 3. For 2 s: `LIFT 0.0 -> 0.0  DOWN  SEAT  SETTLED`. It must not creep up.
 4. Up to stack level 1: `LIFT ... -> 31.0  STACK 1  DRIVE` then `HOLD` for 2 s, within ~5 deg of 31.
 5. Up to stack level 3: ends `HOLD` near 74.6 for 2 s.
-6. Back down: `DESCEND` -> `FINAL` -> `SEAT` near 0, and it **stays** `SEAT` -- including after the
-   switch to driver control.
+6. Back down: `DESCEND` -> `FINAL` -> `SEAT` near 0 -> `REST` about 300 ms later, and it **stays**
+   `REST` -- including after the switch to driver control. At `REST` the motors are coasting: the arm
+   should feel completely free if you lift it by hand.
 
 **`ODOM_TEST` on the robot:** clear 3 ft in front, mark the starting position, enable autonomous. The
 robot drives forward 24", then reverses back; it should finish on its mark and the brain's `POSE` line
@@ -558,15 +559,31 @@ assumes the one above is settled. **Start from the values in `config.hpp` -- the
    loop sustain the cruise, and lowering it both slows the middle of long moves and means lowering
    `LIFT_DECEL_DEG_PER_S2` to match.
    If the trace shows `D` and `B` alternating line-to-line, raise `LIFT_DRIVE_RESUME_DEG_PER_S`.
-6. **The hold: `LIFT_HOLD_KD`, then `KP`, then `KI`.** Park at level 3 and watch the `H` lines.
-   - **any bounce at all on arrival → raise `LIFT_HOLD_KD`** (90 → 120 → 150). This is the anti-bounce
-     knob, it costs no speed, and it is the first thing to try. The second lever is lowering
-     `LIFT_STOPPED_DEG_PER_S` (12 → 8) for a gentler handover, at the cost of a slightly slower finish.
-   - the arm sags below the level over a few seconds → raise `LIFT_HOLD_KI` (400 → 600), then
-     `LIFT_HOLD_KP`
-   - it buzzes or twitches while parked → raise `LIFT_HOLD_DEADBAND_DEG` (0.8 → 1.2), then lower
-     `LIFT_HOLD_KP` (180 → 140)
+6. **The hold, and how fast it gives up correcting: `LIFT_HOLD_*`, then `LIFT_PARK_*`.** Go to level 3
+   and watch the `H` lines, then the `K` lines. **The hold is deliberately short-lived now:** inside
+   `LIFT_HOLD_DEADBAND_DEG` (4°) it applies no position correction and freezes its integral, and after
+   `LIFT_PARK_CONFIRM_MS` inside that band (or `LIFT_SETTLE_TIMEOUT_MS` of holding, whichever comes
+   first) it **PARK**s -- a frozen constant voltage, no feedback at all, which is why it cannot hunt.
+   The brain shows `PARK`; the trace shows `K` lines with a constant `mv`.
+   - **it still oscillates at a level → lower `LIFT_SETTLE_TIMEOUT_MS`** (700 → 400) and
+     `LIFT_PARK_CONFIRM_MS` (150 → 80). That is "park sooner", i.e. less feedback for less time, and it
+     is the first knob for this symptom now -- not the gains. If the `H` lines show the arm crossing the
+     goal back and forth before `K` appears, that is the limit cycle; parking sooner ends it.
+   - any bounce in the last moment of the move itself (the `A` lines, before `H`) → raise
+     `LIFT_HOLD_KD` (90 → 120 → 150), or lower `LIFT_STOPPED_DEG_PER_S` (12 → 8) for a gentler handover
+   - it parks visibly off the level → lower `LIFT_HOLD_DEADBAND_DEG` (4 → 2.5), or raise
+     `LIFT_SETTLE_TIMEOUT_MS` so the active hold gets longer to pull in first
+   - it sags away *after* parking → raise `LIFT_HOLD_KI` (400 → 600) so the voltage it freezes is
+     bigger, or lower `LIFT_REENGAGE_DEG` (8 → 5) so the hold wakes sooner
+   - it wakes and re-parks repeatedly (`K` → `H` → `K` on the brain) → raise `LIFT_REENGAGE_DEG` and
+     `LIFT_PARK_COOLDOWN_MS`
    - it audibly strains at a high level → lower `LIFT_HOLD_MAX_MV`, and accept some sag
+   - **INTAKE is exempt from the wide band:** a precise goal uses
+     `LIFT_HOLD_PRECISE_DEADBAND_DEG` (0.5°) and keeps correcting right in, then parks like everything
+     else. Only the band differs.
+   - a move that never arrives (preset above the real top, a jam the stall guard missed) stops chasing
+     after `LIFT_MOVE_TIMEOUT_MS` and parks where it is -- brain `PARK(t/o)`. If a legitimate long move
+     ever gets cut short, raise it.
 7. **The descent: the `LIFT_DESCENT_*` bands.** Clamp nothing, go to level 5 with `L1`, press `L2` and
    watch the `V` lines, then the `S` lines.
    - too fast off the top → lower `LIFT_DESCENT_TOP_PCT`
@@ -588,8 +605,20 @@ assumes the one above is settled. **Start from the values in `config.hpp` -- the
    - still bounces up off the stop once truly `SEAT`ed → more negative `LIFT_SEAT_MV` (−1500 → −1800)
    - `SEAT` appears while the arm is still a few degrees up (not `SEAT(short)` -- a real false arrival)
      → lower `LIFT_SEAT_ZERO_DEG`
-   - lift motors warming on the `TEMP` line while parked at the bottom → less negative `LIFT_SEAT_MV`
-     (−1500 → −1000)
+   - lift motors warming on the `TEMP` line while parked at the bottom → see `REST` below; the seat
+     only lasts `LIFT_REST_AFTER_MS` now, so this should no longer happen
+8b. **`REST`: loose motors at the bottom.** `LIFT_REST_AFTER_MS` (300 ms) after the seated arm has gone
+   still, the phase becomes `REST`: brake mode **coast**, 0 V, no PID and no seat push, so the motors
+   draw nothing at all for the rest of the match. The frame holds the arm. Trace: `E` lines with
+   `mv 0`. With the robot disabled-but-powered after an auton, the arm should feel **completely free**
+   by hand at the bottom, and stiff everywhere else.
+   - the arm **creeps up** off the stop, or the brain cycles `REST` → `FINAL` → `SEAT` → `REST`: this
+     lift's bands pull up hardest at the folded position, and coasting lets them. `LIFT_REST_WAKE_DEG`
+     (4°) re-seats it at most `LIFT_REST_MAX_WAKES` (3) times before it just stays `SEAT`ed. If it
+     happens at all, **set `LIFT_REST_AFTER_MS = 0`, which turns `REST` off entirely** and restores the
+     old always-pressed behaviour.
+   - it says `SEAT` and never `REST`: the stillness test never passed -- raise
+     `LIFT_REST_STILL_DEG_PER_S` (3 → 6).
 9. **Rapid taps.** From the bottom, clamp with `L1`, then double-tap and triple-tap `L1`. The `LIFT`
    line's phase must go `DRIVE` → (maybe `BRAKE`) → `DRIVE` again as each tap lands, and never
    `APPROACH` or `HOLD` at an intermediate level. In the trace there must be no `H` line between taps.

@@ -147,7 +147,15 @@ reference becomes `LIFT_APPROACH_KP_PER_S × degrees left`, clamped between
 `LIFT_APPROACH_MIN_DEG_PER_S` and `LIFT_APPROACH_DEG_PER_S` — the floor is load-bearing, without it
 the tail decays exponentially and dominates the move) → HOLD (a **damped** position hold:
 `LIFT_HOLD_KP` + an integral that learns gravity + `LIFT_HOLD_KD` × speed, seeded from the velocity
-loop's own integral). **Those first three are chosen fresh from (distance, speed) every tick, not
+loop's own integral — with **no P and a FROZEN integral inside `LIFT_HOLD_DEADBAND_DEG`**, 4° at a level
+and `LIFT_HOLD_PRECISE_DEADBAND_DEG` 0.5° at INTAKE) → **PARK** (the user's 2026-10-03 request, "id
+rather it just settle instead of keeping on trying to do it. neds a timeout": after
+`LIFT_PARK_CONFIRM_MS` inside the band or `LIFT_SETTLE_TIMEOUT_MS` of holding, the learned gravity
+voltage is **frozen and pushed as a constant** with no P, no D and no integral update, so there is no
+loop left to oscillate. The hold only wakes on a `LIFT_REENGAGE_DEG` drift, never within
+`LIFT_PARK_COOLDOWN_MS`. A position move that has not arrived within `LIFT_MOVE_TIMEOUT_MS` also stops
+chasing and parks where it is, shown as `PARK(t/o)`. This is the fix for the hold's
+integral-plus-backlash limit cycle; do not replace it with more gain tuning). **Those first three are chosen fresh from (distance, speed) every tick, not
 latched** (hysteresis: `LIFT_DRIVE_RESUME_DEG_PER_S`); only arrival into HOLD latches. That is what
 makes rapid L1 taps merge: `setTarget()` on a move already in flight *only moves `goal_`* — it must
 never restart the move, because that wipes the velocity integral and resets the approach clock. A **descent**
@@ -166,7 +174,15 @@ through, then judges once by position — within `LIFT_SEAT_ZERO_DEG` of 0 is pl
 `SEAT(short)` — rather than the earlier conditional version (seat early once "close and still", else
 give up after a budget), which `LIFT_SEAT_MAX_MS`/`LIFT_SEAT_STILL_*` belonged to and are now gone. →
 SEAT (a constant `LIFT_SEAT_MV`, −1500 pressed into the hard stop, so it does not park above the frame
-and cannot bounce). A **grab** (L1 from the INTAKE handoff, and `auton::grab()`) is a third kind: `Lift::startGrab()` presses the
+and cannot bounce) → **REST** (`LIFT_REST_AFTER_MS`, 300 ms, after the seated arm goes still: brake mode
+**COAST** and 0 V — no PID, no seat push, not even the firmware hold, so the motors draw nothing. The
+user asked for this on 2026-10-03, "keep motors loose so they arent being usefd and burn out", and it
+reverses "pressed into the hard stop" as the *final* state: the press still happens, it just stops once
+the arm is settled. REST counts as seated/settled everywhere. **Coasting happens ONLY here** — the
+no-target state and every manual release are still brake-holds, so an arm that is up cannot fall, and
+safety rule 1 is unchanged. Because the bands pull UP hardest at the folded position, a resting arm that
+creeps past `LIFT_REST_WAKE_DEG` is re-seated and rests again, at most `LIFT_REST_MAX_WAKES` times;
+`LIFT_REST_AFTER_MS = 0` disables REST entirely). A **grab** (L1 from the INTAKE handoff, and `auton::grab()`) is a third kind: `Lift::startGrab()` presses the
 arm DOWN open-loop at `L1_GRAB_PUSH_PCT` (40%), raises `needsClawGrip()` at `L1_GRAB_CLOSE_AT_MS` (200 ms)
 for **Scoring** to shut the jaws, keeps pressing until both `L1_GRAB_PUSH_MS` (300) and the jaws'
 `CLAW_CLOSE_TIME_MS` are satisfied (~350 ms total), then HOLDS where it ended — L1 commands the rise

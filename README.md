@@ -398,6 +398,32 @@ and `auton::autoclamp(false)` is the per-route switch that turns it off. Power-o
 (`CLAW_AUTOCLAMP_AT_START = false`), so a preloaded pin cannot fire a cylinder before anyone enables
 anything. It also cannot fire during an L2 score: the claw is inhibited for the whole sequence.
 
+### Turning it on, and arming it (auton especially)
+Two separate things, and this is the part that bites:
+
+1. **Enabled** -- is the autoclamp switched on at all? **Nothing to do.** It is on by default in both
+   modes (`AUTOCLAMP_ON_IN_DRIVER` / `AUTOCLAMP_ON_IN_AUTON`). `auton::autoclamp(true)` in a route is a
+   harmless no-op you can write for clarity; `auton::autoclamp(false)` is how you turn it off. **Y**
+   toggles it in driver control. `auton::autoclampOn()` reads it back.
+2. **Armed** -- is it actually watching *right now*? **Only while the jaws are OPEN.** A clamped claw is
+   `AC:HELD` and the autoclamp does nothing, by design: it never opens a claw that is holding something.
+   So in a route the thing that arms it is **opening the jaws**, not enabling it.
+
+| What you call | Result |
+|---|---|
+| nothing, jaws already open | already `AC:ARMED` -- just drive at the pin |
+| `auton::clawOpen()` | `AC:CLEAR?` first: it re-arms once the sensor reads clear (beyond `AUTOCLAMP_REARM_MM`, 80 mm) **and** `CLAW_RELEASE_LOCKOUT_MS` (750 ms) has passed. Budget ~0.75 s before it can grab again |
+| `auton::autoclamp(true)` with the jaws **open** | arms **instantly**, no clear wait (`Claw::arm()` resets the detector fresh -- the jaws are known empty) |
+| `auton::goToIntake()` (R1) | opens the jaws **and** arms instantly, and puts you in the 75 mm / instant-fire handoff mode |
+| `auton::autoclamp(true)` with a pin **held** | records the enable only. It will arm itself the next time the jaws open -- it does not drop the pin |
+
+**The trap this used to be.** `competition_initialize()` grips the preloaded pin, so the claw is
+**clamped** when `autonomous()` enables the autoclamp. That enable used to stop at `Scoring` and never
+reach the `Claw`, so the first `clawOpen()` in the route re-armed to `OPEN` (autoclamp off) instead of
+`ARMED` -- and the autoclamp silently could not fire for the rest of the match. Fixed 2026-10-03: the
+enable always reaches the Claw, clamped or not. If you ever see `AC:OFF` in auton when you did not ask
+for it, that is the symptom to remember.
+
 **Re-arm, and why it is not a timer.** The instant the jaws open, the pin they let go of is still
 millimetres away, so a timer-based re-arm re-grabs it every time and no score can finish. After **any**
 open the autoclamp is disarmed until the sensor reads **clear** -- further than `AUTOCLAMP_REARM_MM`, or

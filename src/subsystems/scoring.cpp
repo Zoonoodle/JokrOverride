@@ -371,6 +371,17 @@ void Scoring::setAutoclamp(bool on) {
     // So arm/disarm the claw itself here, in any state except CLAMPED (never open jaws that are
     // holding something). Claw::arm() handles the RELEASED case by leaving the re-arm to the clear
     // reading rule -- see autoclamp_detector.hpp.
+    //
+    // THE ENABLE ITSELF ALWAYS GETS THROUGH, CLAMPED OR NOT. This function used to return at the test
+    // below before the Claw ever heard about it, and that was a real bug on the one path a match
+    // actually takes: competition_initialize() grips the preloaded pin, so the claw is CLAMPED when
+    // autonomous() switches the autoclamp on -- the flag was set on THIS class but never on the Claw,
+    // whose own enabled_ stayed false. The first time the route opened the jaws, Claw::update()'s
+    // RELEASED case read that false and went to OPEN (autoclamp off) instead of ARMED, so the autoclamp
+    // could not fire for the whole rest of the match, with nothing on the brain to explain why.
+    // setAutoclampEnabled() is the flag and nothing else -- arm() would be a no-op on a clamped claw and
+    // disarm() would open it and drop the pin.
+    claw_.setAutoclampEnabled(on);
     if (claw_.isClamped()) return;
     if (on) claw_.arm();
     else claw_.disarm();

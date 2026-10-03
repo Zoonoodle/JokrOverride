@@ -81,6 +81,13 @@ class Claw {
     void arm();
     /** Turn autoclamp OFF; the jaws open and stay open (-> OPEN). */
     void disarm();
+    /** JUST THE ENABLE FLAG -- never the cylinder, never the state machine. For the one caller that has
+     *  to record "the autoclamp is on" while the jaws are CLAMPED on a pin, where arm() would be a no-op
+     *  and disarm() would open the jaws and drop it. Without this, a match that grips its preload in
+     *  competition_initialize() and then enables the autoclamp in autonomous() set the flag on Scoring
+     *  but never here, so the first time the route opened the jaws they re-armed to OPEN (autoclamp off)
+     *  instead of ARMED and the autoclamp could not fire for the rest of the match. */
+    void setAutoclampEnabled(bool on) { enabled_ = on; }
     /** Is the autoclamp enabled? (Y toggles it; opcontrol turns it on, auton leaves it off.) */
     bool autoclampEnabled() const { return enabled_; }
     /** Block the autoclamp from firing this tick without disabling it -- used while an L2 score

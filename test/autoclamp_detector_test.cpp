@@ -24,11 +24,11 @@ namespace {
 // The real config values (config.hpp's AUTOCLAMP_* block), restated so this test needs no PROS
 // headers. If they are changed there, change them here and re-run.
 constexpr AutoclampDetector::Config kCfg{
-    /*rangeMm*/ 15,
+    /*rangeMm*/ 50,
     /*confirmMs*/ 50,
     /*minSamples*/ 2,
     /*staleGraceMs*/ 60,
-    /*rearmMm*/ 30,
+    /*rearmMm*/ 80,
     /*rearmClearMs*/ 150,
     /*maxValidMm*/ 9999,
     /*minValidMm*/ 1,
@@ -41,11 +41,11 @@ constexpr AutoclampDetector::Config kCfg{
 // "fire the instant it sees the object" behaviour is purely these two numbers, which is why it can be
 // proved here instead of on the robot.
 constexpr AutoclampDetector::Config kIntakeCfg{
-    /*rangeMm*/ 15,
+    /*rangeMm*/ 75,
     /*confirmMs*/ 0,
     /*minSamples*/ 1,
     /*staleGraceMs*/ 60,
-    /*rearmMm*/ 30,
+    /*rearmMm*/ 105,
     /*rearmClearMs*/ 150,
     /*maxValidMm*/ 9999,
     /*minValidMm*/ 1,
@@ -61,11 +61,12 @@ void check(bool ok, const std::string& what) {
 
 /** Run a stream of readings at 10 ms per tick, holding each one for `holdTicks` ticks to model the
  *  sensor's slower refresh. Returns the millisecond the detector fired, or -1. */
-int runStream(AutoclampDetector& d, const std::vector<int>& readings, int holdTicks, int startMs = 1000) {
+int runStream(AutoclampDetector& d, const std::vector<int>& readings, int holdTicks, int startMs = 1000,
+              const AutoclampDetector::Config& cfg = kCfg) {
     int now = startMs;
     for (int mm : readings) {
         for (int t = 0; t < holdTicks; ++t) {
-            if (d.step(static_cast<std::uint32_t>(now), mm, 64, kCfg, false)) return now;
+            if (d.step(static_cast<std::uint32_t>(now), mm, 64, cfg, false)) return now;
             now += 10;
         }
     }
@@ -150,14 +151,14 @@ int main() {
         check(runStream(d, {9, 9, 9, 9, 9, 9}, 3) > 0, "...the next pin fires normally");
     }
     {
-        // 25 mm is inside the hysteresis gap (above rangeMm, below rearmMm): it is neither a pin nor
-        // clear, so a disarmed detector stays disarmed. This is what stops the two thresholds
+        // 65 mm is inside the hysteresis gap (above rangeMm 50, below rearmMm 80): it is neither a pin
+        // nor clear, so a disarmed detector stays disarmed. This is what stops the two thresholds
         // chattering at one distance.
         AutoclampDetector d;
         d.reset(true);
-        runStream(d, {25, 25, 25, 25, 25, 25, 25, 25, 25, 25}, 3);
+        runStream(d, {65, 65, 65, 65, 65, 65, 65, 65, 65, 65}, 3);
         check(d.state() == AutoclampDetector::State::WAIT_CLEAR,
-              "a reading inside the 15-30 mm hysteresis gap does not re-arm");
+              "a reading inside the 50-80 mm hysteresis gap does not re-arm");
     }
 
     // --- "nothing in range" counts as clear ---------------------------------------------------
@@ -192,6 +193,66 @@ int main() {
         check(d.state() == AutoclampDetector::State::WAIT_CLEAR, "...then disarms itself");
     }
 
+    // --- THE RANGE / RE-ARM ORDERING, as a regression test ------------------------------------------
+    // The trap the 15 -> 50 mm range change walked straight into (2026-10-03): re-arming wants a reading
+    // FURTHER than rearmMm, clamping wants one at or inside rangeMm. Leave rearmMm at or below rangeMm
+    // and a pin between them is BOTH clear and in range, so the detector arms and instantly re-fires on
+    // the thing it just released -- forever. Config::rearmMm must always be above Config::rangeMm; the
+    // real pair is static_assert()ed in Claw::detectorConfig(), and this proves what goes wrong if it
+    // ever is not.
+    {
+        AutoclampDetector::Config bad = kCfg;
+        bad.rangeMm = 50;
+        bad.rearmMm = 30;  // WRONG: below the range
+        AutoclampDetector d;
+        d.reset(true);  // just released; the pin it let go of is sitting at ~40 mm
+        bool refired = false;
+        std::uint32_t now = 1000;
+        for (int i = 0; i < 60; ++i) {
+            // 40/41 alternating, because a real sensor's reading always jitters by a millimetre or two.
+            // A perfectly CONSTANT reading would not re-fire here -- not because the thresholds are
+            // safe, but because the detector only credits a fresh sample when the value changes or
+            // staleGraceMs passes, and a window that opens on an unchanged value has nothing to credit.
+            // That is an artifact of a synthetic stream, not a property of the robot, so don't "fix" the
+            // thresholds on the strength of it.
+            refired = refired || d.step(now, 40 + (i % 2), 64, bad, false);
+            now += 10;
+        }
+        check(refired, "rearmMm BELOW rangeMm re-grabs the released pin (why the assert exists)");
+    }
+    {
+        // ...and the shipped pair does not, at the same distance.
+        AutoclampDetector d;
+        d.reset(true);
+        bool refired = false;
+        std::uint32_t now = 1000;
+        for (int i = 0; i < 60; ++i) {
+            refired = refired || d.step(now, 40 + (i % 2), 64, kCfg, false);
+            now += 10;
+        }
+        check(!refired, "...the shipped 50/80 pair does not");
+        check(d.state() == AutoclampDetector::State::WAIT_CLEAR, "...and stays WAIT_CLEAR");
+    }
+    {
+        // The same, at the handoff's longer 75/105 pair, with a pin at 90 mm -- inside ITS gap.
+        AutoclampDetector d;
+        d.reset(true);
+        runStream(d, {90, 90, 90, 90, 90, 90, 90, 90, 90, 90}, 3, 1000, kIntakeCfg);
+        check(d.state() == AutoclampDetector::State::WAIT_CLEAR,
+              "the handoff's 75-105 mm gap does not re-arm either");
+    }
+    {
+        // A pin at 60 mm is a PIN at the handoff (<= 75) and NOT one everywhere else (> 50). That
+        // difference is the whole point of the longer reach, so pin it down.
+        AutoclampDetector d;
+        d.reset(false);
+        check(d.step(1000, 60, 64, kIntakeCfg, false), "60 mm fires at the handoff (range 75)");
+        AutoclampDetector e;
+        e.reset(false);
+        check(runStream(e, {60, 60, 60, 60, 60, 60, 60, 60}, 3) < 0,
+              "...and never fires anywhere else (range 50)");
+    }
+
     // --- the R1 HANDOFF mode: the FIRST valid in-range reading fires, with no debounce at all -------
     {
         AutoclampDetector d;
@@ -212,7 +273,8 @@ int main() {
         // in config.hpp) -- a false clamp there costs one button press, a missed pin costs a cycle.
         AutoclampDetector d;
         d.reset(false);
-        check(runStream(d, {400, 400}, 3) < 0, "handoff mode ignores out-of-range readings");
+        check(runStream(d, {400, 400}, 3, 1000, kIntakeCfg) < 0,
+              "handoff mode ignores out-of-range readings");
         AutoclampDetector e;
         e.reset(false);
         check(!e.step(1000, 0, 64, kIntakeCfg, false), "...and a 0 (cannot measure) still never fires");

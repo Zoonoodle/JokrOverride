@@ -46,12 +46,19 @@
  * disarmed autoclamp and cannot fire a clamp. A dead sensor makes the autoclamp do nothing, which is
  * the correct failure.
  *
- * MINIMUM RANGE, worth knowing before tuning: the V5 Distance Sensor's specified minimum is about
- * 20 mm, so a 15 mm threshold sits below the distance it is specified to read reliably. It usually
- * still reports something sensible closer in, but if the clamp never fires, the first thing to check
- * on the brain's DIST line is whether the reading actually falls to <= 15 with a pin in the jaws at
- * all, or whether it bottoms out around 20-25 (raise AUTOCLAMP_RANGE_MM) or reads 0 (below the
- * sensor's floor -- raise the range and/or move the sensor back a few mm).
+ * rangeMm AND rearmMm MOVE TOGETHER, ALWAYS -- the one invariant a caller can break from outside. Arming
+ * wants a reading FURTHER than rearmMm; clamping wants one at or inside rangeMm. Hand this class a
+ * rearmMm at or below rangeMm and anything sitting between them is BOTH clear and in range, so it arms
+ * and instantly re-fires on the object it just announced, forever. Claw::detectorConfig() static_asserts
+ * both of the real pairs (config::AUTOCLAMP_RANGE_MM / _REARM_MM, 50 / 80, and the handoff's
+ * _INTAKE_RANGE_MM / _INTAKE_REARM_MM, 75 / 105), and test/autoclamp_detector_test.cpp has a case that
+ * proves what the broken ordering does, so this cannot be rediscovered the hard way on the robot.
+ *
+ * RANGE, worth knowing before tuning: 50 mm (and 75 at the handoff) is well clear of the V5 Distance
+ * Sensor's ~20 mm specified minimum, so nothing here is reading below spec. If the clamp never fires,
+ * check on the brain's DIST line whether the CLAW reading actually falls inside the range with a pin in
+ * the jaws at all, or whether it reads 0 (an object below the sensor's floor -- that is treated as
+ * "cannot measure", never as "very close", so move the sensor back a few mm).
  */
 
 #include <cstdint>

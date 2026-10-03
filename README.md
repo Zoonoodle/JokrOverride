@@ -323,8 +323,10 @@ should read ~`X 0 Y 0`. Homing runs at the same time, so expect the arm to go do
 ## Autoclamp
 A distance sensor in the claw (port `CLAW_DISTANCE_PORT`, **21**) looks out between the jaws and sees both
 pins and cups. **While the jaws are open and the autoclamp is enabled, anything at or inside
-`AUTOCLAMP_RANGE_MM` for `AUTOCLAMP_CONFIRM_MS` straight gets gripped.** The debounce is the whole
-point: a reading that appears, vanishes and comes back is not a pin.
+`AUTOCLAMP_RANGE_MM` (**50 mm**, measured on the robot 2026-10-03) for `AUTOCLAMP_CONFIRM_MS` straight
+gets gripped.** The debounce is the whole
+point: a reading that appears, vanishes and comes back is not a pin. **At the R1 intake handoff the
+reach is longer -- `AUTOCLAMP_INTAKE_RANGE_MM`, 75 mm -- and there is no debounce at all;** see below.
 
 **It is asynchronous, everywhere.** The watching is done by `periodic::tick()` -- the driver loop in
 driver control, the auton tick in autonomous -- so nothing is ever called to "run" it and nothing ever
@@ -361,7 +363,12 @@ over instantly, and it holds/PARKs at the new height like any other move rather 
 While the macro is at (or coming down into) the handoff -- `Scoring::isAtIntakeHandoff()`, fed to
 `Claw::setIntakeMode()` every tick -- two things change:
 
-1. **No debounce.** The confirm window becomes `AUTOCLAMP_INTAKE_CONFIRM_MS` (0) over
+1. **A longer reach.** The trigger range becomes `AUTOCLAMP_INTAKE_RANGE_MM` (**75 mm**, against 50
+   everywhere else) and its clear threshold `AUTOCLAMP_INTAKE_REARM_MM` (105). The driver's numbers, and
+   they make mechanical sense: everywhere else the pin is brought *to* a waiting claw, so 50 mm is about
+   the jaws; at the handoff the intake pushes the pin *across* the jaws, so the claw has to commit while
+   it is still arriving or the rollers carry it straight past.
+2. **No debounce.** The confirm window becomes `AUTOCLAMP_INTAKE_CONFIRM_MS` (0) over
    `AUTOCLAMP_INTAKE_MIN_SAMPLES` (1), so the **first** valid in-range reading fires the cylinder. That is
    deliberate (a pin arriving on the intake is only there for a few tens of ms) and it *does* give up the
    spike rejection the rest of this section is about: one junk reading closes the jaws on nothing. It is
@@ -369,7 +376,7 @@ While the macro is at (or coming down into) the handoff -- `Scoring::isAtIntakeH
    to 20 first if it misfires; at 50 / 2 it is the ordinary rule again. Invalid readings (0, `PROS_ERR`)
    still never fire, the re-arm rule and the L2 inhibit are untouched, and all of that is proved in
    `test/autoclamp_detector_test.cpp`.
-2. **A forced push down.** At the same instant the jaws shut, the arm presses **down** at
+3. **A forced push down.** At the same instant the jaws shut, the arm presses **down** at
    `L1_GRAB_PUSH_PCT` (40% of volts) for `AUTOCLAMP_INTAKE_PUSH_MS` (300 ms) and then **holds where it
    ended** -- the driver's "move down a bit". It is the same `GRAB` mechanism L1 uses (brain `LIFT` line:
    `GRAB`), so the **intake rollers stop for the whole push** exactly as they do for L1's grab, the D-pad
@@ -406,15 +413,16 @@ the claw and watch it move.
 
 | Knob | What it does |
 |---|---|
-| `AUTOCLAMP_RANGE_MM` (15) | at or inside this = something in the jaws |
+| `AUTOCLAMP_RANGE_MM` (**50**) | at or inside this = something in the jaws (was 15; measured 2026-10-03) |
 | `AUTOCLAMP_CONFIRM_MS` (50) | ...continuously for this long |
 | `AUTOCLAMP_MIN_SAMPLES` (2) | ...over at least this many fresh readings |
 | `AUTOCLAMP_STALE_GRACE_MS` (60) | an unchanged reading counts as a new sample again after this long (~2 sensor refreshes) |
-| `AUTOCLAMP_REARM_MM` (30) / `AUTOCLAMP_REARM_CLEAR_MS` (150) | what counts as clear, and for how long, before it re-arms |
+| `AUTOCLAMP_REARM_MM` (**80**) / `AUTOCLAMP_REARM_CLEAR_MS` (150) | what counts as clear, and for how long, before it re-arms. **It must always stay ABOVE the range** -- see the warning below |
 | `AUTOCLAMP_MAX_VALID_MM` (9999) / `AUTOCLAMP_MIN_VALID_MM` (1) | the sensor's "nothing there" (counts as clear) and "cannot measure" (counts as neither) |
 | `AUTOCLAMP_MIN_CONFIDENCE` (0 = ignore) | the sensor's own 0..63 confidence |
 | `AUTOCLAMP_ON_IN_DRIVER` (true) | the driver default |
 | `AUTOCLAMP_ON_IN_AUTON` (true) | the auton default (2026-10-03; was hard-off) |
+| `AUTOCLAMP_INTAKE_RANGE_MM` (**75**) / `AUTOCLAMP_INTAKE_REARM_MM` (**105**) | the range and clear threshold **at the R1 handoff only** -- a longer reach, because there the intake pushes the pin *across* the jaws |
 | `AUTOCLAMP_INTAKE_CONFIRM_MS` (0) / `AUTOCLAMP_INTAKE_MIN_SAMPLES` (1) | the confirm window **at the R1 handoff only**: fire on the first in-range reading |
 | `AUTOCLAMP_INTAKE_PUSH_MS` (300) | how long the forced push down after a handoff clamp lasts |
 | `CLAMP_RISE_DEG` (5, in the LIFT TUNING block) | how far up every other clamp hops the arm |
@@ -426,11 +434,21 @@ running. A pure time window could therefore be satisfied by **one** lucky measur
 when `AUTOCLAMP_STALE_GRACE_MS` has passed since the last counted one (so a pin sitting dead still at
 one millimetre value still gets its second sample).
 
-**Heads-up on 15 mm:** the V5 Distance Sensor's *specified* minimum range is about **20 mm**, so 15 sits
-below where it is specified to read reliably. It usually still reports something sensible closer in, but
-this is the first number to question. With a pin held in the open jaws, watch `DIST`:
+**The range and the re-arm threshold move together, always.** Re-arming needs a reading *further* than
+`AUTOCLAMP_REARM_MM`; clamping needs one at or inside `AUTOCLAMP_RANGE_MM`. If the re-arm threshold ever
+drops to or below the range, anything sitting between them reads as **both** clear and in range, so the
+autoclamp arms and instantly re-grabs the thing it just released -- forever, and no score can finish.
+That is why raising the range 15 -> 50 also forced the re-arm 30 -> 80, and why the handoff has its own
+`AUTOCLAMP_INTAKE_REARM_MM` (105) above its own 75 mm range. Both pairs are `static_assert`ed in
+`Claw::detectorConfig()`, and `test/autoclamp_detector_test.cpp` has a case proving what the broken
+ordering does.
 
-* it reads **20-25 and never reaches 15** -> raise `AUTOCLAMP_RANGE_MM` to just above what you see;
+**Tuning the range.** 50 mm is 5 cm of reach, so the sensor sees whatever is in front of it, not only
+pins. With a pin held in the open jaws, watch the `DIST` line's `CLAW` value:
+
+* it **never reaches 50** with a pin there -> raise `AUTOCLAMP_RANGE_MM` to just above what you see;
+* it **clamps on the field, a wall or the intake** -> lower it. This is the first number to suspect if
+  the jaws shut on nothing in particular;
 * it reads **0** with the pin there -> the pin is inside the sensor's floor: raise the range and/or move
   the sensor back a few mm (a 0 is treated as "cannot measure", never as "very close");
 * it **clamps on a pin or cup going past** -> raise `AUTOCLAMP_CONFIRM_MS` (50 -> 80) first;
@@ -443,7 +461,7 @@ this is the first number to question. With a pin held in the open jaws, watch `D
 **On-robot test, driver:** power on, enable driver control. First wave a hand in front of the claw's
 sensor and check the `DIST` line's **`CLAW`** value moves -- that is the whole check that the sensor really
 is on port 21. Then: `AC:ARMED` on the `CLAW` line, jaws open.
-Move a pin slowly into the jaws: `DIST CLAW` falls, `AC:` goes `SEEING`, and about 50 ms later the jaws
+Move a pin slowly into the jaws: `DIST CLAW` falls below **50**, `AC:` goes `SEEING`, and about 50 ms later the jaws
 shut, the line reads `CLAMPED  AC:HELD`, and **the arm hops up 5°** (`LIFT` line: `CLAMP+5`, then a hold
 at ~5). Press **A** to open: `AC:CLEAR?`. With the pin still sitting
 there it must **not** re-grab. Take the pin away: `AC:ARMED` again. Wave the pin past the jaws quickly:
@@ -451,7 +469,8 @@ nothing should happen. Press **Y**: `AC:OFF`, and now nothing clamps at all.
 
 **On-robot test, the handoff:** press **R1** to send the arm to the INTAKE handoff (`CLAW` line: `PIV
 BACK`), then feed a pin in. The jaws must shut **immediately** -- no 50 ms wait -- and the `LIFT` line
-must read `GRAB` for ~300 ms as the arm forces down, then hold a little lower. There must be **no**
+must read `GRAB` for ~300 ms as the arm forces down, then hold a little lower. The jaws should commit
+noticeably **earlier** here than they do anywhere else -- 75 mm of reach against 50. There must be **no**
 `CLAMP+5` here. Press **L1**: the arm pushes once more and rises to level 1.
 
 **On-robot test, auton:** nothing has to be called -- the autoclamp is on by default in auton now, so a

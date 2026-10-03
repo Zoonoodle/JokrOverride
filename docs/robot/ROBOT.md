@@ -75,7 +75,8 @@ photos)**.
   confirmed 2026-10-03** (it was on port 11 until then; the photos further down predate both,
   which is why their `DIST` line reads `WRONG DEVICE`). It looks out between the jaws and sees
   both pins and cups. The rule:
-  anything at or inside `AUTOCLAMP_RANGE_MM` (15, TUNE) for `AUTOCLAMP_CONFIRM_MS` (50) over at
+  anything at or inside `AUTOCLAMP_RANGE_MM` (**50**, measured on the robot 2026-10-03; 75 at the R1
+  handoff) for `AUTOCLAMP_CONFIRM_MS` (50) over at
   least `AUTOCLAMP_MIN_SAMPLES` (2) fresh readings closes the jaws. Off at power-on
   (`CLAW_AUTOCLAMP_AT_START = false`), **on** throughout driver control
   (`AUTOCLAMP_ON_IN_DRIVER`, Y toggles it) **and on by default in auton too**
@@ -83,8 +84,8 @@ photos)**.
   `CLAMP_RISE_DEG` (5°) everywhere, and **at the R1 intake handoff** it fires instantly instead
   (`AUTOCLAMP_INTAKE_CONFIRM_MS` 0) and forces the claw *down* for `AUTOCLAMP_INTAKE_PUSH_MS`
   (300 ms) rather than lifting. See README
-  "Autoclamp" -- and note the V5 Distance Sensor's specified minimum range is about 20 mm, so
-  the 15 mm threshold is the first number to question if it never fires.
+  "Autoclamp" -- and note that `AUTOCLAMP_REARM_MM` (80, and 105 at the handoff) must always stay
+  ABOVE whichever range is in use, or the claw re-grabs whatever it just released.
 
 Visible electronics: the V5 brain sits low and flat in the middle of the chassis, screen
 facing up ([`05-cup-in-claw-brain-screen.jpg`](photos/05-cup-in-claw-brain-screen.jpg)).

@@ -60,14 +60,19 @@ Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
 - **Claw + pivot**: two pneumatic cylinders, ADI `D` (**claw**) and ADI `C` (**pivot**). **These were crossed in code until 2026-10-01** — the port the code called the claw was the pivot and vice versa — so every polarity note written before that was derived from the wrong pin. The ports above are the corrected, physical assignment and both polarities were re-derived from scratch; the full evidence chain is in `config.hpp` on each constant. The brain's `CLAW` line shows the words (`CLAW  OPEN  AC:ARMED  PIV OUT`); the port letters and raw levels it used to carry were removed on 2026-10-03 once both polarities were confirmed. Claw: `CLAW_CLOSED_IS_ADI_HIGH = true` — **the jaws need air to grip, so unpowered/LOW is OPEN** and power-on is `Claw::State::OPEN` (there is no "closed at power-on" state any more; a preloaded pin has to be gripped with A or L1). Pivot: two positions named for where it physically is — **OUT** (`true`, ADI LOW) = swung out, at power-on, at every stack level while scoring, and the default down position after L2 / B; **BACK** (`false`, ADI HIGH) = pulled in toward the intake handoff, only at INTAKE (R1). `PIVOT_OUT_IS_ADI_HIGH = false`, confirmed by two independent observations. There is no height at which the pivot is forbidden to be OUT or BACK; the only height tied to it is the handoff zone `INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG` (BACK inside it while heading to / at the intake, OUT above it). The old `PIVOT_CLEAR` interlock and L2 descent floor were written for the opposite meaning and are gone — don't bring them back. Neither cylinder is fired at startup: each pin is written to the level it already sits at unpowered.
 - **Autoclamp**: the distance sensor is **mounted in the claw, on port `21`** (`CLAW_DISTANCE_PORT`,
   confirmed 2026-10-03 by the user — it was `11` before that) and sees both pins and cups. While the jaws are open and the autoclamp is
-  enabled, anything at or inside `AUTOCLAMP_RANGE_MM` (15, TUNE) for `AUTOCLAMP_CONFIRM_MS` (50) over
+  enabled, anything at or inside `AUTOCLAMP_RANGE_MM` (**50**, measured on the robot 2026-10-03 — it was
+  a 15 mm guess before that) for `AUTOCLAMP_CONFIRM_MS` (50) over
   at least `AUTOCLAMP_MIN_SAMPLES` (2) **fresh** readings closes the jaws. The rule is a pure class
   (`subsystems::AutoclampDetector`, host-tested); `Claw::update()` owns the cylinder. Fresh samples are
   counted as well as milliseconds because the V5 sensor refreshes ~30 ms, slower than the tick, so one
   lucky reading can otherwise look like 50 ms of evidence. **Re-arm is clear-based, not a timer**:
   after ANY open the autoclamp is disarmed until the sensor reads clear (beyond `AUTOCLAMP_REARM_MM`,
-  30) for `AUTOCLAMP_REARM_CLEAR_MS`, because the pin just released is still millimetres away — a timer
-  re-grabs it every time. `CLAW_RELEASE_LOCKOUT_MS` is kept on top as a floor. It is inhibited for the
+  **80**) for `AUTOCLAMP_REARM_CLEAR_MS`, because the pin just released is still millimetres away — a timer
+  re-grabs it every time. **`AUTOCLAMP_REARM_MM` must always stay ABOVE the range in use** (that is why
+  it went 30 → 80 when the range went 15 → 50, and why the handoff has its own
+  `AUTOCLAMP_INTAKE_REARM_MM` 105 above its own 75): equal or below, and anything between the two reads
+  as both clear AND in range, so the claw re-grabs what it just released forever. Both pairs are
+  `static_assert`ed in `Claw::detectorConfig()`. `CLAW_RELEASE_LOCKOUT_MS` is kept on top as a floor. It is inhibited for the
   whole L2 score. **ON by default in BOTH modes** — driver (`AUTOCLAMP_ON_IN_DRIVER`, re-enabled each
   `opcontrol()`, Y toggles) and **auton** (`AUTOCLAMP_ON_IN_AUTON`, applied by `autonomous()` since
   2026-10-03; `auton::autoclamp(false)` is the per-route switch). OFF at power-on. It is **entirely
@@ -90,7 +95,9 @@ Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
     move is in flight or a Scoring macro owns the lift — **a commanded move always wins**, which is what
     keeps a route's `clawGrip(); liftToFrontToggle();` from being hijacked.
   - **At the R1 INTAKE handoff** (`Scoring::isAtIntakeHandoff()`, fed to `Claw::setIntakeMode()` every
-    tick) the autoclamp instead fires on the **first** valid in-range reading
+    tick) the autoclamp reaches **further** (`AUTOCLAMP_INTAKE_RANGE_MM` 75 against 50, with
+    `AUTOCLAMP_INTAKE_REARM_MM` 105 to match — the intake pushes the pin *across* the jaws there, so the
+    claw has to commit while it is still arriving) and fires on the **first** valid in-range reading
     (`AUTOCLAMP_INTAKE_CONFIRM_MS` 0 / `AUTOCLAMP_INTAKE_MIN_SAMPLES` 1 — no debounce; the pure detector is
     unchanged, only its Config numbers) and `Lift::startClampPush(AUTOCLAMP_INTAKE_PUSH_MS)` forces the
     claw **down** at `L1_GRAB_PUSH_PCT` for 300 ms, then holds there. It is the same GRAB mechanism, so

@@ -56,8 +56,11 @@ void draw() {
     const lemlib::Pose pose = chassis.getPose();
     pros::screen::print(pros::E_TEXT_MEDIUM, 0, "POSE  X %.1f  Y %.1f  T %.1f", pose.x, pose.y, pose.theta);
 
-    // 1: inertial sensor -- not installed yet (config::IMU_PORT == 0), show that plainly instead of
-    // treating it as a wiring problem. Odometry runs on the tracking wheel alone until one is added.
+    // 1: inertial sensor. One IS fitted now (config::IMU_PORT = 18, confirmed 2026-10-02): heading
+    // comes from it and distance from the tracking wheel. "none (not installed)" only appears if
+    // IMU_PORT is set back to 0, which is the supported way to run on the pod alone -- it is not a
+    // wiring problem. "calibrating... keep still" is normal for the first couple of seconds after
+    // power-on; nothing in driver control waits for it (CLAUDE.md safety rule 4).
     if (!imu)
         pros::screen::print(pros::E_TEXT_MEDIUM, 1, "IMU   none (not installed)");
     else if (const char* p = portProblem(config::IMU_PORT, pros::DeviceType::imu))
@@ -116,11 +119,17 @@ void draw() {
     // R1/R2 are in (see screen::RMode). Without this line there was no way to see that the jaws were
     // still CLAMPED or that the macro was parked in STACKING -- and both silently change what R1 and
     // L2 do. If a button seems to do nothing, read this line first.
-    pros::screen::print(pros::E_TEXT_MEDIUM, 5, "CLAW %s %c[%d]  PIV %s %c[%d]  %s L%d  R:%s",
+    // The AC: field is the AUTOCLAMP: OFF (disabled, or the jaws are shut by hand), ARMED (watching,
+    // nothing seen), SEEING (something in range -- the AUTOCLAMP_CONFIRM_MS window is running),
+    // CLEAR? (disarmed after an open, waiting for a clear reading before it may re-arm, see
+    // AUTOCLAMP_REARM_MM) or HELD. Tune the range and the debounce against this plus the DIST mm on
+    // line 8: SEEING that never becomes a clamp means the reading is not staying inside the range for
+    // long enough. See README "Autoclamp".
+    pros::screen::print(pros::E_TEXT_MEDIUM, 5, "CLAW %s %c[%d] AC:%s  PIV %s %c[%d]  %s L%d  R:%s",
                         claw.stateName(), config::CLAW_PISTON_PORT, claw.adiHigh() ? 1 : 0,
-                        scoring.isPivotOut() ? "OUT" : "BACK", config::PIVOT_PISTON_PORT,
-                        scoring.pivotAdiHigh() ? 1 : 0, scoring.stateName(), scoring.getLevel(),
-                        rModeName());
+                        claw.autoclampStateName(), scoring.isPivotOut() ? "OUT" : "BACK",
+                        config::PIVOT_PISTON_PORT, scoring.pivotAdiHigh() ? 1 : 0, scoring.stateName(),
+                        scoring.getLevel(), rModeName());
 
     // --- Lift section (lines 6-10): everything needed to judge a move at a glance. ---
 
@@ -163,7 +172,7 @@ void draw() {
         } else {
             const int mm = claw.getDistanceMm();
             if (mm <= 0 || mm >= 9999) std::snprintf(dist, sizeof(dist), "--");
-            else std::snprintf(dist, sizeof(dist), "%dmm%s", mm, mm <= config::CLAW_DETECT_MM ? " PIN" : "");
+            else std::snprintf(dist, sizeof(dist), "%dmm%s", mm, mm <= config::AUTOCLAMP_RANGE_MM ? " PIN" : "");
         }
         if (lift.isScoring())
             pros::screen::print(pros::E_TEXT_MEDIUM, 8, "L2 lag %.2f eff %.0f v/b %.0f%%   DIST %s",
@@ -181,6 +190,22 @@ void draw() {
                         config::LIFT_DECEL_DEG_PER_S2, config::LIFT_APPROACH_ZONE_DEG,
                         config::LIFT_APPROACH_DEG_PER_S, static_cast<double>(config::LIFT_HOLD_KD),
                         config::LIFT_TOLERANCE_DEG);
+
+    // 9b: the rear distance sensor -- the entire feedback loop for auton::moveB(). Watch this before
+    // trusting a route to it: "--" means nothing in range, and moveB drives BLIND at full commanded
+    // speed while that is true (kept from the old library, see auton::moveB()).
+    {
+        char back[28] = "";
+        if (const char* p = portProblem(config::BACK_DISTANCE_PORT, pros::DeviceType::distance)) {
+            std::snprintf(back, sizeof(back), "%s p%d", p, config::BACK_DISTANCE_PORT);
+        } else {
+            const int mm = backDistance.get();
+            if (mm <= 0 || mm >= config::MOVEB_OUT_OF_RANGE_MM) std::snprintf(back, sizeof(back), "--");
+            else std::snprintf(back, sizeof(back), "%dmm", mm);
+        }
+        pros::screen::print(pros::E_TEXT_MEDIUM, 13, "BACK  %s (moveB, port %d)", back,
+                            config::BACK_DISTANCE_PORT);
+    }
 
     // 10: lift motor health -- temp (both readouts lose power around 55 C) and current draw.
     pros::screen::print(pros::E_TEXT_MEDIUM, 10, "LIFT temp %.0fC   current %.0f mA", lift.getTemperature(),

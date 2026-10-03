@@ -1,6 +1,9 @@
 #include "main.h"
 
+#include "auton.hpp"
+#include "autons.hpp"
 #include "config.hpp"
+#include "periodic.hpp"
 #include "robot.hpp"
 #include "screen.hpp"
 
@@ -126,36 +129,68 @@ void initialize() {
     });
 }
 
-void disabled() {}
+void disabled() {
+    // A field switch from auton to driver kills the autonomous() task wherever it happens to be, so
+    // this is the first place that can retire the auton tick. end() is idempotent and blocks until the
+    // tick has really exited, so the auton tick and opcontrol()'s loop can never both be running (see
+    // include/periodic.hpp). It does not touch the lift: whatever height auton left the arm holding,
+    // or the hard stop it left it seated on, stays held by the lift's own task.
+    auton::end();
+}
 
 void competition_initialize() {}
 
 void autonomous() {
-    // Home the lift FIRST, before the odometry wait: requestHome() returns immediately and the homing
-    // itself runs inside the lift's own 10 ms task, so the arm starts finding its hard stop while the
-    // tracking wheel is still coming up and the rest of this routine is free to drive. Nothing below
-    // has to wait for it -- lift.moveTo(..., true) queues behind homing on its own (see Lift). This is
-    // the first ENABLED mode of a match, so this is the one place homing happens; opcontrol()'s call
-    // below is only for a driver-skills run with no auton.
-    scoring.reset();
-    scoring.pivotOut();  // home in the power-on configuration (pivot OUT); a no-op at power-on
-    lift.requestHome();
+    // COMMON SETUP, in one place, so no route can forget any of it. The route itself is in
+    // src/autons.cpp -- that is the only file to edit when writing routes (see README "Writing an
+    // auton route"). Everything here is deliberately non-blocking or bounded: nothing in autonomous()
+    // can eat the match period waiting on a sensor.
 
-    while (!screen::calibrated) pros::delay(10);  // odometry must be ready before moving
-    // TODO(team): autonomous routines. Example of a LemLib move:
-    // chassis.setPose(0, 0, 0);
-    // chassis.moveToPoint(0, 24, 2000);
-    //
-    // Lift: named heights live in config::lift_preset (include/config.hpp) -- the same constants
-    // the driver's preset buttons use. moveTo(height, timeoutMs, waitUntilSettled) blocks THIS
-    // task (not the lift's own background task, which keeps running the PID regardless):
-    //   lift.moveTo(config::lift_preset::INTAKE, 1500, true);
-    //   lift.moveTo(config::lift_preset::STACK_LEVELS[2], 2000, true);  // 3rd stack level
-    // lift.isSettled() / lift.isBlocked() / lift.cancel() are also available for non-blocking use.
+    // 1. The auton tick. The lift PID has always run in auton (its own 10 ms task from
+    //    initialize()), but Scoring's state machine, the claw's autoclamp and the intake decision all
+    //    used to live inside opcontrol()'s while loop, so NONE of them ran here -- an auton L2 score
+    //    could never have its jaws opened, and the rollers never turned. begin() starts a 10 ms task
+    //    that runs THE SAME per-loop logic the driver loop runs, in one copy (periodic::tick()). It
+    //    commands no motion.
+    auton::begin();
+
+    // 2. The autoclamp is OFF for auton by default; a route turns it on where it wants it with
+    //    auton::autoclamp(true). (In driver control it is on by default -- see opcontrol().)
+    auton::autoclamp(false);
+
+    // 3. Home the lift, at the start of EVERY route. This is the first ENABLED mode of a match, so
+    //    this is the one place it happens (opcontrol()'s own call is only for a driver-skills run with
+    //    no auton). requestHome() returns immediately and the homing runs inside the lift's own task,
+    //    so the arm finds its hard stop while the route drives; a lift command from the route queues
+    //    behind it on its own. On success the arm ends SEATED on the stop, not on a passive brake.
+    auton::homeLift();
+
+    // 4. Odometry/IMU calibration, BOUNDED. A drive move needs a heading, so wait for it -- but never
+    //    longer than AUTON_CALIBRATE_TIMEOUT_MS, so an unplugged IMU costs a few seconds instead of
+    //    the whole autonomous period, and a route that never drives still runs.
+    const std::uint32_t calibrateStart = pros::millis();
+    while (!screen::calibrated &&
+           pros::millis() - calibrateStart < static_cast<std::uint32_t>(config::AUTON_CALIBRATE_TIMEOUT_MS)) {
+        pros::delay(10);
+    }
+
+    // 5. The route. ONE call. Which one runs is the SELECTED line at the top of src/autons.cpp.
+    autons::run();
+
+    // Retire the auton tick. The lift keeps holding -- or stays seated on -- whatever state the route
+    // left it in; end() never touches it.
+    auton::end();
 }
 
 void opcontrol() {
     master.print(0, 0, "DRIVER ON       ");
+
+    // Take the per-loop logic back from the auton tick BEFORE anything else: end() blocks until that
+    // task has really left periodic::tick(), so from here on this loop is its only caller and there
+    // is exactly one intake decision and one Scoring::update() per tick (see include/periodic.hpp).
+    // It never touches the lift, so a seated or held arm stays exactly where auton left it.
+    auton::end();
+    periodic::reset();  // a second enabled mode never inherits a half-open macro window
 
     // Home the lift if autonomous() didn't already (driver skills, or a practice run straight into
     // driver control). requestHome() is a no-op once a run has homed, failed or been cancelled, so a
@@ -164,16 +199,18 @@ void opcontrol() {
     scoring.pivotOut();
     lift.requestHome();
 
-    // L1's auto-intake window: the millisecond the rise began, or 0 when it isn't running. A plain
-    // local, not static, so a second opcontrol() in one program run starts clean.
-    std::uint32_t autoIntakeStart = 0;
-    // L2's auto-outtake window: the millisecond the rollers started, or 0 when it isn't running, plus
-    // a latch so L2_OUTTAKE_MAX_MS's timeout can't just re-arm itself on the very next tick -- it stays
-    // off until the score descent ends and a fresh one starts.
-    std::uint32_t autoOuttakeStart = 0;
-    bool autoOuttakeExpired = false;
+    // The autoclamp is ON for the whole of driver control by default, every time opcontrol starts:
+    // whenever the jaws are open, anything that sits at or inside config::AUTOCLAMP_RANGE_MM for
+    // AUTOCLAMP_CONFIRM_MS gets gripped. Y still toggles it mid-match, and the brain's CLAW line shows
+    // what it is doing (OFF / ARMED / SEEING / CLEAR?). See README "Autoclamp".
+    scoring.setAutoclamp(config::AUTOCLAMP_ON_IN_DRIVER);
 
+    // L1's auto-intake sweep window, L2's auto-outtake window, the single intake decision, and the
+    // Claw/Scoring ticks all live in periodic::tick() now -- ONE copy of that logic, shared with the
+    // auton tick (see include/periodic.hpp). This loop's only job there is to fill in what the driver
+    // is asking for, in `in`, and call it once at the bottom of every pass.
     while (true) {
+        periodic::Inputs in;
         // --- Drive ---
         const int forward = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
         const int turn = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
@@ -204,71 +241,17 @@ void opcontrol() {
         screen::rMode = rModeFor(r1 || r2, claw.isClamped());
         const bool rLift = screen::rMode == screen::RMode::LIFT && !up && !down;  // D-pad wins
 
-        // --- L1 auto-intake: sweep the floor while the arm is rising off it anyway. An L1 press that
-        // starts a rise FROM THE FLOOR -- arm at or below LIFT_BOTTOM_GOAL_DEG, seated, or parked at
-        // the INTAKE handoff after R1 -- runs the rollers IN from the press itself (so they are already
-        // going during CLAMPING's claw-close wait) until the arm climbs past
-        // L1_AUTO_INTAKE_UNTIL_DEG. Extra L1 taps during the same rise neither restart nor extend it
-        // (the window only opens while it is closed), and an L1 from a stack level never opens it at
-        // all. This is ONE INPUT to the single intake.set() below, never a second writer. ---
-        const double liftPos = lift.getPosition();
-
-        // --- L2 auto-outtake: while an L2 SCORE descent (not the at-the-bottom clamp toggle, not
-        // scoreOrMatchload()'s INTAKE lower) is under L2_OUTTAKE_BELOW_DEG, eject through the rest of
-        // the trip down -- PRESS, REL, UNSTK, RETURN -- so anything still in the intake doesn't ride
-        // along. Stack level 1 (31.0 deg) is already under 40, so scoring from level 1 outtakes from
-        // the start of the press; that is this constant as specified, not a bug (see config.hpp).
-        // Stops as soon as the lift reaches L2_OUTTAKE_STOP_DEG (2026-10-02 retune: tied directly to
-        // LIFT_FINAL_START_DEG, see config.hpp) -- the lift's own FINAL phase takes real downward
-        // authority from there, so the roller does not need to keep running into it. ---
-        const bool scoringDown = scoring.isScoreDescent();
-        if (!scoringDown) autoOuttakeExpired = false;  // a finished score re-arms the timeout for the next one
-        if (scoringDown && !autoOuttakeExpired && autoOuttakeStart == 0 &&
-            liftPos < config::L2_OUTTAKE_BELOW_DEG) {
-            autoOuttakeStart = pros::millis();
-        }
-        if (autoOuttakeStart != 0) {
-            // Done once the arm reaches the stop height. Cancelled by anything that would otherwise
-            // fight it -- the manual override, B, a stuck score, or a lift that gave up on the move
-            // entirely (BLOCKED/FAULT).
-            const bool done = liftPos <= config::L2_OUTTAKE_STOP_DEG;
-            const bool cancelled =
-                up || down || bNew || lift.isScoreStuck() || lift.isBlocked() || lift.isFaulted();
-            const bool timedOut =
-                pros::millis() - autoOuttakeStart >= static_cast<std::uint32_t>(config::L2_OUTTAKE_MAX_MS);
-            if (timedOut) autoOuttakeExpired = true;
-            if (done || cancelled || timedOut) autoOuttakeStart = 0;
-        }
-        screen::autoOuttake = autoOuttakeStart != 0;
-
-        if (l1New && autoIntakeStart == 0 && !up && !down &&
-            scoring.getState() != Scoring::State::RELEASING &&
-            (lift.isSeated() || liftPos <= config::LIFT_BOTTOM_GOAL_DEG ||
-             scoring.getState() == Scoring::State::INTAKE_POS)) {
-            autoIntakeStart = pros::millis();
-        }
-        if (autoIntakeStart != 0) {
-            // Done when the arm is clear of the floor; cancelled by anything that abandons the rise --
-            // the manual override, clamped-mode R1/R2 (which take the lift over), B, L2, or a lift that
-            // gave up; and timed out so a rise that never gets there can't leave the rollers spinning.
-            const bool done = liftPos > config::L1_AUTO_INTAKE_UNTIL_DEG;
-            const bool cancelled = up || down || bNew || l2New || screen::rMode == screen::RMode::LIFT ||
-                                   lift.isBlocked() || lift.isFaulted();
-            const bool timedOut =
-                pros::millis() - autoIntakeStart >= static_cast<std::uint32_t>(config::L1_AUTO_INTAKE_MAX_MS);
-            if (done || cancelled || timedOut) autoIntakeStart = 0;
-        }
-        screen::autoIntake = autoIntakeStart != 0;
-
-        // The driver always wins: R1/R2 in R:INTAKE mode are the roller buttons. Then L2's auto-outtake
-        // (so a score always ejects), then L1's auto-intake -- they can never both be active (one needs
-        // the claw empty and rising, the other a pin held and descending) -- then stop. ONE intake.set()
-        // call, the single writer decision.
-        if (screen::rMode == screen::RMode::INTAKE && r1) intake.set(Intake::Mode::IN);
-        else if (screen::rMode == screen::RMode::INTAKE && r2) intake.set(Intake::Mode::OUT);
-        else if (screen::autoOuttake) intake.set(Intake::Mode::OUT, config::L2_OUTTAKE_PCT / 100.0);
-        else if (screen::autoIntake) intake.set(Intake::Mode::IN);
-        else intake.set(Intake::Mode::STOP);
+        // --- What the driver is asking of the shared per-loop logic this tick. R1/R2 in R:INTAKE mode
+        // are the roller buttons and always beat both macro windows; the rest are the flags those
+        // windows open and close on (see periodic::Inputs). periodic::tick() at the bottom of this loop
+        // makes the ONE intake decision and ticks the claw and Scoring. ---
+        if (screen::rMode == screen::RMode::INTAKE && r1) in.intakeRequest = Intake::Mode::IN;
+        else if (screen::rMode == screen::RMode::INTAKE && r2) in.intakeRequest = Intake::Mode::OUT;
+        in.manualLift = up || down;
+        in.liftButtonMode = screen::rMode == screen::RMode::LIFT;
+        in.abort = bNew;
+        in.scorePressed = l2New;
+        in.stepUpPressed = l1New;
 
         // Clamped mode. R1 is plain voltage through the same manual path the D-pad uses (so it cancels
         // any target/macro and brake-holds on release); R2 is the lift's own banded descent, which
@@ -297,8 +280,10 @@ void opcontrol() {
         if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_X)) scoring.togglePivot();
         if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_Y)) scoring.setAutoclamp(!scoring.autoclampOn());
 
-        claw.update();
-        scoring.update();
+        // --- The shared per-loop logic, once: both macro windows, the single intake decision, then
+        // Claw::update() and Scoring::update(). The auton tick runs this exact call (see
+        // include/periodic.hpp), and auton::end() above guarantees it is not running now. ---
+        periodic::tick(in);
 
         // --- Brain "DRV" line: proves this loop is running and what it reads ---
         screen::driverDebug = {screen::driverDebug.loops + 1, forward, turn, up, down};

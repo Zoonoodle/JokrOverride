@@ -1,0 +1,262 @@
+#pragma once
+/**
+ * auton — one readable call per lift / claw / pivot / intake operation, for autonomous().
+ *
+ * THE POINT. A routine should read like a script and never need to know how any of it works:
+ *
+ *     auton::begin();                       // starts the 10 ms subsystem tick
+ *     auton::homeLift();  auton::waitHome();
+ *     auton::liftTo(auton::Level::THREE);   auton::waitLift();
+ *     auton::score();                       auton::waitScore();
+ *     auton::liftDown();                    auton::waitLiftSeated();
+ *
+ * Every operation goes through EXACTLY the code path the matching driver button uses -- stepUp() is
+ * L1, score() is L2, goToIntake() is R1's new-press, stow() is B, clawGrip()/clawOpen() are A --
+ * so auton and driver can never drift apart, and tuning one tunes both.
+ *
+ * TWO HALVES, ON PURPOSE.
+ *   Commands (liftTo, score, intakeIn, ...) never block. They return the instant the request is in.
+ *   Waits (waitLift, waitScore, waitClamped, ...) block the CALLING task only, ALWAYS take a
+ *   timeout, and ALWAYS return true/false -- true = the thing really happened, false = the timeout
+ *   ran out (or the lift reported BLOCKED / FAULT / SCORE STUCK). A routine therefore cannot hang
+ *   forever on a jammed mechanism, and it can also just not wait: command the lift, drive, and check
+ *   liftSettled() when it suits. Nothing in here blocks the lift's own PID task or the tick task.
+ *
+ * WHY begin()/end() EXIST (CLAUDE.md safety rules 2 and 4). The lift PID has always run in auton --
+ * it is its own 10 ms task from initialize(). The rest of the per-loop logic did not: Scoring's state
+ * machine, the claw autoclamp and the single intake decision all lived in opcontrol()'s while loop.
+ * begin() starts a 10 ms task that runs that same logic, in one copy, from periodic::tick() (see
+ * include/periodic.hpp). end() stops it and BLOCKS until it has really exited, and opcontrol() and
+ * disabled() both call it before touching anything -- so the auton tick and the driver loop can never
+ * both be running, and the field switch from auton to driver hands ownership over rather than sharing
+ * it. end() is idempotent and safe to call when nothing was ever started.
+ *
+ * STATE HOLDS. Nothing in here ever leaves the lift limp. A level ends in the damped HOLD, the bottom
+ * ends SEATED (pressed into the hard stop at config::LIFT_SEAT_MV, not parked above it), a score ends
+ * seated at the bottom, and successful homing ends seated too (Lift::updateHoming() adopts a DOWN
+ * target already in SEAT). The one call that deliberately leaves a passive brake-hold with no target
+ * is liftStop() -- it is for abandoning a move, not for ending a routine.
+ */
+
+#include "config.hpp"
+#include "subsystems/intake.hpp"
+
+namespace auton {
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+/** Start the 10 ms auton tick (Scoring + claw autoclamp + the one intake decision) and clear the
+ *  macro windows. FIRST line of autonomous(). Idempotent. Commands no motion. */
+void begin();
+/** Stop the auton tick and block until it has actually exited, then stop the intake. Called
+ *  automatically by opcontrol() and disabled(); safe to call twice or when begin() never ran. Never
+ *  touches the lift, so whatever state auton left the arm holding is still held. */
+void end();
+/** True while the auton tick task is running. */
+bool running();
+
+/** pros::delay(), with a name that reads in a routine. */
+void wait(int ms);
+
+// ---------------------------------------------------------------------------
+// Lift — presets, arbitrary angles, and the waits
+// ---------------------------------------------------------------------------
+/** The five pin-stack heights, config::lift_preset::STACK_LEVELS[0..4]. */
+enum class Level { ONE = 1, TWO = 2, THREE = 3, FOUR = 4, FIVE = 5 };
+/** The arm degrees a Level means. */
+double heightOf(Level level);
+
+/** Home the lift against its hard stop (the same Lift::requestHome() the first enabled mode uses,
+ *  with the pivot put OUT first exactly like main.cpp does). Returns immediately; homing runs inside
+ *  the lift task. A no-op once a run has homed, failed or been cancelled. */
+void homeLift();
+/** Block until homing finishes. True only if it really HOMED (so the arm is seated on a trustworthy
+ *  zero); false on HOME FAIL / CANCELLED / SKIPPED or the timeout. */
+bool waitHome(int timeoutMs = config::AUTON_HOME_TIMEOUT_MS);
+
+/** Command an arbitrary height in arm degrees (clamped to 0..config::lift_preset::MAX). Non-blocking.
+ *  precise = true asks for the tight LIFT_PRECISE_TOLERANCE_DEG band; INTAKE is promoted to precise
+ *  automatically whoever asks for it. */
+void liftTo(double degrees, bool precise = false);
+/** Command a stack level. Non-blocking. */
+void liftTo(Level level);
+/** Command the precise INTAKE handoff height (slow, exact final approach -- it does NOT seat). */
+void liftToIntake();
+/** Command the MATCHLOAD height. */
+void liftToMatchload();
+/** The trip to the bottom: the banded descent that ends SEATED on the hard stop, the same one L2's
+ *  run home, B and R2 use. Non-blocking. */
+void liftDown();
+/** Abandon whatever the lift is doing and brake-hold right here, with NO target active. The one call
+ *  in this header that leaves a passive hold -- use it to stop a move, not to end a routine. */
+void liftStop();
+
+/** Block until the lift arrives (HOLD at a level, or SEAT at the bottom). True = arrived; false =
+ *  BLOCKED, FAULT, or the timeout. Returns false immediately if no target is active. */
+bool waitLift(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+/** Block until the arm is pressed onto its hard stop (phase SEAT, including SEAT(short)). */
+bool waitLiftSeated(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+
+/** liftTo() + waitLift(), the one-liner form. True = arrived. */
+bool liftToAndWait(double degrees, int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS, bool precise = false);
+bool liftToAndWait(Level level, int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+/** liftToIntake() + waitLift(). The precise band is tight, so give it room. */
+bool liftToIntakeAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+/** liftDown() + waitLiftSeated(). True = really seated at the bottom. */
+bool liftDownAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+
+/** Non-blocking status, for a routine that wants to drive while the arm moves. */
+double liftPosition();
+double liftTarget();
+bool liftSettled();
+bool liftSeated();
+bool liftSeatedShort();
+bool liftBlocked();
+bool liftFaulted();
+bool liftHoming();
+bool liftHomed();
+/** The brain's own phase word ("DRIVE" / "BRAKE" / "APPROACH" / "HOLD" / "DESCEND" / "FINAL" /
+ *  "SEAT" / "SEAT(short)" / "PRESS" / "REL(...)" / "UNSTK", "" with no target). */
+const char* liftPhase();
+
+// ---------------------------------------------------------------------------
+// Claw and pivot (Scoring owns the cylinders; these are the driver's own calls)
+// ---------------------------------------------------------------------------
+/** A, when the jaws are open: shut them on a pin. */
+void clawGrip();
+/** A, when the jaws are shut: open them (starts the autoclamp lockout). */
+void clawOpen();
+/** A, exactly: shut if open, open if shut. */
+void clawToggle();
+bool clawClamped();
+/** clawGrip() + block until the jaws report CLAMPED and CLAW_CLOSE_TIME_MS has passed, so the arm
+ *  never pulls out of a claw that is still closing. True = gripped. */
+bool gripAndWait(int timeoutMs = config::AUTON_CLAW_TIMEOUT_MS);
+/** clawOpen() + block for CLAW_OPEN_TIME_MS (or until the jaws read open). True = open. */
+bool openAndWait(int timeoutMs = config::AUTON_CLAW_TIMEOUT_MS);
+/**
+ * THE AUTOCLAMP WAIT. Block until the claw is actually CLAMPED -- by the autoclamp seeing a pin, or
+ * by anything else that shuts the jaws -- then wait out config::CLAW_CLOSE_TIME_MS so the grip is
+ * real before the routine moves on. True = clamped; false = the timeout ran out.
+ *
+ * stopChassis = true cancels the chassis motion that is running the instant the clamp happens
+ * (lemlib::Chassis::cancelMotion()), which is the "drive into a pin and stop when you have it"
+ * pattern:
+ *
+ *     auton::autoclamp(true);
+ *     chassis.moveToPoint(24, 0, 2000, {.async = true});
+ *     if (auton::waitUntilClamped(2000, true)) auton::stepUp();   // got it, and the drive is stopped
+ *
+ * With stopChassis = false it just waits and leaves the motion alone.
+ */
+bool waitUntilClamped(int timeoutMs = config::AUTON_CLAMP_TIMEOUT_MS, bool stopChassis = false);
+
+/** X: the pivot's two positions. OUT = swung out (power-on, every stack level, the default down
+ *  position); BACK = pulled in toward the intake handoff. Each returns after PIVOT_TIME_MS if
+ *  waitForIt, else immediately. */
+void pivotOut(bool waitForIt = false);
+void pivotBack(bool waitForIt = false);
+bool pivotIsOut();
+/** Y: autoclamp on/off. */
+void autoclamp(bool on);
+bool autoclampOn();
+
+// ---------------------------------------------------------------------------
+// Intake — the same single-writer decision the driver's R1/R2 feed
+// ---------------------------------------------------------------------------
+/** Latch a roller request. It is applied by the auton tick, as the one intake write per tick, and it
+ *  beats both the L1/L2 macro windows exactly as the driver's R1/R2 do. power is 0..1 of
+ *  config::INTAKE_MV. */
+void intakeIn(double power = 1.0);
+void intakeOut(double power = 1.0);
+/** Drop the request: the macros (or nothing) decide again. */
+void intakeStop();
+/** intakeIn()/intakeOut() for ms, then intakeStop(). Blocks for ms. */
+void intakeInFor(int ms, double power = 1.0);
+void intakeOutFor(int ms, double power = 1.0);
+
+// ---------------------------------------------------------------------------
+// The driver's macro operations, through the identical code paths
+// ---------------------------------------------------------------------------
+/** R1 new-press: send the claw to the INTAKE handoff -- jaws open, pivot BACK, precise approach.
+ *  Ignored while a pin is clamped (interlock 4). */
+void goToIntake();
+/** goToIntake() + block until Scoring reports it is parked there. */
+bool goToIntakeAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+
+/** L1: the first call clamps and rises to stack level 1; each later call goes up one level, staying
+ *  at the top. Also opens L1's auto-intake sweep when the rise starts from the floor, exactly like
+ *  the button (so the rollers sweep while the arm climbs). */
+void stepUp();
+/** stepUp() + block until the arm is holding the level it ended up at. */
+bool stepUpAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+
+/** L2: above the bottom holding a pin -> the sensing scorer (press onto the stack with the jaws shut,
+ *  release at the landing, slide off, run home fast and SEAT), with L2's auto-outtake running near the
+ *  bottom just like the button. At the bottom -> toggles the claw in place, moving nothing. */
+void score();
+/** Block until a score sequence has finished -- the arm seated at the bottom with the pin off. False
+ *  on SCORE STUCK (the claw stayed hooked) or the timeout. */
+bool waitScore(int timeoutMs = config::AUTON_SCORE_TIMEOUT_MS);
+/** score() + waitScore(). */
+bool scoreAndWait(int timeoutMs = config::AUTON_SCORE_TIMEOUT_MS);
+/** True if the last score gave up with the claw still caught. */
+bool scoreStuck();
+
+/** Scoring::scoreOrMatchload(): holding a pin -> score and lower to INTAKE instead of the bottom;
+ *  empty -> go to the MATCHLOAD position. Not on any driver button. */
+void matchload();
+/** B: stow -- cancel the macro, pivot OUT, lift straight down to the bottom and seat. */
+void stow();
+/** stow() + waitLiftSeated(). */
+bool stowAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+/** Scoring::reset(): back to IDLE, level back to 1, nothing moves, the lift keeps holding. */
+void resetMacro();
+/** Scoring::resetLevel(): back to stack level 1 without scoring. */
+void resetLevel();
+/** The stack level the macro is on (0 when it isn't stacking), and its state word for the brain. */
+int level();
+const char* macroState();
+
+// ---------------------------------------------------------------------------
+// moveB — drive until the REAR distance sensor reads a target distance
+// ---------------------------------------------------------------------------
+/**
+ * Ported 1:1 from the team's old library (JokrPushBack, src/movement.cpp) and kept deliberately
+ * as-is, signature included, so old calls paste straight in. It is NOT an odometry move: it is a
+ * hand-rolled PD loop on config::BACK_DISTANCE_PORT's reading that drives BOTH sides at the same
+ * power until the rear sensor reads `distance` mm from whatever is behind the robot, then settles.
+ *
+ *   distance   the target reading, in MILLIMETRES, from the rear sensor.
+ *   forwards   true = positive power drives the robot forward; false = the whole output is negated,
+ *              so the robot backs up. This is "which way does the robot physically move", and it is
+ *              applied AFTER the PD output, so it does not change the sign of the error.
+ *   decreasing true when the reading gets SMALLER as the move progresses (backing toward a wall:
+ *              error = reading - distance); false when it gets BIGGER as the move progresses (driving
+ *              away from the wall behind you: error = distance - reading). Getting this wrong makes
+ *              the loop drive the wrong way, so it is the first thing to check.
+ *   maxSpeed   power cap, -127..127 units (this is MotorGroup::move(), not voltage).
+ *   minSpeed   the smallest power the loop is allowed to output once it wants any at all, so a tiny
+ *              error still breaks friction. <= 0 means use config::MOVEB_DEFAULT_MIN_SPEED (15).
+ *   timeOutMs  hard stop. ALWAYS give one.
+ *
+ * Example -- back up until the rear sensor is 150 mm from the wall, at up to 70 power, 2 s limit:
+ *     auton::moveB(150, false, true, 70, 15, 2000);
+ *
+ * TWO THINGS TO KNOW. (1) It writes the drive motors DIRECTLY, so it cancels any LemLib motion at
+ * entry and waits for the chassis to be idle before it starts -- never two writers on the drive. It
+ * also refuses to run unless the auton tick is running (auton::begin()), so it can never be called
+ * from driver control. (2) KEPT FROM THE OLD CODE: while the sensor reads out of range
+ * (>= config::MOVEB_OUT_OF_RANGE_MM) the loop drives BLIND at maxSpeed until it comes back into
+ * range or the timeout ends the move -- so an unplugged or missing rear sensor means full speed until
+ * timeOutMs. Keep timeOutMs tight, and check the brain's BACK line before trusting a route to it.
+ *
+ * Gains and thresholds: config::MOVEB_* (they all need retuning -- the old robot had 3.25" traction
+ * wheels, this one has 2.75" omnis).
+ */
+void moveB(double distance, bool forwards, bool decreasing, int maxSpeed, int minSpeed, int timeOutMs);
+/** The rear sensor's current reading, mm (what moveB is looking at). */
+int backDistanceMm();
+
+}  // namespace auton

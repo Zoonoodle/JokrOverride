@@ -2,6 +2,7 @@
 /** Global robot objects, created once in robot.cpp. */
 
 #include "lemlib/api.hpp"
+#include "pros/distance.hpp"
 #include "pros/imu.hpp"
 #include "pros/misc.hpp"
 #include "pros/motor_group.hpp"
@@ -20,6 +21,8 @@ extern lemlib::Chassis chassis;
 extern pros::MotorGroup leftDrive;
 extern pros::MotorGroup rightDrive;
 extern pros::Rotation verticalEncoder;
+// Rear-facing distance sensor: the feedback for auton::moveB(), and shown on the brain's BACK line.
+extern pros::Distance backDistance;
 // Null when config::IMU_PORT == 0 (no IMU on the robot yet) -- always check before dereferencing.
 extern std::unique_ptr<pros::Imu> imu;
 extern subsystems::Lift lift;

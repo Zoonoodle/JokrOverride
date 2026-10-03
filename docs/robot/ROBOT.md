@@ -27,8 +27,8 @@ Code names (`config.hpp` / `robot.hpp`):
 
 | Thing | Name | Port |
 |---|---|---|
-| Left drive | `config::LEFT_DRIVE_PORTS`, `robot::leftDrive` | `-2, -3, -1` (reversed) |
-| Right drive | `config::RIGHT_DRIVE_PORTS`, `robot::rightDrive` | `8, 9, 10` |
+| Left drive | `config::LEFT_DRIVE_PORTS`, `robot::leftDrive` | `-8, -2, -1` (all reversed) |
+| Right drive | `config::RIGHT_DRIVE_PORTS`, `robot::rightDrive` | `3, 9, 10` |
 | Chassis | `robot::chassis` (LemLib) | — |
 
 Geometry constants: `DRIVE_WHEEL_DIAMETER_IN = 2.75`, `DRIVE_RPM = 450`,
@@ -41,17 +41,23 @@ photos)**.
 
 ## Odometry and sensors
 
-- **Tracking wheel pod** — `ODOM_VERTICAL_ROTATION_PORT = 7`, exposed as
+- **Tracking wheel pod** — `ODOM_VERTICAL_ROTATION_PORT = 17` (confirmed 2026-10-02), exposed as
   `robot::verticalEncoder`. One vertical pod only. I could not positively identify the pod
   in any photo. **(unclear from photos)**
-- **Inertial sensor — there is no IMU on the robot.** One is not fitted. `config.hpp` now sets
-  `IMU_PORT = 0` (it used to be `8`, which was simply wrong -- port 8 is a right-drive port).
-  `robot.cpp` only constructs a `pros::Imu` when `IMU_PORT != 0`; with it at `0`, `robot::imu`
-  is a null `std::unique_ptr`, LemLib's `OdomSensors` gets a null IMU pointer (its own
-  documented way to run on the tracking wheel alone), nothing calibrates it, and the brain
-  screen shows `IMU  none (not installed)` instead of junk. Treat LemLib heading/odometry as
-  tracking-wheel-only until a real IMU is mounted on its own port and `IMU_PORT` is set to it
-  -- that's the only line that needs to change.
+- **Inertial sensor — an IMU IS now fitted, on port 18.** `IMU_PORT = 18`, confirmed
+  2026-10-02 (it was `0`, "none fitted", and before that `8`, which was simply wrong -- port 8
+  is a drive port). `robot.cpp` constructs a `pros::Imu` whenever `IMU_PORT != 0` and hands it
+  to LemLib's `OdomSensors` alongside the vertical pod, so **heading comes from the IMU and
+  distance from the pod**. It is calibrated in a background task started from `initialize()`,
+  and driver control NEVER waits on it (safety rule 4) -- `autonomous()` does wait, bounded by
+  `config::AUTON_CALIBRATE_TIMEOUT_MS`, because a drive move needs a heading. Setting
+  `IMU_PORT` back to `0` is still the supported way to run on the tracking wheel alone:
+  `robot::imu` becomes a null `std::unique_ptr`, LemLib gets a null IMU pointer, nothing
+  calibrates and the brain shows `IMU  none (not installed)`.
+- **Rear distance sensor** — `BACK_DISTANCE_PORT = 4` (**TODO(team): confirm** -- 4 is the old
+  robot's port, carried over with `auton::moveB()`), exposed as `robot::backDistance` and shown
+  on the brain's `BACK` line. It is the entire feedback loop for `moveB`, which drives until
+  this sensor reads a target distance from whatever is behind the robot.
 - **Lift rotation sensor** — `LIFT_ROTATION_PORT = 16`. The lift PID runs off this sensor,
   not the motor encoders. **It is mounted on the motored 12T axle**, not on the 48T arm axle,
   so it turns 4× for every degree the arm moves:
@@ -61,9 +67,15 @@ photos)**.
   hand, and the lift reads the sensor with `Rotation::get_position()` (multi-turn), not
   `get_angle()` (wraps at 360°) -- at 4:1 the sensor turns more than a full revolution over
   the arm's ~105° of travel, so a wrapping read would make the lift think it jumped position.
-- **Claw distance sensor (autoclamp)** — `CLAW_DISTANCE_PORT = 11`, `CLAW_DETECT_MM = 40`.
-  `config.hpp` says it is not mounted yet, and I saw nothing at the claw that looks like a
-  distance sensor. Autoclamp is off by default (`CLAW_AUTOCLAMP_AT_START = false`).
+- **Claw distance sensor (autoclamp)** — `CLAW_DISTANCE_PORT = 11`, **mounted in the claw and
+  confirmed 2026-10-02** (the photos further down predate it, which is why their `DIST` line
+  reads `WRONG DEVICE`). It looks out between the jaws and sees both pins and cups. The rule:
+  anything at or inside `AUTOCLAMP_RANGE_MM` (15, TUNE) for `AUTOCLAMP_CONFIRM_MS` (50) over at
+  least `AUTOCLAMP_MIN_SAMPLES` (2) fresh readings closes the jaws. Off at power-on
+  (`CLAW_AUTOCLAMP_AT_START = false`), **on** throughout driver control
+  (`AUTOCLAMP_ON_IN_DRIVER`, Y toggles it), off in auton until a route asks for it. See README
+  "Autoclamp" -- and note the V5 Distance Sensor's specified minimum range is about 20 mm, so
+  the 15 mm threshold is the first number to question if it never fires.
 
 Visible electronics: the V5 brain sits low and flat in the middle of the chassis, screen
 facing up ([`05-cup-in-claw-brain-screen.jpg`](photos/05-cup-in-claw-brain-screen.jpg)).
@@ -196,7 +208,9 @@ preset and the PID actually use):
 
 - Every photo's `DIST` line reads `WRONG DEVICE on port (port 11)` and `ODOM` reads
   `not connected (port 7)` -- the claw distance sensor and the odometry tracking wheel were
-  both disconnected (or something else was on port 11) at the time of these photos.
+  both disconnected (or something else was on port 11) at the time of these photos. **Both are
+  fitted now** (claw sensor on 11, pod on 17, plus an IMU on 18), so those readings are history,
+  not the current state of the robot.
   **(unclear from photos -- check the robot)**
 - The brain's `ROT`/`MOT` line shows the rotation-sensor-based reading running almost exactly
   **2x** the motor-encoder-based reading at every level (e.g. level 5: `ROT 128.3 [513]` vs
@@ -218,7 +232,7 @@ and nothing else, no cup with it — is held on its side between two angled grey
 above the brain. The jaws close on the pin's fluted body, in the waist between the hex head
 and the flared base skirt; the skirt and the head stop the pin sliding out endways once the
 jaws are shut. That is exactly the grip `claw.hpp` describes ("the pin arrive", "the pin is
-between the jaws") and what `CLAW_DETECT_MM = 40` is meant to detect.
+between the jaws") and what `AUTOCLAMP_RANGE_MM` is meant to detect.
 
 I still could not count the cylinders on the end effector itself from these angles.
 **(unclear from photos)**
@@ -227,7 +241,7 @@ I still could not count the cylinders on the end effector itself from these angl
 |---|---|---|
 | Claw cylinder | `config::CLAW_PISTON_PORT`, `robot::claw` (`subsystems::Claw`) | ADI **D** |
 | Pivot cylinder | `config::PIVOT_PISTON_PORT` (owned by `subsystems::Scoring`) | ADI **C** |
-| Claw distance sensor | `config::CLAW_DISTANCE_PORT` (not mounted yet) | `11` |
+| Claw distance sensor | `config::CLAW_DISTANCE_PORT` (mounted in the claw, 2026-10-02) | `11` |
 
 > **The two cylinders were on each other's ports in code until 2026-10-01.** The port the code
 > called the claw ('C') is physically the **pivot**, and the port it called the pivot ('D') is

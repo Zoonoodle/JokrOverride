@@ -18,12 +18,21 @@ include/subsystems/ src/subsystems/
               stall/runaway guards, manual voltage for D-pad Up/Down and R1, a terminal trace,
               moveTo()/setTarget() shared by driver + auton
   contact_detector.hpp  PURE landing detector for the L2 scorer (no PROS) -- host-tested in test/
-  claw.*      pneumatic claw + autoclamp state machine
+  autoclamp_detector.hpp PURE "is something really in the jaws?" debounce (no PROS) -- host-tested
+  claw.*      pneumatic claw + the distance-sensor autoclamp
   intake.*    one-motor roller intake (driver-controlled only)
   scoring.*   intake macro: intake / matchload / 5-level stacking state machine with interlocks,
               drives the lift only through Lift::setTarget() (the PID), never raw power
+include/auton.hpp, src/auton.cpp   AUTONOMOUS API -- one call per lift/claw/pivot/intake/macro
+                              operation, the blocking waits, and moveB(). Don't put routes here.
+include/autons.hpp, src/autons.cpp ROUTES -- every auton route, and the one SELECTED line that
+                              picks which one runs. This is the file to work in when coding routes.
+include/periodic.hpp, src/periodic.cpp  THE per-loop subsystem logic, in one copy: both macro
+                              windows, the single intake decision, Claw::update(), Scoring::update().
+                              Run by opcontrol's loop in driver and by the auton tick in auton.
 src/screen.cpp                brain screen sensor readout
-src/main.cpp                  initialize / autonomous stub / opcontrol + button map
+src/main.cpp                  initialize / autonomous (setup + one autons::run() call) / opcontrol
+                              + button map
 test/                         host-side tests for the pure parts (test/run.sh, Mac clang++ only --
                               pros make never sees this directory, it only globs src/)
 docs/notebook/                notebook-ready write-ups, flowcharts and blank test tables
@@ -34,14 +43,15 @@ All ports live in `include/config.hpp`. Current values:
 
 | Device | Port |
 |---|---|
-| Left drive | 2, 3, 1 (reversed) |
-| Right drive | 8, 9, 10 |
-| Odometry pod (rotation) | 7 |
-| Inertial sensor | **none installed yet** (`IMU_PORT = 0`; odometry runs on the tracking wheel alone until one is added -- set a real port to enable it) |
+| Left drive | 8, 2, 1 (all reversed) |
+| Right drive | 3, 9, 10 |
+| Odometry pod (rotation) | 17 |
+| Inertial sensor | **18** (fitted and confirmed 2026-10-02 -- heading comes from the IMU, distance from the pod. Calibrated in a background task; driver control never waits on it. Set `IMU_PORT = 0` to run on the pod alone) |
 | Lift motors | 20, 13 (reversed), on the 12T axle, geared 4:1 into the 48T lift-arm axle |
 | Lift rotation sensor | 16, on the 12T motor axle (same 4:1 as the motors) -- the lift PID runs off this sensor |
 | Intake (one motor) | 12 |
-| Claw distance sensor (autoclamp) | 11 |
+| Claw distance sensor (autoclamp) | 11 (mounted in the claw, confirmed 2026-10-02) |
+| Rear distance sensor (`auton::moveB`) | 4 -- **TODO(team): confirm**, this is the OLD robot's port |
 | Claw cylinder | ADI **D** (was coded as C until 2026-10-01 -- the two cylinders were crossed) |
 | Pivot cylinder | ADI **C** (was coded as D) |
 
@@ -65,7 +75,7 @@ allowed to own the lift motors.
 | **B** | **stow**: pivot **OUT**, lift straight down to `DOWN` and seated, cancel the intake macro. Uses the same fast banded descent as L2's run home (`LIFT_DESCENT_TOP_PCT` / `_MID_PCT`, now 80% / 95%), minus any claw work |
 | **A** | claw clamp / open. The claw is physically **OPEN at power-on** -- it needs air to grip: the `CLAW` line shows `OPEN D[0]` and A closes it. `CLAW_CLOSED_IS_ADI_HIGH` (`true`) says which ADI level is closed; if A *opens* the jaws while the line says `CLAMPED`, flip it |
 | **X** | pivot **OUT** / **BACK** (the brain's `CLAW` line shows `PIV OUT C[0]` / `PIV BACK C[1]`: word, port letter, raw ADI level) |
-| **Y** | autoclamp on / off |
+| **Y** | autoclamp on / off (it is **on** from the moment driver control starts -- see "Autoclamp") |
 
 ### R1 / R2 have two modes
 Which one is in force is **latched the moment the button goes down**, from whether the claw is
@@ -127,28 +137,226 @@ interlocks, and the two aren't coordinated with each other.
 
 **Brain `DRV` line:** `not started` means driver control never ran (not enabled, or the program crashed; look for a red error on the brain). Otherwise it shows a loop counter going up plus the stick values and the manual-override Up/Down it reads. If the counter climbs and `Up 1` shows but the lift doesn't move, the problem is wiring or motor direction, not code.
 
-## Auton API
-Autonomous and the driver's preset buttons share the same named heights (`config::lift_preset`, see
-"Tuning the claw positions" below) and the same `Lift` class:
+## Autonomous API
+Everything autonomous can do lives in **`include/auton.hpp`** (the API) and is written into routes in
+**`src/autons.cpp`** (the routes). Every operation goes through the *identical* code path the matching
+driver button uses -- `stepUp()` is L1, `score()` is L2, `goToIntake()` is R1's new-press, `stow()` is
+B, `clawGrip()`/`clawOpen()` are A -- so auton and driver can never drift apart, and tuning one tunes
+both. The named heights are the same `config::lift_preset` constants the buttons use.
+
+Two halves: **commands never block** and return immediately; **waits always take a timeout and always
+return whether it actually happened** (`false` = timed out, or the lift reported BLOCKED / FAULT /
+SCORE STUCK). So a routine can check instead of hoping, can drive while the arm moves, and can never
+hang on a jammed mechanism.
 
 ```cpp
-lift.moveTo(config::lift_preset::INTAKE, 1500, true);            // jump to INTAKE, wait up to 1.5s or until settled
-lift.moveTo(config::lift_preset::STACK_LEVELS[2], 2000, true);   // 3rd of 5 stack levels
-if (!lift.isSettled()) { /* ... */ }
-lift.cancel();                                                    // stop chasing a target, brake-hold in place
+auton::liftTo(auton::Level::THREE);
+if (!auton::waitLift(1500)) { /* didn't get there -- decide what to do */ }
+auton::scoreAndWait();
 ```
 
-`moveTo(height, timeoutMs, waitUntilSettled)` blocks the calling task only (autonomous or driver
-code) -- the lift's own background task keeps running the PID at a fixed 10 ms regardless.
-`setTarget(height, precise)` is the lower-level, non-blocking version (used internally, and by
-`scoring.cpp`). See "Lift speed and motion" below for what a move does. `precise = true` gets the tight
-tolerance `INTAKE` needs; any goal within half a degree of `INTAKE` is promoted automatically. A
-**non-precise** goal at or below `LIFT_BOTTOM_GOAL_DEG` is not a position move at all -- it runs the
-banded descent and ends **seated** on the hard stop, so `lift.moveTo(lift_preset::DOWN, …, true)` in
-auton gets exactly the same bounce-free bottom that L2 does. `isSettled()` is true in `SEAT`.
+### Lifecycle (autonomous() does all of this; a route never has to)
+| Call | What it does |
+|---|---|
+| `auton::begin()` | starts the 10 ms **auton tick** -- the same per-loop logic the driver loop runs (`periodic::tick()`): Scoring's state machine, the claw autoclamp, the one intake decision. Commands no motion. Idempotent. |
+| `auton::end()` | stops it and **blocks until the tick task has really exited**, then stops the intake. Called by `opcontrol()` and `disabled()`, so the auton tick and the driver loop can never both run. Never touches the lift. |
+| `auton::running()` | true while the auton tick is up |
+| `auton::wait(ms)` | `pros::delay`, with a name that reads in a routine |
 
-A blocking `moveTo(..., true)` at the top of a routine also waits out lift homing (see "Lift homing"),
-so give it time for homing plus the move.
+### Lift
+| Call | What it does |
+|---|---|
+| `auton::homeLift()` | pivot OUT, then `Lift::requestHome()`. Returns at once; homing runs in the lift's task |
+| `auton::waitHome(ms)` | blocks until homing ends. `true` only if it really HOMED (so the arm is seated on a trustworthy zero) |
+| `auton::liftTo(deg, precise=false)` | an arbitrary height, clamped to `0..lift_preset::MAX` |
+| `auton::liftTo(Level::ONE..FIVE)` | a stack level (`config::lift_preset::STACK_LEVELS`) |
+| `auton::liftToIntake()` | the precise INTAKE handoff height (tight tolerance, slow final approach, never seats) |
+| `auton::liftToMatchload()` | the MATCHLOAD height |
+| `auton::liftDown()` | the banded descent that ends **SEATED** on the hard stop (same as L2's run home, B, R2) |
+| `auton::liftStop()` | abandon the move and brake-hold here, **no target active**. The one call that leaves a passive hold -- for stopping a move, not for ending a routine |
+| `auton::waitLift(ms)` | blocks until arrival (HOLD at a height, SEAT at the bottom) |
+| `auton::waitLiftSeated(ms)` | blocks until the arm is pressed onto the hard stop |
+| `auton::liftToAndWait(deg/Level, ms)` | the two in one line |
+| `auton::liftToIntakeAndWait(ms)`, `auton::liftDownAndWait(ms)` | ditto |
+| `auton::liftPosition()`, `liftTarget()`, `liftSettled()`, `liftSeated()`, `liftSeatedShort()`, `liftBlocked()`, `liftFaulted()`, `liftHoming()`, `liftHomed()`, `liftPhase()` | non-blocking status, for driving while the arm moves. `liftPhase()` is the brain's own phase word |
+| `auton::heightOf(Level)` | the arm degrees a level means |
+
+### Claw, pivot, autoclamp
+| Call | What it does |
+|---|---|
+| `auton::clawGrip()` / `clawOpen()` / `clawToggle()` | exactly what A does (through `Scoring::toggleClaw()`); grip/open are idempotent |
+| `auton::gripAndWait(ms)` | grip, then wait out `CLAW_CLOSE_TIME_MS` so the arm never pulls out of closing jaws |
+| `auton::openAndWait(ms)` | open, then wait out `CLAW_OPEN_TIME_MS` |
+| `auton::clawClamped()` | is a pin held? |
+| `auton::waitUntilClamped(ms, stopChassis=false)` | **the autoclamp wait.** Blocks until the claw is actually clamped, then waits out the close time. `stopChassis = true` cancels the running LemLib motion at the instant of the clamp -- see "Autoclamp" |
+| `auton::autoclamp(bool)` / `autoclampOn()` | the autoclamp, which auton starts with **off** |
+| `auton::pivotOut(wait=false)` / `pivotBack(wait=false)` / `pivotIsOut()` | the pivot's two positions (X); `wait = true` adds `PIVOT_TIME_MS` |
+
+### Intake
+| Call | What it does |
+|---|---|
+| `auton::intakeIn(power=1.0)` / `intakeOut(power)` | latch a roller request (like holding R1/R2). Applied by the tick as the **one** intake write, and it beats both macro windows |
+| `auton::intakeStop()` | drop the request |
+| `auton::intakeInFor(ms, power)` / `intakeOutFor(ms, power)` | run it for a time, then stop. Blocks for `ms` |
+
+### The driver's macros
+| Call | What it does |
+|---|---|
+| `auton::goToIntake()` / `goToIntakeAndWait(ms)` | R1: jaws open, pivot BACK, precise move to the handoff |
+| `auton::stepUp()` / `stepUpAndWait(ms)` | L1: clamp + rise a level (and L1's auto-intake floor sweep, exactly like the button) |
+| `auton::score()` / `waitScore(ms)` / `scoreAndWait(ms)` | L2: the sensing scorer, press -> release -> run home -> SEAT, with L2's auto-outtake. `false` on SCORE STUCK |
+| `auton::scoreStuck()` | did the last score give up with the claw caught? |
+| `auton::matchload()` | `Scoring::scoreOrMatchload()` (no driver button) |
+| `auton::stow()` / `stowAndWait(ms)` | B: pivot OUT, straight down, seated |
+| `auton::resetMacro()` / `resetLevel()` / `level()` / `macroState()` | the macro's own state |
+
+### moveB -- drive until the REAR sensor reads a distance
+Ported 1:1 from the team's old library, signature included, so old calls paste straight in. **Not an
+odometry move:** a hand-rolled PD loop on the rear distance sensor (port `BACK_DISTANCE_PORT`) that
+drives both sides at equal power until that sensor reads `distance` mm, then settles.
+
+```cpp
+auton::moveB(150, /*forwards=*/false, /*decreasing=*/true, /*maxSpeed=*/70, /*minSpeed=*/15, /*timeOutMs=*/2000);
+// back up until the rear sensor is 150 mm from the wall behind, at up to 70 power, give up after 2 s
+```
+
+* `forwards` -- which way the robot physically moves. It negates the whole output, after the PD maths.
+* `decreasing` -- `true` when the reading gets **smaller** as the move progresses (backing toward a
+  wall: `error = reading - distance`); `false` when it gets **bigger** (driving away from whatever is
+  behind: `error = distance - reading`). Get this wrong and the loop drives the wrong way -- check it first.
+* Gains and thresholds are `config::MOVEB_*`, all marked `TUNE`: **they need retuning**, because the old
+  robot had 3.25" traction wheels and this one has 2.75" omnis.
+* It writes the drive motors directly, so it cancels any LemLib motion at entry and waits for the
+  chassis to be idle -- never two writers on the drive -- and it refuses to run unless the auton tick is
+  up, so it can never be called from driver control.
+* **Kept from the old code:** while the rear sensor reads out of range (>= `MOVEB_OUT_OF_RANGE_MM`,
+  9910) it drives **blind at `maxSpeed`** until something comes into range or the timeout ends the move.
+  A missing or unplugged rear sensor therefore means full speed until `timeOutMs`. Watch the brain's
+  `BACK` line before trusting a route to it, and keep `timeOutMs` tight.
+* `auton::backDistanceMm()` is the raw reading. The old library's `moveF` and friends (front sensor)
+  were **not** ported -- this robot has no front distance sensor.
+
+### The lower-level `Lift` API (still there)
+`auton::*` is a wrapper, not a replacement. `lift.moveTo(height, timeoutMs, waitUntilSettled)` blocks
+the calling task only -- the lift's own task keeps running the PID at 10 ms regardless -- and
+`setTarget(height, precise)` is the non-blocking version `scoring.cpp` uses. `precise = true` gets the
+tight tolerance `INTAKE` needs; any goal within half a degree of `INTAKE` is promoted automatically. A
+**non-precise** goal at or below `LIFT_BOTTOM_GOAL_DEG` is not a position move at all -- it runs the
+banded descent and ends **seated** on the hard stop. `isSettled()` is true in `SEAT`. A blocking
+`moveTo(..., true)` at the top of a routine also waits out lift homing.
+
+### Every state holds
+Nothing in the API leaves the lift limp. A level ends in the damped HOLD; the bottom ends SEATED
+(`LIFT_SEAT_MV` pressed into the hard stop, not parked above it); a score ends seated; and **successful
+homing ends seated too** -- `Lift::updateHoming()` adopts a DOWN target already in `SEAT`, so the arm is
+actively held on its stop from the moment auton starts. `HOME FAIL` is the one exception, on purpose:
+the arm stopped somewhere implausible, so it stops pushing and brake-holds rather than driving into
+whatever it is caught on. Nothing in `opcontrol()` cancels a target it did not start, so whatever auton
+left the arm holding survives the hand-off to driver control.
+
+## Writing an auton route
+Everything route-specific is in **`src/autons.cpp`**, and that is the only file to open:
+
+1. **Pick the route:** change the one line at the top, `constexpr Route SELECTED = Route::LIFT_TEST;`
+2. **Write a route:** copy `matchRoute()` (it is a commented template whose every line is a real,
+   compiling call), rename it, add it to the `Route` enum in `include/autons.hpp` and to the `switch`
+   in `run()`.
+3. Build and upload. Nothing else in the codebase needs touching.
+
+Routes that ship today: `LIFT_TEST` (lift only, no drivetrain), `ODOM_TEST` (two straight-line moves),
+`MATCH` and `SKILLS` (templates), `NONE`.
+
+`autonomous()` in `main.cpp` does the setup no route may forget, then makes exactly one call,
+`autons::run()`. The setup is: start the auton tick, autoclamp **off**, **request lift homing** (every
+route, every time -- it blocks nothing and runs underneath the route), then wait for odometry/IMU
+calibration, bounded by `config::AUTON_CALIBRATE_TIMEOUT_MS` so an unplugged IMU cannot eat the
+autonomous period.
+
+**`LIFT_TEST` on the robot** (lift, claw and intake only -- nothing drives):
+1. Put the arm anywhere reasonable, power on, enable autonomous (competition switch, or the brain's
+   program-run menu).
+2. The arm drives **down** to its hard stop. Brain `ANGLE` line: `HOMING`, then `HOMED @ <angle>`.
+3. For 2 s: `LIFT 0.0 -> 0.0  DOWN  SEAT  SETTLED`. It must not creep up.
+4. Up to stack level 1: `LIFT ... -> 31.0  STACK 1  DRIVE` then `HOLD` for 2 s, within ~5 deg of 31.
+5. Up to stack level 3: ends `HOLD` near 74.6 for 2 s.
+6. Back down: `DESCEND` -> `FINAL` -> `SEAT` near 0, and it **stays** `SEAT` -- including after the
+   switch to driver control.
+
+**`ODOM_TEST` on the robot:** clear 3 ft in front, mark the starting position, enable autonomous. The
+robot drives forward 24", then reverses back; it should finish on its mark and the brain's `POSE` line
+should read ~`X 0 Y 0`. Homing runs at the same time, so expect the arm to go down as it drives.
+
+## Autoclamp
+A distance sensor in the claw (port `CLAW_DISTANCE_PORT`, 11) looks out between the jaws and sees both
+pins and cups. **While the jaws are open and the autoclamp is enabled, anything at or inside
+`AUTOCLAMP_RANGE_MM` for `AUTOCLAMP_CONFIRM_MS` straight gets gripped.** The debounce is the whole
+point: a reading that appears, vanishes and comes back is not a pin.
+
+The rule lives in `subsystems::AutoclampDetector` -- a **pure** class (no sensor, no clock, no cylinder,
+like `ContactDetector`) with host-side tests in `test/autoclamp_detector_test.cpp`, so spike rejection
+is proven on the Mac (`test/run.sh`) before anything is uploaded. `Claw::update()` owns the cylinder and
+calls it once per 10 ms tick.
+
+**When it is on.** Driver: **on by default**, re-enabled every time `opcontrol()` starts
+(`AUTOCLAMP_ON_IN_DRIVER`), and **Y** still toggles it mid-match. Auton: **off by default** --
+`auton::autoclamp(true)` in the route turns it on where it is wanted. Power-on/`initialize()`: off
+(`CLAW_AUTOCLAMP_AT_START = false`), so a preloaded pin cannot fire a cylinder before anyone enables
+anything. It also cannot fire during an L2 score: the claw is inhibited for the whole sequence.
+
+**Re-arm, and why it is not a timer.** The instant the jaws open, the pin they let go of is still
+millimetres away, so a timer-based re-arm re-grabs it every time and no score can finish. After **any**
+open the autoclamp is disarmed until the sensor reads **clear** -- further than `AUTOCLAMP_REARM_MM`, or
+nothing in range at all -- for `AUTOCLAMP_REARM_CLEAR_MS`. The gap between 15 mm and 30 mm is
+hysteresis, so the two thresholds cannot chatter at one distance. `CLAW_RELEASE_LOCKOUT_MS` (750 ms) is
+kept **on top** of that as a floor, covering the jaws physically swinging open past the sensor.
+
+**Watching it.** Brain `CLAW` line, the `AC:` field: `OFF` (disabled, or the jaws are shut by hand),
+`ARMED` (watching, nothing seen), `SEEING` (something in range, the confirm window is running), `CLEAR?`
+(disarmed after an open, waiting for a clear reading) or `HELD`. The raw millimetres are on the `DIST`
+field of line 8, with ` PIN` appended while the reading is inside the range.
+
+| Knob | What it does |
+|---|---|
+| `AUTOCLAMP_RANGE_MM` (15) | at or inside this = something in the jaws |
+| `AUTOCLAMP_CONFIRM_MS` (50) | ...continuously for this long |
+| `AUTOCLAMP_MIN_SAMPLES` (2) | ...over at least this many fresh readings |
+| `AUTOCLAMP_STALE_GRACE_MS` (60) | an unchanged reading counts as a new sample again after this long (~2 sensor refreshes) |
+| `AUTOCLAMP_REARM_MM` (30) / `AUTOCLAMP_REARM_CLEAR_MS` (150) | what counts as clear, and for how long, before it re-arms |
+| `AUTOCLAMP_MAX_VALID_MM` (9999) / `AUTOCLAMP_MIN_VALID_MM` (1) | the sensor's "nothing there" (counts as clear) and "cannot measure" (counts as neither) |
+| `AUTOCLAMP_MIN_CONFIDENCE` (0 = ignore) | the sensor's own 0..63 confidence |
+| `AUTOCLAMP_ON_IN_DRIVER` (true) | the driver default |
+
+**Why fresh samples are counted as well as milliseconds:** the V5 Distance Sensor refreshes on the
+order of 30 ms, which is slower than the 10 ms tick, so the same number comes back two or three times
+running. A pure time window could therefore be satisfied by **one** lucky measurement repeated for
+50 ms -- exactly the spike this rejects. A reading counts as a new sample when the value changes, or
+when `AUTOCLAMP_STALE_GRACE_MS` has passed since the last counted one (so a pin sitting dead still at
+one millimetre value still gets its second sample).
+
+**Heads-up on 15 mm:** the V5 Distance Sensor's *specified* minimum range is about **20 mm**, so 15 sits
+below where it is specified to read reliably. It usually still reports something sensible closer in, but
+this is the first number to question. With a pin held in the open jaws, watch `DIST`:
+
+* it reads **20-25 and never reaches 15** -> raise `AUTOCLAMP_RANGE_MM` to just above what you see;
+* it reads **0** with the pin there -> the pin is inside the sensor's floor: raise the range and/or move
+  the sensor back a few mm (a 0 is treated as "cannot measure", never as "very close");
+* it **clamps on a pin or cup going past** -> raise `AUTOCLAMP_CONFIRM_MS` (50 -> 80) first;
+* it **re-grabs what it just put down** -> raise `AUTOCLAMP_REARM_MM` / `AUTOCLAMP_REARM_CLEAR_MS`;
+* **nothing ever happens** -> check the `AC:` field. `OFF` means it is disabled (press Y). `CLEAR?`
+  means it is waiting for a clear reading -- take everything away from the jaws. `ARMED` with a pin
+  present means the range is too tight. `SEEING` that never becomes a clamp means the reading is not
+  staying inside the range long enough.
+
+**On-robot test, driver:** power on, enable driver control. `AC:ARMED` on the `CLAW` line, jaws open.
+Move a pin slowly into the jaws: `DIST` falls, `AC:` goes `SEEING`, and about 50 ms later the jaws shut
+and the line reads `CLAMPED D[1]  AC:HELD`. Press **A** to open: `AC:CLEAR?`. With the pin still sitting
+there it must **not** re-grab. Take the pin away: `AC:ARMED` again. Wave the pin past the jaws quickly:
+nothing should happen. Press **Y**: `AC:OFF`, and now nothing clamps at all.
+
+**On-robot test, auton:** in `autons.cpp` use the `MATCH` template with `auton::autoclamp(true)`, an
+`{.async = true}` drive at a pin, and `auton::waitUntilClamped(2000, true)`. The robot should drive, stop
+**at** the clamp rather than pushing through it, and move on to the next call. With no pin in front of it
+the wait returns `false` after 2 s and the route can bail out.
 
 ## Lift direction check (do this first)
 The lift runs off the **rotation sensor** on port 16, mounted on the 12T motor axle (confirmed, geared 4:1 into the 48T lift-arm axle -- `LIFT_GEAR_RATIO` / `LIFT_ROTATION_RATIO` are both `4.0`). Everything in the code -- presets, PID target/error, the brain's `LIFT` lines -- works in **lift-arm degrees**; that 4:1 is what converts the sensor/motor side down to that one shared unit. If the sensor and the motors disagree on which way is up, the PID pushes the wrong way, the error grows, and the lift drives itself down. That's the "randomly spinning down" problem. To check:
@@ -592,7 +800,7 @@ below alongside the existing sensor readouts. A sensor that isn't plugged in sho
 | CLAW | claw state (`OPEN`/`ARMED`/`CLAMPED`/`RELEASED`) and pivot `PIV OUT` / `PIV BACK`, **each with its ADI port letter and raw level** (`CLAW OPEN D[0]  PIV OUT C[0]` at power-on) so A / X each confirm one polarity constant; then intake-macro state, stack level, and `R:INTAKE`/`R:LIFT`/`R:wait` -- which mode R1/R2 are in |
 | LIFT (position line) | position → target (or `none`), the active named preset (or `custom`), the phase (`DRIVE`/`BRAKE`/`APPROACH`/`HOLD`/`DESCEND`/`RETURN`/`FINAL`/`SEAT`/`SEAT(short)`/`PRESS`/`REL`/`UNSTK`, where `REL` carries which signal fired, `REL(32)` for the relative-travel guaranteed release, or `REL(floor)` for a start too low for that travel to complete), and `FAULT`/`SCORE STUCK`/`BLOCKED`/`SETTLED` (no more `NO CONTACT` -- a release is always guaranteed one way or another) |
 | LIFT (err/vel/out line) | error in lift degrees, measured arm speed in deg/s, and what was sent to the motors in mV |
-| LIFT (ref line) | the speed reference the velocity loop is tracking this tick (0 in `HOLD`/`SEAT`) and the hold loop's learned gravity voltage in mV -- **or, during an L2 score, all three contact signals live**: `L2 lag <deg> eff <mV> v/b <%>`. Then `DIST`: claw distance sensor mm and `PIN` when inside `CLAW_DETECT_MM` |
+| LIFT (ref line) | the speed reference the velocity loop is tracking this tick (0 in `HOLD`/`SEAT`) and the hold loop's learned gravity voltage in mV -- **or, during an L2 score, all three contact signals live**: `L2 lag <deg> eff <mV> v/b <%>`. Then `DIST`: claw distance sensor mm and `PIN` when inside `AUTOCLAMP_RANGE_MM` |
 | TUNE | `LIFT_DECEL_DEG_PER_S2`, the approach zone / speed, `LIFT_HOLD_KD` and `LIFT_TOLERANCE_DEG` read straight from `config.hpp`, so you can see which build is on the brain while iterating |
 | LIFT (temp/current line) | lift motor temp (°C) and current draw (mA) |
 | TEMP | hottest left drive / right drive / lift motor and the intake motor (C). Motors lose power around 55 C. |

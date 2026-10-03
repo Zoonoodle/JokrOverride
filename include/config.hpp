@@ -25,9 +25,10 @@ namespace config {
 // Drivetrain (LemLib)
 // ---------------------------------------------------------------------------
 // Negative port = reversed motor.
-// TODO(team): confirm ports, direction, and whether the 55W is 5x 11W or 4x 11W + 2x 5.5W.
-inline const std::vector<std::int8_t> LEFT_DRIVE_PORTS = {-8, -2, -1};   // TODO(team): confirm
-inline const std::vector<std::int8_t> RIGHT_DRIVE_PORTS = {3, 9, 10};     // TODO(team): confirm
+// Ports CONFIRMED on the robot 2026-10-02. TODO(team): confirm whether the 55W is 5x 11W or
+// 4x 11W + 2x 5.5W (cartridge colour only, not the ports).
+inline const std::vector<std::int8_t> LEFT_DRIVE_PORTS = {-8, -2, -1};   // confirmed 2026-10-02
+inline const std::vector<std::int8_t> RIGHT_DRIVE_PORTS = {3, 9, 10};     // confirmed 2026-10-02
 
 inline constexpr float DRIVE_WHEEL_DIAMETER_IN = 2.75f;      // notebook: 2.75" omni wheels
 inline constexpr float DRIVE_RPM = 450.0f;                   // notebook: 450 RPM
@@ -35,19 +36,41 @@ inline constexpr float TRACK_WIDTH_IN = 11.5f;               // TODO(team): meas
 inline constexpr float HORIZONTAL_DRIFT = 2.0f;              // LemLib: 2 for a drive with traction wheels
 
 // Odometry: one vertical tracking wheel pod. No inertial sensor is on the robot yet.
-inline constexpr int8_t ODOM_VERTICAL_ROTATION_PORT = 17;     // TODO(team): confirm (negative to reverse)
+inline constexpr int8_t ODOM_VERTICAL_ROTATION_PORT = 17;     // confirmed 2026-10-02 (negative to reverse)
 inline constexpr float ODOM_WHEEL_DIAMETER_IN = 2.0f;        // TODO(team): confirm pod wheel (2" / 2.75")
 inline constexpr float ODOM_VERTICAL_OFFSET_IN = 0.0f;       // TODO(team): measure left/right offset from center
-// Inertial sensor: the robot doesn't have one mounted yet (port 8, the old value here, is a right
-// drive motor -- there is no IMU on this robot to conflict with it). 0 = none fitted: robot.cpp
-// builds no pros::Imu at all, LemLib gets a null IMU pointer (its own documented way to run on the
-// tracking wheel alone), nothing calibrates it, and the brain shows "IMU  none" instead of junk.
-// To add one later: set this to the IMU's own port (not a drive port) -- nothing else changes.
-inline constexpr int8_t IMU_PORT = 18;                        // TODO(team): set once an IMU is mounted
+// Inertial sensor: AN IMU IS NOW FITTED, on port 18 (confirmed 2026-10-02 -- this used to read 0,
+// "none fitted", and before that 8, which is a right-drive motor). robot.cpp builds a pros::Imu on it
+// and hands it to LemLib alongside the vertical tracking wheel, so heading comes from the IMU and
+// distance from the pod. It is calibrated in a BACKGROUND task from initialize() and opcontrol()
+// NEVER waits on it (CLAUDE.md safety rule 4: nothing may delay driver control, not even an unplugged
+// or still-calibrating IMU). autonomous() does wait, because a drive move needs a heading.
+// Set this back to 0 to run on the tracking wheel alone: robot.cpp then builds no pros::Imu at all,
+// LemLib gets a null IMU pointer (its own documented way to do that), nothing calibrates it and the
+// brain shows "IMU  none" instead of junk. Nothing else changes either way.
+inline constexpr int8_t IMU_PORT = 18;                        // confirmed 2026-10-02: IMU fitted
 
-// Chassis PID — TUNE. Starting values from the LemLib tutorial, not tuned on JOKR.
-inline constexpr float LATERAL_KP = 10.0f, LATERAL_KI = 0.0f, LATERAL_KD = 3.0f;   // TUNE
-inline constexpr float ANGULAR_KP = 2.0f, ANGULAR_KI = 0.0f, ANGULAR_KD = 10.0f;   // TUNE
+// ---- Chassis PID (lemlib::ControllerSettings) ----
+// THESE ARE THE VALUES THE DRIVER TUNED ON THE ROBOT (2026-10-02), moved here out of robot.cpp so
+// there is one place to change them -- every argument of both ControllerSettings is named below, not
+// just the gains, because the error ranges and timeouts were tuned too. Order in the constructor is:
+// kP, kI, kD, anti-windup, small error range, small error timeout, large error range, large error
+// timeout, slew. Procedure: LemLib's own PID tuning guide.
+//   LATERAL = driving in a straight line (inches). ANGULAR = turning (degrees).
+inline constexpr float LATERAL_KP = 6.0f, LATERAL_KI = 0.0f, LATERAL_KD = 16.0f;   // TUNE
+inline constexpr float LATERAL_WINDUP = 0.0f;                // anti-windup range
+inline constexpr float LATERAL_SMALL_ERROR_IN = 1.0f;        // "close enough" band, inches
+inline constexpr int LATERAL_SMALL_TIMEOUT_MS = 150;         // ...held this long = settled
+inline constexpr float LATERAL_LARGE_ERROR_IN = 3.0f;        // give-up band, inches
+inline constexpr int LATERAL_LARGE_TIMEOUT_MS = 500;
+inline constexpr float LATERAL_SLEW = 0.0f;                  // 0 = no acceleration limit
+inline constexpr float ANGULAR_KP = 2.55f, ANGULAR_KI = 0.0f, ANGULAR_KD = 15.0f;  // TUNE
+inline constexpr float ANGULAR_WINDUP = 0.0f;
+inline constexpr float ANGULAR_SMALL_ERROR_DEG = 1.0f;
+inline constexpr int ANGULAR_SMALL_TIMEOUT_MS = 150;
+inline constexpr float ANGULAR_LARGE_ERROR_DEG = 7.0f;
+inline constexpr int ANGULAR_LARGE_TIMEOUT_MS = 600;
+inline constexpr float ANGULAR_SLEW = 0.0f;
 
 // ---------------------------------------------------------------------------
 // Lift (DR6-4B)
@@ -56,7 +79,7 @@ inline constexpr float ANGULAR_KP = 2.0f, ANGULAR_KI = 0.0f, ANGULAR_KD = 10.0f;
 // Everywhere else in the code (presets, PID target/error, lift.getPosition(), the brain screen)
 // works in LIFT-ARM DEGREES -- this ratio is what converts the motor/sensor side of the 4:1 down
 // to that one shared unit. See Lift::getMotorPosition()/getSensorPosition() in subsystems/lift.cpp.
-inline const std::vector<std::int8_t> LIFT_PORTS = {20, -13};             // TODO(team): confirm ports + which side is reversed
+inline const std::vector<std::int8_t> LIFT_PORTS = {20, -13};             // confirmed 2026-10-02
 inline constexpr double LIFT_GEAR_RATIO = 48.0 / 12.0;       // confirmed: 12T -> 48T = 4:1 torque
 // Rotation sensor on the lift, mounted on the 12T MOTOR axle (confirmed) -- not the 48T arm axle.
 // 0 = none fitted, use the motor encoders instead. When a port is set, the lift PID runs off THIS
@@ -513,12 +536,69 @@ inline constexpr char CLAW_PISTON_PORT = 'D';                // physically the c
 // reads `CLAW OPEN D[0]`; press A and the jaws must CLOSE while the line reads `CLAMPED D[1]`. If A
 // opens them instead, flip this one constant and nothing else.
 inline constexpr bool CLAW_CLOSED_IS_ADI_HIGH = true;        // TODO(team): confirm with A on the brain's CLAW line
-// Autoclamp: a distance sensor looking between the jaws. None is in the notebook yet.
-inline constexpr int8_t CLAW_DISTANCE_PORT = 11;             // TODO(team): mount + confirm port
-inline constexpr int CLAW_DETECT_MM = 40;                    // TODO(team): distance that means "pin is between the jaws"
-inline constexpr int CLAW_DETECT_DEBOUNCE_MS = 60;           // pin must be seen this long before clamping
-inline constexpr int CLAW_RELEASE_LOCKOUT_MS = 750;          // after a release, don't re-clamp for this long
-inline constexpr bool CLAW_AUTOCLAMP_AT_START = false;       // Y toggles it in a match. Leave off until the sensor is mounted.
+// ===========================================================================
+// AUTOCLAMP — the distance sensor in the jaws, and when it is allowed to clamp
+// ===========================================================================
+// The sensor looks out between the jaws and sees both pins and cups. The rule (the driver's own
+// words): while the claw is open and the autoclamp is enabled, anything at or inside
+// AUTOCLAMP_RANGE_MM for AUTOCLAMP_CONFIRM_MS straight closes the jaws on it. The debounce is the
+// whole point -- "if there's a random spike and then not something 50/100 ms later and it spikes back
+// down, it's not real" -- and it is implemented by subsystems::AutoclampDetector, which is PURE (no
+// sensor, no clock, no cylinder: see its header for the full rule and for why fresh samples are
+// counted separately from elapsed time). Every threshold it uses is here.
+inline constexpr int8_t CLAW_DISTANCE_PORT = 11;             // confirmed 2026-10-02: mounted in the claw
+// ON BY DEFAULT IN DRIVER (opcontrol() enables it every time it starts), OFF in auton (the routine
+// turns it on with auton::autoclamp(true)), and OFF at power-on -- CLAW_AUTOCLAMP_AT_START stays
+// false so a preloaded pin cannot fire a cylinder in initialize() (CLAUDE.md safety rule 1). Y still
+// toggles it in a match.
+inline constexpr bool AUTOCLAMP_ON_IN_DRIVER = true;
+inline constexpr bool CLAW_AUTOCLAMP_AT_START = false;       // power-on / initialize(): never armed
+// THE TRIGGER. 15 mm is the user's starting point. NOTE: the V5 Distance Sensor's specified MINIMUM
+// range is about 20 mm, so 15 sits below the distance it is specified to measure reliably -- it
+// usually still reads sensibly closer in, but this is the first number to question if the clamp never
+// fires. Watch the brain's DIST line with a pin held in the open jaws:
+//   it reads 20-25 and never reaches 15      -> raise AUTOCLAMP_RANGE_MM to just above what you see.
+//   it reads 0 with the pin in the jaws      -> the pin is INSIDE the sensor's floor: raise the range
+//                                               and/or move the sensor back a few mm. (A 0 is treated
+//                                               as "cannot measure", never as "very close" -- see
+//                                               AUTOCLAMP_MIN_VALID_MM.)
+//   it clamps on a cup/pin going past        -> raise AUTOCLAMP_CONFIRM_MS (50 -> 80) first.
+inline constexpr int AUTOCLAMP_RANGE_MM = 15;                // TUNE: at or inside this = something in the jaws
+inline constexpr int AUTOCLAMP_CONFIRM_MS = 50;              // TUNE: ...continuously for this long
+// ...over at least this many FRESH readings. The sensor refreshes on the order of 30 ms, i.e. slower
+// than the 10 ms tick, so the same measurement comes back two or three times in a row; without this,
+// ONE lucky in-range measurement repeated for 50 ms would satisfy the time window on its own, which is
+// exactly the spike this is meant to reject. 2 fresh samples at ~30 ms apart is ~60 ms of real
+// evidence.
+//   Clamps feel laggy: lower AUTOCLAMP_CONFIRM_MS first, this second (never below 2).
+inline constexpr int AUTOCLAMP_MIN_SAMPLES = 2;              // TUNE
+// How long an UNCHANGED reading has to persist before it is credited as another sample. About two
+// sensor refreshes: long enough that the sensor must really have re-measured, short enough that a pin
+// sitting dead still at exactly one millimetre value still gets its second sample and gets gripped.
+//   Clamps on a steady reading feel a touch slow: lower it (but not below ~35 ms, one refresh).
+inline constexpr int AUTOCLAMP_STALE_GRACE_MS = 60;          // TUNE
+// RE-ARM. The instant the jaws open, the pin they just let go of is still millimetres away, so a
+// timer-based re-arm would re-grab it every single time and no score could ever finish. After ANY
+// open, the autoclamp waits until the sensor reads CLEAR -- further than AUTOCLAMP_REARM_MM, or
+// nothing in range at all -- for AUTOCLAMP_REARM_CLEAR_MS. The gap between 15 and 30 is hysteresis:
+// the two thresholds cannot chatter at one distance.
+//   It re-grabs what it just put down: raise AUTOCLAMP_REARM_MM / AUTOCLAMP_REARM_CLEAR_MS.
+//   It takes too long to be ready for the next pin: lower them.
+inline constexpr int AUTOCLAMP_REARM_MM = 30;                // TUNE: further than this = clear
+inline constexpr int AUTOCLAMP_REARM_CLEAR_MS = 150;         // TUNE
+// VALIDITY of a raw reading. At or above MAX is the sensor's own "nothing in range" (9999) and counts
+// as CLEAR. Below MIN (a 0: the sensor cannot measure, e.g. an object inside its floor) and any
+// negative value (PROS_ERR / unplugged) count as NOT DETECTED and are not clear either -- so a dead or
+// unplugged sensor makes the autoclamp do nothing at all, which is the correct failure.
+inline constexpr int AUTOCLAMP_MAX_VALID_MM = 9999;
+inline constexpr int AUTOCLAMP_MIN_VALID_MM = 1;
+// The sensor's own 0..63 confidence. 0 = ignore it (the default: confidence drops at close range on
+// this sensor, and requiring it there is a good way to never clamp). Raise it only if the DIST line
+// shows plausible mm values that turn out to be junk.
+inline constexpr int AUTOCLAMP_MIN_CONFIDENCE = 0;           // TUNE
+// Minimum time after a release before the autoclamp may arm again, on top of the clear-reading rule
+// above (belt and braces: it also covers the jaws physically swinging open past the sensor).
+inline constexpr int CLAW_RELEASE_LOCKOUT_MS = 750;          // TUNE
 
 // ---------------------------------------------------------------------------
 // Intake (ONE motor)
@@ -813,5 +893,54 @@ inline constexpr double L2_RELEASE_FLOOR_DEG = 10.0;         // TUNE: arm degree
 // descent (the slow final zone and the SEAT are unchanged, so it still cannot slam or bounce).
 //   "Don't hesitate to be going down faster than we currently are going when we are done scoring."
 inline constexpr double L2_RETURN_SPEED_PCT = 95.0;          // TUNE
+
+// ---------------------------------------------------------------------------
+// Autonomous — the auton API and its tick. See include/auton.hpp, include/periodic.hpp.
+// ---------------------------------------------------------------------------
+// WHICH ROUTE autonomous() RUNS IS NOT HERE. It is a strategy choice, not a robot constant, so it
+// lives at the top of src/autons.cpp (`constexpr Route SELECTED = ...`) with the routes themselves --
+// one line, in the one file the driver works in. See README "Writing an auton route".
+// The auton tick's period. The same 10 ms the driver loop runs at, because it runs THE SAME per-loop
+// logic (periodic::tick()) -- Scoring's state machine, the claw autoclamp, and the one intake
+// decision. The lift PID is NOT in here: it has its own 10 ms task from initialize() and is the only
+// thing that ever writes the lift motors (CLAUDE.md safety rule 2).
+inline constexpr int AUTON_TICK_MS = 10;
+// Default timeouts for the blocking waits in auton.hpp. EVERY wait takes one, so a jammed mechanism
+// can slow a routine down but can never hang it; each wait also returns whether it succeeded.
+// Homing has to cover LIFT_HOME_TIMEOUT_MS plus a little slack for the task to notice.
+inline constexpr int AUTON_HOME_TIMEOUT_MS = LIFT_HOME_TIMEOUT_MS + 500;
+// A lift move: the longest travel is DOWN -> level 5 (107 deg), which at the braked profile is well
+// under a second and a half; this leaves room for a macro's CLAMPING / pivot wait in front of it.
+inline constexpr int AUTON_LIFT_TIMEOUT_MS = 2500;
+// A whole L2 score: PRESS (up to L2_AUTO_RELEASE_DEG of travel) + the release checks + up to
+// L2_MAX_UNSTICK_TRIES hops + the fast run home + FINAL's LIFT_FINAL_FORCE_MS.
+inline constexpr int AUTON_SCORE_TIMEOUT_MS = 6000;
+// A cylinder: the jaws' own CLAW_CLOSE_TIME_MS / CLAW_OPEN_TIME_MS, plus slack for waitClamped() to
+// sit on the autoclamp for a moment.
+inline constexpr int AUTON_CLAW_TIMEOUT_MS = 500;
+// auton::waitUntilClamped(): long enough to drive into a pin and have the autoclamp confirm it.
+inline constexpr int AUTON_CLAMP_TIMEOUT_MS = 2000;
+// How long autonomous() will wait for odometry/IMU calibration before starting the route anyway. It
+// is a BOUND, not a requirement: an unplugged or non-answering IMU must not be able to eat the whole
+// autonomous period, and a route that never drives (the lift test) does not need odometry at all.
+inline constexpr int AUTON_CALIBRATE_TIMEOUT_MS = 3000;
+
+// ---------------------------------------------------------------------------
+// moveB — the rear-distance-sensor drive, ported 1:1 from the team's old library
+// ---------------------------------------------------------------------------
+// NOT an odometry move: a hand-rolled PD loop on the REAR distance sensor that drives both sides at
+// equal power until that sensor reads a target distance from whatever is behind the robot, then
+// settles. See auton::moveB() for the full description. Every number the old library had baked in is
+// here, and EVERY ONE NEEDS RETUNING: the old robot had 3.25" traction wheels, this one has 2.75"
+// omnis, so the same power produces a different speed and the same error produces a different
+// overshoot.
+inline constexpr int8_t BACK_DISTANCE_PORT = 4;              // TODO(team): confirm -- 4 is the OLD robot's port
+inline constexpr double MOVEB_KP = 0.28;                     // TUNE: power per mm of error
+inline constexpr double MOVEB_KD = 0.68;                     // TUNE: power per mm of error change per tick
+inline constexpr double MOVEB_TOLERANCE_MM = 5.0;            // TUNE: inside this counts as there
+inline constexpr int MOVEB_SETTLE_MS = 55;                   // TUNE: ...held this long = done
+inline constexpr int MOVEB_DEFAULT_MIN_SPEED = 15;           // TUNE: used when the caller passes minSpeed <= 0
+inline constexpr int MOVEB_OUT_OF_RANGE_MM = 9910;           // at/above this the sensor sees nothing
+inline constexpr int MOVEB_LOOP_MS = 20;                     // TUNE: the old library's loop period
 
 }  // namespace config

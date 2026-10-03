@@ -10,7 +10,7 @@
 | State | Jaws | What happens |
 |---|---|---|
 | OPEN | open | Autoclamp is off. The driver has full manual control. |
-| ARMED | open | The robot watches the sensor. If a pin stays within `CLAW_DETECT_MM` for `CLAW_DETECT_DEBOUNCE_MS` (60 ms), it goes to CLAMPED. |
+| ARMED | open | The robot watches the sensor. If a pin stays within `AUTOCLAMP_RANGE_MM` (15 mm) for `AUTOCLAMP_CONFIRM_MS` (50 ms) over at least `AUTOCLAMP_MIN_SAMPLES` fresh readings, it goes to CLAMPED. The rule itself lives in the pure `subsystems::AutoclampDetector` (host-tested); see README "Autoclamp". |
 | CLAMPED | closed | Holding a pin. Only the driver or the scoring sequence can open it. |
 | RELEASED | open | The pin was just let go. The sensor is ignored for `CLAW_RELEASE_LOCKOUT_MS` (750 ms) so the claw doesn't grab the same pin again, then it goes back to ARMED. |
 
@@ -37,7 +37,7 @@ stateDiagram-v2
 case State::ARMED:
     if (seesPin()) {
         if (seenSince_ == 0) seenSince_ = now;                          // first sighting
-        if (now - seenSince_ >= CLAW_DETECT_DEBOUNCE_MS) clamp();       // seen long enough → close
+        if (detect_.step(now, mm, confidence, cfg, inhibit_)) clamp();  // confirmed long enough → close
     } else {
         seenSince_ = 0;                                                 // lost it → start over
     }
@@ -49,7 +49,7 @@ case State::RELEASED:
 
 ## Tuning procedure
 1. Mount the distance sensor so it looks straight between the jaws. Set `CLAW_DISTANCE_PORT`.
-2. Put a pin fully in the jaws and read the distance. Pull it back to the edge of the jaws and read it again. Set `CLAW_DETECT_MM` just above the fully-in reading.
+2. Put a pin fully in the jaws and read the distance. Pull it back to the edge of the jaws and read it again. Set `AUTOCLAMP_RANGE_MM` just above the fully-in reading (note the sensor's specified minimum range is ~20 mm, so very small values may not be readable at all).
 3. Debounce: start at 60 ms. Raise it if the claw fires on pins passing by, and lower it if it feels slow.
 4. Lockout: drop a pin with the robot still. Raise the lockout until the claw no longer re-grabs it.
 

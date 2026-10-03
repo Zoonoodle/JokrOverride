@@ -174,6 +174,13 @@ class Scoring {
     void setPivot(bool out);
     static bool pivotLevelFor(bool out) { return out == config::PIVOT_OUT_IS_ADI_HIGH; }
     void openClawForPickup();
+    /** Open the jaws WITHOUT turning the autoclamp off. With the autoclamp enabled this is
+     *  Claw::release() -- the jaws open and the autoclamp re-arms itself only once the sensor reads
+     *  clear, so whatever was just let go of is not re-grabbed (see autoclamp_detector.hpp). With it
+     *  disabled it is a plain Claw::disarm(). Used everywhere the macro opens the claw to put
+     *  something down or to travel empty; the old code called disarm() in those places, which
+     *  silently switched the autoclamp off for the rest of the match. */
+    void openClaw();
     void moveTo(State destination);
     void command(double degrees, bool precise = false);
     /** True while the arm is inside the handoff zone, INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG. */

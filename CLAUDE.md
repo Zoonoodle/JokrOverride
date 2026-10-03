@@ -11,11 +11,15 @@ every session, so changes get built, uploaded and tested for real.
 | `include/config.hpp` | **Every** port, ratio, preset and PID gain. Nothing robot-specific goes anywhere else. |
 | `include/robot.hpp`, `src/robot.cpp` | The LemLib chassis + the single instance of each subsystem. |
 | `include/subsystems/lift.*`, `src/subsystems/lift.cpp` | DR6-4B position PID, gravity feedforward, stall + runaway guards, manual override. **Only** place that writes the lift motors. |
-| `include/subsystems/claw.*` | Pneumatic claw + autoclamp state machine. |
-| `include/subsystems/intake.*` | One-motor roller intake, with an optional power fraction (`set(mode, power)`, default full). Driver-controlled (R1/R2, full power) **plus** L1's auto-intake sweep (full power) **plus** L2's auto-outtake near the bottom (`L2_OUTTAKE_PCT`, 60%) — `main.cpp` makes one decision per loop; never add a second writer. |
+| `include/subsystems/claw.*` | Pneumatic claw + the distance-sensor autoclamp. **Only** place that writes the claw cylinder. |
+| `include/subsystems/autoclamp_detector.hpp` | PURE "is something really in the jaws?" debounce (no PROS, no clock, no cylinder), host-tested in `test/`. Range + confirm window + the clear-to-re-arm rule. |
+| `include/subsystems/intake.*` | One-motor roller intake, with an optional power fraction (`set(mode, power)`, default full). Driver-controlled (R1/R2, full power) **plus** L1's auto-intake sweep (full power) **plus** L2's auto-outtake near the bottom (`L2_OUTTAKE_PCT`, 60%) — `periodic::tick()` makes one decision per loop, for driver AND auton; never add a second writer. |
 | `include/subsystems/scoring.*` | Intake / matchload / 5-level stacking state machine and its interlocks. |
 | `src/screen.cpp`, `include/screen.hpp` | Brain screen sensor readout. |
-| `src/main.cpp` | `initialize()` / `autonomous()` / `opcontrol()` and the button map. |
+| `include/auton.hpp`, `src/auton.cpp` | **AUTONOMOUS API — don't put routes here.** One readable call per lift / claw / pivot / intake / macro operation, each going through the identical code path the matching driver button uses; the blocking waits (every one takes a timeout and returns success); `begin()`/`end()` for the auton tick; `moveB()`. |
+| `include/autons.hpp`, `src/autons.cpp` | **ROUTES — work here.** Every auton route, plus the single `constexpr Route SELECTED` line that picks the one `autonomous()` runs. The only file to open when coding routes. |
+| `include/periodic.hpp`, `src/periodic.cpp` | THE per-loop subsystem logic, in **one** copy: L1's auto-intake window, L2's auto-outtake window, the single intake decision, `Claw::update()`, `Scoring::update()`. Run by opcontrol's loop in driver and by the auton tick in auton — never both at once. |
+| `src/main.cpp` | `initialize()` / `autonomous()` (common setup + one `autons::run()` call) / `opcontrol()` and the button map. |
 | `README.md` | Port map, button map, tuning procedures. |
 | `docs/robot/ROBOT.md` | Hardware description + photos. |
 
@@ -23,14 +27,40 @@ every session, so changes get built, uploaded and tested for real.
 
 Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
 
-- **Drivetrain**: 6 wheels, 2.75" omnis, 450 RPM, gear-driven. Left `-2,-3,-1`, right `8,9,10`.
+- **Drivetrain**: 6 wheels, 2.75" omnis, 450 RPM, gear-driven. Left `-8,-2,-1`, right `3,9,10`
+  (confirmed 2026-10-02). Chassis PID gains and every other `ControllerSettings` argument live in
+  `config.hpp` (`LATERAL_*` / `ANGULAR_*`), not in `robot.cpp`.
+- **Odometry**: ONE vertical tracking-wheel pod on rotation port `17`, **plus an IMU on port `18`**
+  (fitted and confirmed 2026-10-02). Heading comes from the IMU, distance from the pod. Calibration
+  runs in a background task from `initialize()`; `opcontrol()` never waits on it, `autonomous()` waits
+  but only up to `AUTON_CALIBRATE_TIMEOUT_MS`.
+- **Rear distance sensor**: port `4` (`BACK_DISTANCE_PORT`, **TODO(team): confirm** — carried over
+  from the old robot with `auton::moveB()`). It is the whole feedback loop for `moveB`, and while it
+  reads out of range `moveB` drives blind at full commanded speed until the timeout.
 - **Intake**: front-mounted paddle/roller intake, ONE motor on port `12`, chain-driven. Sweeps cups in at floor level to a handoff in the middle of the robot.
 - **Lift**: DR6-4B six-bar, 2 motors (`20, -13`), **12T→48T (4:1)** — motors on the 12T axle, arm on the 48T. Chain-levelled end effector. Down = folded over the chassis = 0 deg; up = swung up and back.
 - **Lift sensing**: rotation sensor port `16` is what the PID reads, and it sits on the **motored 12T axle**, so **arm degrees = sensor degrees ÷ 4**. Its absolute zero is calibrated (on the brain's device screen) to the true bottom of the lift and survives power cycles on its own — `Lift::zero()` seeds the position counter from that absolute angle instead of resetting it, so never add back a `reset_position()`/`set_position(0)` **there**. That seed is only unambiguous within ±45 arm deg (±180 sensor deg) of the true bottom; further up and it is wrong by a whole sensor revolution, which is why the arm used to "start up too much".
 - **Lift homing**: `Lift::requestHome()` fixes that properly. At the start of the first **enabled** mode (`autonomous()`, or `opcontrol()` if auton didn't) the arm drives down at `LIFT_HOME_MV` until the raw sensor stops changing, and **only if** the sensor's folded absolute angle is then within `LIFT_HOME_ZERO_WINDOW_DEG` of its calibrated zero does it `set_position(0)` there. `Lift::updateHoming()` is the **one** place in the codebase allowed to zero that sensor — never add one anywhere else. If the arm stops somewhere implausible (jammed) or it times out, homing stops pushing, keeps `zero()`'s seed, leaves no target active, and shows `HOME FAIL` with the angle it saw. Holding D-pad Up/Down cancels it for the rest of the run. Watch the brain's `ANGLE` line.
 - **Claw + pivot**: two pneumatic cylinders, ADI `D` (**claw**) and ADI `C` (**pivot**). **These were crossed in code until 2026-10-01** — the port the code called the claw was the pivot and vice versa — so every polarity note written before that was derived from the wrong pin. The ports above are the corrected, physical assignment and both polarities were re-derived from scratch; the full evidence chain is in `config.hpp` on each constant. The brain's `CLAW` line shows word + port letter + raw level (`CLAW OPEN D[0]  PIV OUT C[0]` at power-on) so A / X each confirm one constant in seconds. Claw: `CLAW_CLOSED_IS_ADI_HIGH = true` — **the jaws need air to grip, so unpowered/LOW is OPEN** and power-on is `Claw::State::OPEN` (there is no "closed at power-on" state any more; a preloaded pin has to be gripped with A or L1). Pivot: two positions named for where it physically is — **OUT** (`true`, ADI LOW) = swung out, at power-on, at every stack level while scoring, and the default down position after L2 / B; **BACK** (`false`, ADI HIGH) = pulled in toward the intake handoff, only at INTAKE (R1). `PIVOT_OUT_IS_ADI_HIGH = false`, confirmed by two independent observations. There is no height at which the pivot is forbidden to be OUT or BACK; the only height tied to it is the handoff zone `INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG` (BACK inside it while heading to / at the intake, OUT above it). The old `PIVOT_CLEAR` interlock and L2 descent floor were written for the opposite meaning and are gone — don't bring them back. Neither cylinder is fired at startup: each pin is written to the level it already sits at unpowered.
+- **Autoclamp**: the distance sensor is **mounted in the claw, on port `11`** (`CLAW_DISTANCE_PORT`,
+  confirmed 2026-10-02) and sees both pins and cups. While the jaws are open and the autoclamp is
+  enabled, anything at or inside `AUTOCLAMP_RANGE_MM` (15, TUNE) for `AUTOCLAMP_CONFIRM_MS` (50) over
+  at least `AUTOCLAMP_MIN_SAMPLES` (2) **fresh** readings closes the jaws. The rule is a pure class
+  (`subsystems::AutoclampDetector`, host-tested); `Claw::update()` owns the cylinder. Fresh samples are
+  counted as well as milliseconds because the V5 sensor refreshes ~30 ms, slower than the tick, so one
+  lucky reading can otherwise look like 50 ms of evidence. **Re-arm is clear-based, not a timer**:
+  after ANY open the autoclamp is disarmed until the sensor reads clear (beyond `AUTOCLAMP_REARM_MM`,
+  30) for `AUTOCLAMP_REARM_CLEAR_MS`, because the pin just released is still millimetres away — a timer
+  re-grabs it every time. `CLAW_RELEASE_LOCKOUT_MS` is kept on top as a floor. It is inhibited for the
+  whole L2 score. ON by default in driver (re-enabled each `opcontrol()`, Y toggles), OFF in auton
+  until a route calls `auton::autoclamp(true)`, OFF at power-on. The brain's `CLAW` line shows
+  `AC:OFF/ARMED/SEEING/CLEAR?/HELD`. Note the sensor's specified minimum range is ~20 mm, so 15 mm is
+  the first number to question if it never fires.
 - **Game elements — two separate things**: a **pin** (solid yellow: hex head, fluted tapered body, flared base skirt) and a **cup** (ribbed tapered vessel, clear or red). The pin drops into the cup. **The claw grips the pin; the intake handles cups.** Stacks go 5 levels (`config::lift_preset::STACK_LEVEL_COUNT`), measured from photos — see `docs/robot/ROBOT.md` "Lift levels".
-- **Fixed in `config.hpp`**: there is no IMU on the robot, so `IMU_PORT = 0` (none fitted; it used to be `8`, which is wrong and collides with right-drive port 8) — `robot.cpp` builds no `pros::Imu` and gives LemLib a null IMU pointer. `LIFT_GEAR_RATIO` is `48.0/12.0` and `LIFT_ROTATION_RATIO` is `4.0`, matching the confirmed 4:1 lift gearing above.
+- **Fixed in `config.hpp`**: `LIFT_GEAR_RATIO` is `48.0/12.0` and `LIFT_ROTATION_RATIO` is `4.0`,
+  matching the confirmed 4:1 lift gearing above. (The old "there is no IMU, `IMU_PORT = 0`" note is
+  history: an IMU is fitted on `18` — see the Odometry bullet. `IMU_PORT = 0` is still the supported
+  way to run on the pod alone.)
 
 ## Workflow — every change
 
@@ -73,9 +103,26 @@ Standing permission: build, upload and commit every time without asking. Do not 
    still wins over them. Which mode R1/R2 are in is *latched at the press*, so a clamp changing
    mid-press can never swap a lift move for a spinning intake; the brain's `CLAW` line shows
    `R:INTAKE` / `R:LIFT` / `R:wait`.
-4. Nothing may block driver control from starting — there is no IMU fitted, so calibration
-   runs in a background task and is skipped when no IMU answers. Never make startup wait on
-   a sensor that may not be there. (`495bb66`, `1de3225`)
+4. Nothing may block driver control from starting. **An IMU IS now fitted (port 18)**, and
+   calibration still runs in a background task from `initialize()` — `opcontrol()` never waits on it,
+   and it is skipped entirely when no IMU answers (`IMU_PORT = 0`). Never make startup wait on a
+   sensor that may not be there. `autonomous()` may wait for calibration, but only with a bound
+   (`AUTON_CALIBRATE_TIMEOUT_MS`), so an unplugged IMU can never eat the autonomous period.
+   (`495bb66`, `1de3225`)
+
+5. **One tick, one owner.** The per-loop subsystem logic (both intake macro windows, the single
+   intake decision, `Claw::update()`, `Scoring::update()`) exists in exactly one copy, in
+   `periodic::tick()`. In driver control opcontrol's loop calls it; in autonomous the auton tick task
+   (`auton::begin()`, 10 ms) calls it. **They must never both run**: `opcontrol()` and `disabled()`
+   both call `auton::end()` first, and `end()` BLOCKS until the tick task has really exited. The lift
+   PID is not in there at all — it has its own 10 ms task and remains the only writer of the lift
+   motors (rule 2). Do not add a second caller of `periodic::tick()`, and do not write the intake or
+   a cylinder from a route: use the `auton::*` API, which routes everything through the same paths the
+   driver buttons use.
+
+6. **Routes go in `src/autons.cpp`, nowhere else.** `autonomous()` does the setup a route must not be
+   able to forget (auton tick, autoclamp off, lift homing, the bounded calibration wait) and then makes
+   exactly one call, `autons::run()`. Lift homing is requested for **every** route.
 
 ## Tunables
 
@@ -157,6 +204,11 @@ back: `d2978c7` (jumped setpoint, high kP), `6b8165c` (trapezoid + leash + fixed
 (`LIFT_BRAKE_DECEL_DEG_PER_S2 = 2000` asked for more braking than the arm can do, and handing a
 still-moving springy six-bar to the firmware's stiff brake-hold made it ring), and anything that
 parks the arm a few degrees above the bottom instead of seating it.
+
+Also in `config.hpp`: the chassis PID (`LATERAL_*` / `ANGULAR_*` — every `ControllerSettings`
+argument, not just the gains), the `AUTOCLAMP_*` block, the `AUTON_*` timeouts and `MOVEB_*`. **Which
+auton route runs is NOT in `config.hpp`** — it is `constexpr Route SELECTED` at the top of
+`src/autons.cpp`, because it is a strategy choice, not a robot constant.
 
 **Keep the README port map and button map in sync** whenever a port or a button changes.
 

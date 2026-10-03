@@ -63,7 +63,12 @@ double Scoring::heightOf(State s) const {
 
 void Scoring::openClawForPickup() {
     claw_.disarm();
-    if (autoclamp_) claw_.arm();
+    if (autoclamp_) claw_.arm();  // armed immediately: the jaws are empty and this IS the pickup spot
+}
+
+void Scoring::openClaw() {
+    if (autoclamp_) claw_.release();  // keeps the autoclamp enabled; it re-arms once the sensor is clear
+    else claw_.disarm();
 }
 
 void Scoring::moveTo(State destination) {
@@ -100,11 +105,11 @@ void Scoring::enter(State next) {
                 setPivot(true);
                 lift_.startScore();
             } else {
-                claw_.disarm();  // scoreOrMatchload(): jaws open now, autoclamp off
+                openClaw();  // scoreOrMatchload(): jaws open now, and the autoclamp setting is kept
             }
             break;
         case State::MOVING:
-            claw_.disarm();  // jaws open for the pickup; update() places the pivot by height
+            openClaw();  // jaws open for the pickup; update() places the pivot by height
             break;
     }
 }
@@ -222,16 +227,20 @@ void Scoring::resetLevel() {
 
 void Scoring::toggleClaw() {
     // Shut (CLAMPED, or CLOSED since power-on) -> open; open -> clamp.
-    const bool pickup = state_ == State::INTAKE_POS || state_ == State::MATCHLOAD_POS;
     if (!claw_.isClosed()) claw_.clamp();
-    else if (pickup && autoclamp_) claw_.release();  // lockout, then autoclamp watches again
-    else claw_.disarm();
+    else openClaw();  // opening by hand must not switch the autoclamp off -- see openClaw()
 }
 
 void Scoring::setAutoclamp(bool on) {
     autoclamp_ = on;
-    const bool pickup = state_ == State::INTAKE_POS || state_ == State::MATCHLOAD_POS;
-    if (pickup && !claw_.isClamped()) openClawForPickup();
+    // The autoclamp is no longer only for the INTAKE/MATCHLOAD wait: the driver's rule is "whenever
+    // the claw is unclamped, something within AUTOCLAMP_RANGE_MM gets gripped", wherever the arm is.
+    // So arm/disarm the claw itself here, in any state except CLAMPED (never open jaws that are
+    // holding something). Claw::arm() handles the RELEASED case by leaving the re-arm to the clear
+    // reading rule -- see autoclamp_detector.hpp.
+    if (claw_.isClamped()) return;
+    if (on) claw_.arm();
+    else claw_.disarm();
 }
 
 // ---------------------------------------------------------------------------

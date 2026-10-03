@@ -101,7 +101,15 @@ namespace subsystems {
 
 class Scoring {
   public:
-    enum class State { IDLE, INTAKE_POS, MATCHLOAD_POS, CLAMPING, STACKING, RELEASING, MOVING };
+    enum class State {
+        IDLE, INTAKE_POS, MATCHLOAD_POS,
+        GRABBING,   // L1 from the handoff / auton grab: the lift is forcing down, the jaws close
+        CLAMPING, STACKING,
+        RELEASING,  // L2 press 1: press / sense / release / post-push / rise
+        SCORED,     // press 1 done: holding L2_CLEAR_RISE_DEG above the stack. The next L2 runs home
+        RETURNING,  // L2 press 2 (or B from SCORED): the fast descent that seats at 0
+        MOVING,
+    };
 
     Scoring(Lift& lift, Claw& claw);
 
@@ -116,6 +124,10 @@ class Scoring {
 
     /** R1 (new-press): put the claw at the intake handoff (ignored while holding a pin or mid-score). */
     void goToIntake();
+    /** Auton's "just grab": run the SAME force-down-and-close sequence L1 does at the handoff, but
+     *  STAY where the push ended (the lift holds there) instead of rising to a level. The jaws are
+     *  closed by this class, as always; the push is Lift::startGrab(). */
+    void grabHere();
     /** L1: first tap clamps and lifts to level 1; every tap after goes up one level, staying at
      *  STACK_LEVEL_COUNT (the top) once reached. If the claw is already CLAMPED (L2 clamped it at the
      *  bottom, see score() below), the first tap skips CLAW_CLOSE_TIME_MS's wait and rises straight
@@ -166,7 +178,13 @@ class Scoring {
      *  tick through REL/UNSTK/RETURN/SEAT, as distinct from RELEASING via scoreOrMatchload() (lowering
      *  to INTAKE instead) or L2's at-the-bottom clamp toggle, neither of which drop anything. main.cpp
      *  uses this to auto-outtake while the arm is near the bottom (see config::L2_OUTTAKE_BELOW_DEG). */
-    bool isScoreDescent() const { return state_ == State::RELEASING && scoreToHome_; }
+    bool isScoreDescent() const {
+        return (state_ == State::RELEASING && scoreToHome_) || state_ == State::RETURNING;
+    }
+    /** True while the arm is parked above a finished score, waiting for the second L2. */
+    bool isScoredUp() const { return state_ == State::SCORED; }
+    /** True while the grab push is running (the intake must not spin -- see periodic::tick()). */
+    bool isGrabbing() const { return state_ == State::GRABBING; }
     const char* stateName() const;
 
   private:
@@ -202,6 +220,8 @@ class Scoring {
     int level_ = 1;
     bool scoreToHome_ = false;            // true while RELEASING on its way to score() rather than
                                            // scoreOrMatchload()'s INTAKE_POS destination
+    bool grabRise_ = false;               // GRABBING: rise to a stack level afterwards (L1), or stay
+                                           // exactly where the push ended (auton::grab())
     std::uint32_t stateStart_ = 0;
     std::uint32_t pivotMovedAt_ = 0;
 };

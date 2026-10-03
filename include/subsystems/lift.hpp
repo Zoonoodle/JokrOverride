@@ -140,8 +140,26 @@
  *   UNSTICK   lift L2_UNSTICK_UP_DEG with the claw open, then press again. At
  *             most L2_MAX_UNSTICK_TRIES times; after that it stops, holds where
  *             it is and reports SCORE STUCK rather than grinding.
- *   then      the ordinary DESCENT, with L2_RETURN_SPEED_PCT as both of its fast
- *             bands, so the run home is quick but still slows and seats.
+ *   POSTPUSH  the jaws are open and the arm is free: keep pressing down for
+ *             L2_POST_RELEASE_PUSH_MS so they slide clear of the pin.
+ *   then      RISE L2_CLEAR_RISE_DEG above wherever it stopped and HOLD there,
+ *             latched, indefinitely -- brain: SCORED UP. PRESS 1 ENDS HERE.
+ *             There is no automatic descent to the bottom any more: the driver
+ *             can drive away with the claw above the pins.
+ *   PRESS 2   startScoreReturn(): the ordinary DESCENT with L2_RETURN_SPEED_PCT
+ *             as both fast bands, then FINAL and SEAT at 0 -- quick, but it
+ *             still slows and seats. The held-above position is a deliberate,
+ *             driver-requested stop that this press resolves; it is NOT the
+ *             banned "parks above the bottom instead of seating" bug, which was
+ *             a trip to the bottom that never seated and had no second step.
+ *
+ * THE GRAB (startGrab(), L1 at the intake handoff and auton::grab()) is a
+ * fourth kind of move: a constant open-loop downward push at L1_GRAB_PUSH_PCT
+ * that forces the claw onto the pin, asks Scoring to shut the jaws
+ * L1_GRAB_CLOSE_AT_MS in (needsClawGrip()), keeps pressing until both
+ * L1_GRAB_PUSH_MS and the jaws' own CLAW_CLOSE_TIME_MS are satisfied, and then
+ * HOLDS wherever it ended. The rise afterwards is an ordinary position move
+ * commanded by Scoring, so auton::grab() can simply not command one and stay.
  *
  * THE MANUAL INPUT (driverPower(): D-pad Up/Down at full send, and R1 at
  * R_LIFT_UP_PCT while a pin is clamped) is plain voltage fed into this same
@@ -216,7 +234,11 @@ class Lift {
      *  push-to-zero step below LIFT_FINAL_START_DEG, see "Seating on the hard stop" in config.hpp). For
      *  a position move the first three are chosen fresh from (distance, speed) every tick -- only
      *  arrival into HOLD latches. */
-    enum class Phase { DRIVE, BRAKE, APPROACH, HOLD, DESCEND, FINAL, SEAT, PRESS, RELEASE, UNSTICK };
+    enum class Phase {
+        DRIVE, BRAKE, APPROACH, HOLD, DESCEND, FINAL, SEAT, PRESS, RELEASE, UNSTICK,
+        GRAB,      // the L1/auton grab: a constant downward push while the jaws close (see THE GRAB)
+        POSTPUSH,  // L2 press 1: still pressing down after the jaws were told to open
+    };
 
     Lift();
 
@@ -360,9 +382,42 @@ class Lift {
     // L2 scoring (see "SCORING WITH L2" in the class comment). Scoring owns the
     // claw; the lift owns the motion and decides when the claw has to open.
     // -----------------------------------------------------------------------
-    /** L2 with a pin held above the bottom: start the press / sense / release / go-home sequence.
-     *  Never blocks. Cancelled instantly by driverPower(), cancel(), or any new setTarget(). */
+    // -----------------------------------------------------------------------
+    // THE GRAB (L1 at the intake handoff, and auton::grab()). A constant
+    // downward push at L1_GRAB_PUSH_PCT while the jaws close on the pin, so the
+    // claw forces its way down onto it instead of closing on air. Timing and
+    // the force are config::L1_GRAB_* (see config.hpp). It is a mode inside
+    // update(), so this one task still owns the motors; D-pad manual cancels it
+    // instantly, and it is refused while homing (the caller falls back to the
+    // ordinary close-then-rise).
+    // -----------------------------------------------------------------------
+    /** Start the push. Never blocks. Ends by HOLDING wherever the push finished -- whoever wants the
+     *  arm to rise afterwards (Scoring's L1 path) commands a height then; auton::grab() just stays. */
+    void startGrab();
+    /** True while the push is running. */
+    bool isGrabbing() const { return grab_; }
+    /** TRUE WHEN THE JAWS MUST CLOSE, right now (L1_GRAB_CLOSE_AT_MS into the push). The owner of the
+     *  claw (Scoring) polls this, clamps, and calls clawGripDone(). The arm keeps pressing down
+     *  meanwhile, and will not stop pressing until the jaws have had CLAW_CLOSE_TIME_MS. */
+    bool needsClawGrip() const { return grab_ && gripWanted_ && !gripAcked_; }
+    /** Acknowledge needsClawGrip(): the jaws have been commanded shut as of now. */
+    void clawGripDone();
+
+    /** L2 PRESS 1, with a pin held above the bottom: start the press / sense / release / post-push /
+     *  rise-and-hold sequence (see "SCORING WITH L2"). Never blocks. Cancelled instantly by
+     *  driverPower(), cancel(), or any new setTarget(). */
     void startScore();
+    /** L2 PRESS 2: the fast run home from the held-above position -- the ordinary banded descent at
+     *  L2_RETURN_SPEED_PCT that ends SEATED on the hard stop. Never blocks. */
+    void startScoreReturn();
+    /** True while the arm is holding ABOVE a finished score (press 1 done, press 2 not pressed yet) --
+     *  the state the brain shows as SCORED UP. Cleared by any new command, the manual override, or
+     *  press 2. */
+    bool isScoredAbove() const { return scoredAbove_; }
+    /** True for the WHOLE two-press score cycle: from press 1 until press 2 has seated the arm (or
+     *  anything else takes the lift over). The claw's autoclamp is inhibited while this is true, so
+     *  the pin that was just released cannot be re-grabbed on the way down. */
+    bool isScoreCycle() const { return scoreCycle_; }
     /** True while a score sequence is running (PRESS / RELEASE / UNSTICK). */
     bool isScoring() const { return score_; }
     /** TRUE WHEN THE LIFT NEEDS THE JAWS OPENED, right now: the pin has landed on the stack. The
@@ -426,11 +481,12 @@ class Lift {
      *  arm still above LIFT_SEAT_ZERO_DEG (SEAT(short) on the brain); false (the default) is every
      *  other caller -- homing finding the real hard stop, and FINAL ending within LIFT_SEAT_ZERO_DEG. */
     void enterSeat(std::uint32_t now, bool shortSeat = false);
-    /** Hand a running score sequence over to the fast run-home descent, always at L2_RETURN_SPEED_PCT
-     *  now that every release (detected, or forced by L2_AUTO_RELEASE_DEG) ends in one. */
-    void endScore(std::uint32_t now, double position);
-    /** One tick of PRESS / RELEASE / UNSTICK. Writes the motors and traces. */
+    /** One tick of PRESS / RELEASE / POSTPUSH / UNSTICK. Writes the motors and traces. */
     void updateScore(std::uint32_t now, double dt, double position);
+    /** One tick of the grab push. Writes the motors and traces. */
+    void updateGrab(std::uint32_t now, double dt, double position);
+    /** End of L2 press 1: rise L2_CLEAR_RISE_DEG from here and latch a HOLD there. */
+    void endScoreClear(std::uint32_t now, double position);
     /** Stall guard window: true once the arm has made less than LIFT_STALL_DEG of progress for
      *  LIFT_STALL_MS. Resets itself whenever the arm does move. Only ever called with a speed
      *  reference that really wants motion -- see the guard notes in config.hpp. */
@@ -518,6 +574,9 @@ class Lift {
                                           // NOT the same as descentStart_, which UNSTICK re-baselines.
     bool releasedByTravel_ = false;      // this RELEASE was forced by L2_AUTO_RELEASE_DEG's travel rule
     bool releasedByFloor_ = false;       // this RELEASE was forced by L2_RELEASE_FLOOR_DEG (low start)
+    bool scoredAbove_ = false;           // press 1 finished: holding L2_CLEAR_RISE_DEG above the stack
+    bool scoreCycle_ = false;            // anywhere inside the two-press score (autoclamp inhibit)
+    bool returnRequest_ = false;         // one-shot: this setTarget() is press 2's run home
     bool clawReleaseWanted_ = false;     // the lift is asking Scoring to open the jaws
     bool clawReleased_ = false;          // Scoring acknowledged (clawReleaseDone())
     std::uint32_t clawReleasedAt_ = 0;
@@ -535,6 +594,13 @@ class Lift {
     bool descendHeld_ = false;  // R2 held, from descendManual()
     bool descendOwned_ = false; // this descent was started by descendManual(), so releasing R2 ends it
     bool descendRequest_ = false;  // one-shot: the next setTarget() came from descendManual()
+
+    // the grab push
+    bool grab_ = false;
+    std::uint32_t grabStart_ = 0;
+    bool gripWanted_ = false;   // the lift is asking Scoring to shut the jaws
+    bool gripAcked_ = false;    // Scoring acknowledged (clawGripDone())
+    std::uint32_t gripAckedAt_ = 0;
 
     // homing
     Home home_ = Home::IDLE;

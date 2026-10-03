@@ -35,7 +35,7 @@ namespace autons {
 // ===========================================================================
 // >>> THE ONE LINE TO CHANGE: which route autonomous() runs. <<<
 // ===========================================================================
-constexpr Route SELECTED = Route::LIFT_TEST;
+constexpr Route SELECTED = Route::ODOM_TEST;  // LIFT_TEST, ODOM_TEST, MATCH, SKILLS, NONE
 
 namespace {
 
@@ -92,14 +92,22 @@ void matchRoute() {
     // if (!auton::waitUntilClamped(2000, true)) return;   // nothing grabbed: bail out rather than
     //                                                     // carry on with an empty claw
 
+    // Or grab a pin the claw is already lined up on, without driving into it: the same force-down
+    // push L1 does at the handoff, holding wherever it ends.
+    // auton::grabAndWait();
+
     // Stack it. stepUp() is L1: it clamps (already clamped here, so no wait) and rises a level,
-    // sweeping the floor with the intake on the way up, exactly like the driver's button.
+    // sweeping the floor with the intake on the way up, exactly like the driver's button. From the
+    // handoff it does the force-down GRAB first, also like the button.
     // auton::stepUpAndWait();                  // level 1
     // auton::liftToAndWait(auton::Level::THREE);  // or straight to a level
 
-    // Score it: L2's sensing scorer -- press the pin onto the stack with the jaws shut, release at
-    // the landing, slide off, run home fast and seat. waitScore() is false on SCORE STUCK.
+    // Score it, in two presses like the driver's L2. Press 1 presses the pin onto the stack, releases
+    // at the landing, and ends HOLDING 20 deg above it -- so the robot can drive away without
+    // knocking the stack over. waitScore() is false on SCORE STUCK.
     // auton::scoreAndWait();
+    // ... drive away here, with the claw still held above the pins ...
+    // auton::scoreReturnAndWait();   // press 2: the run home, ending SEATED at 0
 
     // Back up to a known distance from the wall behind, using the rear sensor rather than odometry.
     // auton::moveB(150, false, true, 70, 15, 2000);

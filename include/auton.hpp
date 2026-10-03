@@ -133,6 +133,18 @@ bool clawClamped();
 /** clawGrip() + block until the jaws report CLAMPED and CLAW_CLOSE_TIME_MS has passed, so the arm
  *  never pulls out of a claw that is still closing. True = gripped. */
 bool gripAndWait(int timeoutMs = config::AUTON_CLAW_TIMEOUT_MS);
+
+/**
+ * THE GRAB -- "grab it right here". The same force-down-and-close sequence L1 does at the intake
+ * handoff: the arm presses DOWN at config::L1_GRAB_PUSH_PCT, the jaws shut L1_GRAB_CLOSE_AT_MS into
+ * the push, the push continues until both L1_GRAB_PUSH_MS and the jaws' own CLAW_CLOSE_TIME_MS are
+ * satisfied -- and then the arm HOLDS exactly where the push ended, instead of rising to a level the
+ * way L1 does. The intake is stopped for the whole push. Use this when the claw is already lined up
+ * on a pin; use clawGrip() when all that is wanted is the cylinder.
+ */
+void grab();
+/** grab() + block until the push is over and the arm is holding. True = a pin is actually clamped. */
+bool grabAndWait(int timeoutMs = config::AUTON_GRAB_TIMEOUT_MS);
 /** clawOpen() + block for CLAW_OPEN_TIME_MS (or until the jaws read open). True = open. */
 bool openAndWait(int timeoutMs = config::AUTON_CLAW_TIMEOUT_MS);
 /**
@@ -192,15 +204,28 @@ void stepUp();
 /** stepUp() + block until the arm is holding the level it ended up at. */
 bool stepUpAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 
-/** L2: above the bottom holding a pin -> the sensing scorer (press onto the stack with the jaws shut,
- *  release at the landing, slide off, run home fast and SEAT), with L2's auto-outtake running near the
- *  bottom just like the button. At the bottom -> toggles the claw in place, moving nothing. */
+/**
+ * L2 PRESS 1 of two. Above the bottom holding a pin -> the sensing scorer: press the pin onto the
+ * stack with the jaws shut, release at the detected landing (or at L2_AUTO_RELEASE_DEG's travel
+ * limit), keep pushing L2_POST_RELEASE_PUSH_MS so the jaws slide off, then RISE L2_CLEAR_RISE_DEG and
+ * HOLD there, indefinitely -- so the robot can drive away with the claw above the pins. It does NOT
+ * descend to the bottom any more; scoreReturn() is the second press that does. At the bottom instead,
+ * this toggles the claw in place and moves nothing.
+ */
 void score();
-/** Block until a score sequence has finished -- the arm seated at the bottom with the pin off. False
- *  on SCORE STUCK (the claw stayed hooked) or the timeout. */
+/** Block until press 1 has finished -- the arm holding L2_CLEAR_RISE_DEG above the stack with the pin
+ *  off. False on SCORE STUCK (the claw stayed hooked), FAULT, or the timeout. */
 bool waitScore(int timeoutMs = config::AUTON_SCORE_TIMEOUT_MS);
 /** score() + waitScore(). */
 bool scoreAndWait(int timeoutMs = config::AUTON_SCORE_TIMEOUT_MS);
+/** L2 PRESS 2: from the held-above position, the fast run home at L2_RETURN_SPEED_PCT that ends
+ *  SEATED on the hard stop. The autoclamp stays inhibited for the whole descent, so the pin that was
+ *  just released cannot be re-grabbed on the way past it. A no-op anywhere else. */
+void scoreReturn();
+/** scoreReturn() + waitLiftSeated(). True = seated at the bottom. */
+bool scoreReturnAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+/** True while the arm is holding above a finished score, waiting for press 2. */
+bool scoredUp();
 /** True if the last score gave up with the claw still caught. */
 bool scoreStuck();
 

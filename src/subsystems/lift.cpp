@@ -75,6 +75,8 @@ void Lift::zero() {
     descendHeld_ = descendOwned_ = descendRequest_ = false;
     seatHot_ = false;
     score_ = returnFast_ = scoreStuck_ = releasedByTravel_ = releasedByFloor_ = false;
+    scoredAbove_ = scoreCycle_ = returnRequest_ = false;
+    grab_ = gripWanted_ = gripAcked_ = false;
     clawReleaseWanted_ = clawReleased_ = false;
     contact_.reset();
     contactTrigger_ = ContactDetector::Trigger::NONE;
@@ -291,6 +293,15 @@ void Lift::setTarget(double degrees, bool precise) {
     releasedByTravel_ = false;
     releasedByFloor_ = false;
     returnFast_ = false;
+    // A grab push is a command like any other: a new height replaces it.
+    grab_ = gripWanted_ = gripAcked_ = false;
+    // Leaving the two-press score cycle -- unless this IS press 2's run home, which startScoreReturn()
+    // marks with the one-shot below. Everything else (L1, R1, B, a manual nudge) means the driver has
+    // moved on, so the autoclamp may arm again.
+    const bool fromReturn = returnRequest_;
+    returnRequest_ = false;
+    scoredAbove_ = false;
+    if (!fromReturn) scoreCycle_ = false;
 
     const bool flying = active_ && !descent_ && !faulted_ && !blocked_ && phase_ != Phase::HOLD;
     const bool newIsDescent = !wantPrecise && clamped <= config::LIFT_BOTTOM_GOAL_DEG;
@@ -353,6 +364,10 @@ void Lift::cancel() {
     score_ = false;
     clawReleaseWanted_ = false;
     returnFast_ = false;
+    grab_ = gripWanted_ = gripAcked_ = false;
+    scoredAbove_ = false;
+    scoreCycle_ = false;
+    returnRequest_ = false;
 }
 
 const char* Lift::activePresetName() const {
@@ -375,7 +390,10 @@ const char* Lift::phaseName() const {
         case Phase::DRIVE: return "DRIVE";
         case Phase::BRAKE: return "BRAKE";
         case Phase::APPROACH: return "APPROACH";
-        case Phase::HOLD: return "HOLD";
+        case Phase::HOLD:
+            // The latched hold L2 press 1 ends in: the arm is parked L2_CLEAR_RISE_DEG above the
+            // stack with the jaws open, waiting for a second L2 to run home and seat.
+            return scoredAbove_ ? "SCORED UP" : "HOLD";
         case Phase::DESCEND: return returnFast_ ? "RETURN" : "DESCEND";
         case Phase::FINAL: return "FINAL";
         case Phase::SEAT: return seatHot_ ? "SEAT(hot)" : (seatShort_ ? "SEAT(short)" : "SEAT");
@@ -396,6 +414,8 @@ const char* Lift::phaseName() const {
             }
             return "REL";
         case Phase::UNSTICK: return "UNSTK";
+        case Phase::GRAB: return "GRAB";
+        case Phase::POSTPUSH: return "PUSH";
     }
     return "";
 }
@@ -531,6 +551,9 @@ void Lift::enterFinal(std::uint32_t now) {
 }
 
 void Lift::enterSeat(std::uint32_t now, bool shortSeat) {
+    // Whatever brought the arm here, it is now on its hard stop with nothing in the jaws that a score
+    // could re-grab: the two-press score cycle (and its autoclamp inhibit) is over.
+    scoreCycle_ = false;
     phase_ = Phase::SEAT;
     phaseStart_ = now;
     stallStart_ = 0;
@@ -589,7 +612,8 @@ void Lift::runHold(std::uint32_t now, double dt, double position) {
 }
 
 // ---------------------------------------------------------------------------
-// L2 scoring: PRESS -> RELEASE -> (UNSTICK) -> the trip home
+// L2 scoring, PRESS 1: PRESS -> RELEASE -> (UNSTICK) -> POSTPUSH -> rise + hold
+// (press 2 is startScoreReturn(), further down)
 // ---------------------------------------------------------------------------
 void Lift::startScore() {
     // Owns the motors from here as an active command with DOWN as its nominal goal, so everything
@@ -604,6 +628,9 @@ void Lift::startScore() {
     score_ = true;
     returnFast_ = false;
     scoreStuck_ = false;
+    scoredAbove_ = false;
+    scoreCycle_ = true;  // ...until press 2 seats the arm: the autoclamp is inhibited throughout
+    grab_ = gripWanted_ = gripAcked_ = false;
     releasedByTravel_ = false;
     releasedByFloor_ = false;
     clawReleaseWanted_ = false;
@@ -629,15 +656,108 @@ void Lift::clawReleaseDone() {
     clawReleasedAt_ = pros::millis();
 }
 
-void Lift::endScore(std::uint32_t now, double position) {
+// ---------------------------------------------------------------------------
+// THE GRAB: a constant downward push while the jaws close (see lift.hpp)
+// ---------------------------------------------------------------------------
+void Lift::startGrab() {
+    // Homing owns the motors and is finding the true zero: do NOT push against it. The caller sees
+    // isGrabbing() == false and falls back to the ordinary close-then-rise (see Scoring::update()).
+    if (home_ == Home::RUNNING) return;
+    const std::uint32_t now = pros::millis();
+    active_ = true;
+    goal_ = getPosition();  // nominal, so "where is it heading" has a sane answer
+    precise_ = false;
+    descent_ = false;
+    descendOwned_ = false;
+    descendRequest_ = false;
+    score_ = false;
+    returnFast_ = false;
+    scoreStuck_ = false;
+    scoredAbove_ = false;
+    clawReleaseWanted_ = false;
+    faulted_ = false;
+    blocked_ = false;
+    grab_ = true;
+    gripWanted_ = false;
+    gripAcked_ = false;
+    grabStart_ = now;
+    velI_ = 0.0;
+    phase_ = Phase::GRAB;
+    phaseStart_ = now;
+    stallStart_ = 0;
+}
+
+void Lift::clawGripDone() {
+    if (!gripWanted_ || gripAcked_) return;
+    gripAcked_ = true;
+    gripAckedAt_ = pros::millis();
+}
+
+void Lift::updateGrab(std::uint32_t now, double dt, double position) {
+    const std::uint32_t t = now - grabStart_;
+    lastError_ = 0.0;
+    lastVRef_ = 0.0;
+
+    // Ask for the jaws partway through the push, so they close around the pin while the claw is
+    // pressed down onto it rather than above it.
+    if (!gripWanted_ && t >= static_cast<std::uint32_t>(config::L1_GRAB_CLOSE_AT_MS)) gripWanted_ = true;
+
+    // Stop pushing only when the push has had its time AND the jaws have had theirs. The arm must
+    // never pull up out of a claw that is still physically closing -- the same interlock CLAMPING
+    // enforces. L1_GRAB_MAX_MS is the safety net for "nobody ever acknowledged" (no Scoring tick).
+    const bool pushedLongEnough = t >= static_cast<std::uint32_t>(config::L1_GRAB_PUSH_MS);
+    const bool jawsShut = gripAcked_ &&
+                          now - gripAckedAt_ >= static_cast<std::uint32_t>(config::CLAW_CLOSE_TIME_MS);
+    const bool timedOut = t >= static_cast<std::uint32_t>(config::L1_GRAB_MAX_MS);
+    if ((pushedLongEnough && jawsShut) || timedOut) {
+        grab_ = false;
+        gripWanted_ = false;
+        // HOLD right here. Scoring's L1 path commands the rise on its next tick; auton::grab() simply
+        // does not, and the arm stays exactly where the push left it, actively held.
+        goal_ = position;
+        enterHold(now, position);
+        runHold(now, dt, position);
+        return;
+    }
+
+    const double mv = -config::LIFT_MAX_MV * config::L1_GRAB_PUSH_PCT / 100.0;
+    motors_.move_voltage(static_cast<int>(mv));
+    lastOutput_ = mv;
+    trace(now, 'G', position, mv, true);
+}
+
+// ---------------------------------------------------------------------------
+// L2 press 1's ending, and press 2
+// ---------------------------------------------------------------------------
+void Lift::endScoreClear(std::uint32_t now, double position) {
+    // PRESS 1 IS OVER. The pin is off and the jaws are clear of it, so rise L2_CLEAR_RISE_DEG above
+    // wherever the press actually stopped and hold there, latched, until a second L2 (or anything
+    // else) says otherwise -- the driver's "drive away with the claw above the pins".
     score_ = false;
     clawReleaseWanted_ = false;
-    descent_ = true;
-    // Every call here now follows a release (detected, or forced by L2_AUTO_RELEASE_DEG) -- there is no
-    // more "pressed to the bottom with nothing released" path -- so the run home is always the fast
-    // one, L2_RETURN_SPEED_PCT for both bands, labelled RETURN on the brain and R in the trace.
-    returnFast_ = true;
-    enterDescend(now, position, config::L2_RETURN_SPEED_PCT, config::L2_RETURN_SPEED_PCT);
+    returnFast_ = false;
+    descent_ = false;
+    scoredAbove_ = true;
+    scoreCycle_ = true;  // still inside the cycle: the autoclamp stays inhibited until press 2 seats
+    active_ = true;
+    precise_ = false;
+    blocked_ = false;
+    goal_ = std::min(position + config::L2_CLEAR_RISE_DEG, config::lift_preset::MAX);
+    // An ordinary position move does the rise: DRIVE -> BRAKE -> APPROACH -> HOLD, already tuned.
+    enterDrive(now, position);
+}
+
+void Lift::startScoreReturn() {
+    const std::uint32_t now = pros::millis();
+    const double position = getPosition();
+    returnRequest_ = true;  // one-shot: tells setTarget() this is press 2, so the cycle flag survives
+    descendRequest_ = false;
+    returnFast_ = true;     // brain/trace: RETURN
+    setTarget(config::lift_preset::DOWN);
+    // setTarget() picked the config descent bands; press 2 is the FAST run home, so re-enter with
+    // L2_RETURN_SPEED_PCT for both fast bands (the slow zone, FINAL and SEAT are untouched).
+    if (descent_) enterDescend(now, position, config::L2_RETURN_SPEED_PCT, config::L2_RETURN_SPEED_PCT);
+    returnFast_ = true;     // enterDescend() doesn't touch it, but setTarget() cleared it above
 }
 
 void Lift::updateScore(std::uint32_t now, double dt, double position) {
@@ -742,12 +862,25 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             stuckSince_ = 0;
             aux.trigger = travelRelease ? 5 : (floorRelease ? 6 : ContactDetector::triggerCode(fired));
         }
-    } else {  // Phase::RELEASE
+    } else {  // Phase::RELEASE or Phase::POSTPUSH
         // Carry the detector's last readings so the r lines show what fired and what it saw.
         aux.ratioPct = static_cast<int>(contact_.speedRatio() * 100.0);
         aux.lag10 = static_cast<int>(contact_.lagDeg() * 10.0);
         aux.effortMv = static_cast<int>(contact_.effortMv());
         aux.trigger = releasedByTravel_ ? 5 : (releasedByFloor_ ? 6 : ContactDetector::triggerCode(contactTrigger_));
+
+        // POSTPUSH has already decided the arm is free -- it is only running out its timer below, so
+        // none of the release judging applies to it any more.
+        if (phase_ == Phase::POSTPUSH) {
+            if (now - phaseStart_ >= static_cast<std::uint32_t>(config::L2_POST_RELEASE_PUSH_MS)) {
+                endScoreClear(now, position);
+                return;
+            }
+            const double mv =
+                runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, config::L2_PRESS_MAX_MV);
+            trace(now, 'p', position, mv, true, aux);
+            return;
+        }
 
         // Don't judge anything until the jaws have actually had time to open. If nobody ever
         // acknowledges the request (no Scoring::update() running, e.g. a bare auton), carry on after
@@ -776,14 +909,20 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             // height can never race Scoring out of ever seeing needsClawRelease() -- endScore() clears
             // clawReleaseWanted_, and without this gate that could happen before Scoring's own 10 ms
             // loop ever polled it.
-            endScore(now, position);  // already home
+            // The jaws are open and we are as low as this press should ever go: skip the extra
+            // post-release push (there is nowhere left to push) and go straight to the clear rise.
+            endScoreClear(now, position);
             return;
         }
         if (jawsOpen && freeSince_ != 0 &&
             now - freeSince_ >= static_cast<std::uint32_t>(config::L2_FREE_MS)) {
-            // The claw came off the pin and the arm is running freely again: go home, fast.
-            endScore(now, position);
-            return;
+            // THE CLAW CAME OFF THE PIN and the arm is running freely again. Keep pressing down for
+            // L2_POST_RELEASE_PUSH_MS so the jaws slide fully clear of it, then rise and hold. Note
+            // this is only reached from the FREED check -- a claw still hooked on the pin goes to
+            // UNSTICK below instead, so the rise can never drag a pin up with it.
+            phase_ = Phase::POSTPUSH;
+            phaseStart_ = now;
+            // fall through to the press output below, now as POSTPUSH
         }
         if (jawsOpen && stuckSince_ != 0 && now - stuckSince_ >= static_cast<std::uint32_t>(config::L2_STUCK_MS)) {
             // Still stopped with the jaws open: the claw is hooked on the pin.
@@ -811,9 +950,16 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         }
     }
 
+    if (phase_ == Phase::POSTPUSH &&
+        now - phaseStart_ >= static_cast<std::uint32_t>(config::L2_POST_RELEASE_PUSH_MS)) {
+        endScoreClear(now, position);
+        return;
+    }
+
     // Pressing down, with the push capped so the loop cannot crush the stack while the arm slows.
     const double mv = runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, config::L2_PRESS_MAX_MV);
-    trace(now, phase_ == Phase::PRESS ? 'P' : 'r', position, mv, true, aux);
+    trace(now, phase_ == Phase::PRESS ? 'P' : (phase_ == Phase::POSTPUSH ? 'p' : 'r'), position, mv,
+          true, aux);
 }
 
 // ---------------------------------------------------------------------------
@@ -989,20 +1135,26 @@ void Lift::update() {
         return;
     }
 
-    // 5) An L2 score: press the pin down, sense the landing, release, go home. Before the descent
-    //    branch because it HANDS OVER to it (endScore()) once the claw is free.
+    // 5) The grab push (L1 at the handoff, auton::grab()): a constant downward force while the jaws
+    //    close. Before the score/descent branches; the manual override above still preempts it.
+    if (grab_) {
+        updateGrab(now, dt, position);
+        return;
+    }
+
+    // 6) An L2 score: press the pin down, sense the landing, release, post-push, then rise and hold.
     if (score_) {
         updateScore(now, dt, position);
         return;
     }
 
-    // 6) A trip to the bottom (L2's run home, B, auton DOWN, R2): banded descent + seating.
+    // 7) A trip to the bottom (L2 press 2's run home, B, auton DOWN, R2): banded descent + seating.
     if (descent_) {
         updateDescent(now, dt, position);
         return;
     }
 
-    // 7) A position move. Everything below is a pure function of where the arm is, where the goal is
+    // 8) A position move -- including L2 press 1's closing rise. Everything below is a pure function of where the arm is, where the goal is
     //    and how fast the arm is going THIS TICK -- which is the whole trick behind a fluid retarget:
     //    moving the goal mid-move is enough on its own, nothing has to be stopped and restarted.
     const double gap = goal_ - position;

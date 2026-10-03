@@ -51,7 +51,15 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *               the intake rollers IN from the press until the arm passes L1_AUTO_INTAKE_UNTIL_DEG --
  *               sweeping the floor while the arm is going up anyway. `INT:AUTO` on the brain's DRV
  *               line while it does. Extra taps don't restart or extend it.
- *   L2          intake macro: THE SENSING SCORER (above the bottom, holding a pin). Presses the pin
+ *               FROM THE INTAKE HANDOFF (the R1 position) L1 does THE GRAB first: the arm forces
+ *               itself DOWN onto the pin at L1_GRAB_PUSH_PCT (40% of volts), the jaws close
+ *               L1_GRAB_CLOSE_AT_MS (200 ms) into that push, the push holds until both
+ *               L1_GRAB_PUSH_MS (300 ms) and the jaws' own CLAW_CLOSE_TIME_MS are satisfied -- so
+ *               about 350 ms of pressing down -- and only then does the arm rise to level 1. The
+ *               INTAKE IS STOPPED for the whole push (it would drag the pin out from under the jaws),
+ *               and the floor sweep above starts from the rise instead. Brain `LIFT` line: `GRAB`.
+ *   L2          intake macro: THE SENSING SCORER, IN TWO PRESSES (above the bottom, holding a pin).
+ *               PRESS 1 presses the pin
  *               DOWN onto the stack with the claw still SHUT at L2_SCORE_SPEED_PCT, watches the
  *               rotation sensor for the landing (at least two of LAG/EFFORT/SPEED must agree -- see
  *               contact_detector.hpp -- a lone signal is no longer enough since this six-bar's gravity
@@ -65,11 +73,18 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *               releasing at L2_RELEASE_FLOOR_DEG (shown as REL(floor)), so level 1 still gets real
  *               sensing time rather than releasing on the first tick. Either way: releases the claw
  *               and keeps pushing so the jaws slide off, checks the arm is really free (lifting
- *               L2_UNSTICK_UP_DEG and retrying if the claw is caught), then runs home fast, forces the
- *               last few degrees onto the hard stop (Lift's FINAL phase -- see lift.hpp -- so a cup or
- *               friction can't leave it parked short of true 0), and SEATs. Pivot stays OUT. Resets
- *               the level count. At the bottom instead, L2 toggles the claw (clamp / release) and
- *               moves nothing.
+ *               L2_UNSTICK_UP_DEG and retrying if the claw is caught), keeps pressing down a further
+ *               L2_POST_RELEASE_PUSH_MS (100 ms) so the jaws slide clear, then RISES
+ *               L2_CLEAR_RISE_DEG (20 deg) above wherever it stopped and HOLDS there, indefinitely --
+ *               brain: `SCORED UP`. It does NOT go to the bottom any more: the point is to drive away
+ *               with the claw above the pins without knocking any over.
+ *               PRESS 2 (L2 again from that held position) is the run home: the fast descent at
+ *               L2_RETURN_SPEED_PCT, FINAL forcing the last few degrees onto the hard stop, and SEAT
+ *               at 0 -- exactly the old ending, just on a second press. B does the same thing from
+ *               there. Pivot stays OUT. The level count resets after press 1. While held above: R1
+ *               still runs the rollers and sends the arm to the handoff, L1 still starts a new stack
+ *               from level 1, and D-pad manual still wins over everything.
+ *               At the bottom instead, L2 toggles the claw (clamp / release) and moves nothing.
  *               Once this descent passes below L2_OUTTAKE_BELOW_DEG (40 deg), the intake rollers run
  *               OUT at L2_OUTTAKE_PCT on their own -- through REL/UNSTK/RETURN, whichever phase the
  *               arm is in -- and stop as soon as the arm reaches L2_OUTTAKE_STOP_DEG (tied to the

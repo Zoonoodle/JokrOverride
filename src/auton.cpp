@@ -242,6 +242,23 @@ bool openAndWait(int timeoutMs) {
     return !robot::claw.isClosed();
 }
 
+void grab() {
+    AUTON_LOCK;
+    robot::scoring.grabHere();
+}
+
+bool grabAndWait(int timeoutMs) {
+    grab();
+    const std::uint32_t start = pros::millis();
+    // The push, then the arm settling into the hold it ends in.
+    while (robot::lift.isGrabbing() || !robot::lift.isSettled()) {
+        if (robot::lift.isFaulted()) return false;
+        if (timeoutMs <= 0 || pros::millis() - start >= static_cast<std::uint32_t>(timeoutMs)) break;
+        pros::delay(10);
+    }
+    return robot::claw.isClamped();
+}
+
 bool waitUntilClamped(int timeoutMs, bool stopChassis) {
     const std::uint32_t start = pros::millis();
     while (!robot::claw.isClamped()) {
@@ -349,13 +366,29 @@ void score() {
 
 bool waitScore(int timeoutMs) {
     const std::uint32_t start = pros::millis();
-    while (robot::scoring.isScoreDescent() || robot::lift.isScoring()) {
+    // Press 1 is over once the sequence has stopped AND, if it ended in the clear rise, that rise has
+    // settled into its hold. (An L2 at the bottom is just a claw toggle: every test is false at once
+    // and this returns true immediately, as it always did.)
+    while (robot::scoring.isScoreDescent() || robot::lift.isScoring() ||
+           (robot::lift.isScoredAbove() && !robot::lift.isSettled())) {
         if (robot::lift.isScoreStuck() || robot::lift.isFaulted()) return false;
         if (timeoutMs <= 0 || pros::millis() - start >= static_cast<std::uint32_t>(timeoutMs)) return false;
         pros::delay(10);
     }
     return !robot::lift.isScoreStuck() && !robot::lift.isFaulted();
 }
+
+void scoreReturn() {
+    AUTON_LOCK;
+    robot::scoring.score();  // from the held-above state, Scoring::score() IS press 2
+}
+
+bool scoreReturnAndWait(int timeoutMs) {
+    scoreReturn();
+    return waitLiftSeated(timeoutMs);
+}
+
+bool scoredUp() { return robot::scoring.isScoredUp(); }
 
 bool scoreAndWait(int timeoutMs) {
     score();

@@ -90,6 +90,13 @@ void Scoring::enter(State next) {
             // normally already swung it BACK on the way down into the handoff zone; this makes sure.
             setPivot(next == State::INTAKE_POS ? false : !config::PIVOT_BACK_AT_MATCHLOAD);
             break;
+        case State::GRABBING:
+            // THE GRAB. The lift forces the claw down onto the pin at L1_GRAB_PUSH_PCT and tells us
+            // when to shut the jaws (Lift::needsClawGrip(), polled in update()); the intake is stopped
+            // for the whole push by periodic::tick(). Same split as the L2 scorer: the lift owns the
+            // motion, this class owns the cylinder.
+            lift_.startGrab();
+            break;
         case State::CLAMPING: claw_.clamp(); break;
         case State::STACKING: break;       // update() drives the lift + pivot
         case State::RELEASING:
@@ -107,6 +114,15 @@ void Scoring::enter(State next) {
             } else {
                 openClaw();  // scoreOrMatchload(): jaws open now, and the autoclamp setting is kept
             }
+            break;
+        case State::SCORED:
+            level_ = 1;  // the next L1 starts from level 1 again
+            break;       // the lift is holding above the stack; wait for the next button
+        case State::RETURNING:
+            // L2 press 2 (or B from SCORED): the fast run home that ends SEATED on the hard stop.
+            // The pivot is OUT, the default down position.
+            setPivot(true);
+            lift_.startScoreReturn();
             break;
         case State::MOVING:
             openClaw();  // jaws open for the pickup; update() places the pivot by height
@@ -128,9 +144,22 @@ void Scoring::reset() {
 }
 
 void Scoring::stow() {
+    // From the held-above position after an L2 score, B is the same thing as the second L2: go home
+    // through RETURNING, which keeps the autoclamp inhibited all the way down so the pin that was
+    // just released cannot be re-grabbed on the way past it.
+    if (state_ == State::SCORED) {
+        enter(State::RETURNING);
+        return;
+    }
     reset();
     setPivot(true);  // the default down position is pivot OUT
     lift_.setTarget(preset::DOWN);
+}
+
+void Scoring::grabHere() {
+    if (state_ == State::GRABBING || state_ == State::RELEASING) return;
+    grabRise_ = false;  // stay where the push ends
+    enter(State::GRABBING);
 }
 
 void Scoring::goToIntake() {
@@ -141,7 +170,10 @@ void Scoring::goToIntake() {
     // more: interlock 4 above already covers the dangerous case (a pin in the jaws), so if the driver
     // has opened the claw up at a stack level, R1 should be able to send the arm back down to the
     // handoff instead of silently doing nothing until they remember to press B.
-    if (state_ == State::CLAMPING || state_ == State::RELEASING) return;
+    if (state_ == State::CLAMPING || state_ == State::RELEASING || state_ == State::GRABBING ||
+        state_ == State::RETURNING) {
+        return;
+    }
     if (state_ == State::INTAKE_POS) {
         commanded_ = -1.0;  // re-tap snaps it back to INTAKE after a manual nudge
         command(preset::INTAKE);
@@ -158,7 +190,18 @@ void Scoring::stepUp() {
     switch (state_) {
         case State::CLAMPING:
         case State::STACKING: level_ = std::min(level_ + 1, preset::STACK_LEVEL_COUNT); break;
-        case State::RELEASING: break;  // mid-score, ignore
+        case State::RELEASING:
+        case State::GRABBING:
+        case State::RETURNING: break;  // mid-sequence, ignore
+        case State::INTAKE_POS:
+            // THE GRAB (2026-10-02, the driver's own design). L1 from the intake handoff no longer
+            // just closes the jaws and rises: the arm first FORCES ITSELF DOWN onto the pin while the
+            // jaws close around it, and only then rises to level 1. The intake stops for the whole
+            // push. Everything about the push is config::L1_GRAB_*; see "THE GRAB" in lift.hpp.
+            level_ = 1;
+            grabRise_ = true;
+            enter(State::GRABBING);
+            break;
         default:
             level_ = 1;
             // The claw can already be CLAMPED here -- L2's down-state clamp (score(), above) shuts it
@@ -173,10 +216,22 @@ void Scoring::stepUp() {
 }
 
 void Scoring::score() {
-    // Mid-move: a score/stow descent is already running (RELEASING), the jaws are still physically
-    // closing (CLAMPING), or the arm is travelling to INTAKE/MATCHLOAD (MOVING). Ignore L2 until
-    // whichever of those finishes -- same as before this change.
-    if (state_ == State::RELEASING || state_ == State::CLAMPING || state_ == State::MOVING) return;
+    // PRESS 2 OF TWO. The arm is holding L2_CLEAR_RISE_DEG above the stack it just scored on, with
+    // the jaws open: this L2 is the run home that seats it (see "SCORING WITH L2" in lift.hpp and the
+    // L2 note in config.hpp). Nothing else about press 1 is re-run.
+    if (state_ == State::SCORED) {
+        enter(State::RETURNING);
+        return;
+    }
+
+    // Mid-move: a score is already running (RELEASING), the arm is forcing down onto a pin
+    // (GRABBING), the jaws are still physically closing (CLAMPING), the arm is travelling to
+    // INTAKE/MATCHLOAD (MOVING), or press 2's descent is in flight (RETURNING). Ignore L2 until
+    // whichever of those finishes.
+    if (state_ == State::RELEASING || state_ == State::CLAMPING || state_ == State::MOVING ||
+        state_ == State::GRABBING || state_ == State::RETURNING) {
+        return;
+    }
 
     // At the bottom (seated on the hard stop, or within LIFT_BOTTOM_GOAL_DEG of it) and not mid-move:
     // L2 is now the CLAMP TRIGGER, not a no-op. Toggle the claw through the exact same logical API A /
@@ -260,6 +315,41 @@ void Scoring::update() {
         case State::MATCHLOAD_POS:
             break;  // waiting for the driver (autoclamp, if on, runs in claw.update())
 
+        case State::GRABBING:
+            // The lift is pressing the claw down onto the pin. Shut the jaws the moment it asks
+            // (L1_GRAB_CLOSE_AT_MS into the push) -- unless the autoclamp already got there -- and
+            // tell it so; it keeps pressing until the jaws have had CLAW_CLOSE_TIME_MS.
+            if (lift_.needsClawGrip()) {
+                if (!claw_.isClamped()) claw_.clamp();
+                lift_.clawGripDone();
+            }
+            if (!lift_.isGrabbing()) {
+                // Push over (or refused, which is what happens if homing was still running -- the
+                // lift will not fight it). The arm is holding wherever it ended.
+                if (!claw_.isClamped()) {
+                    // Nothing was gripped: fall back to the ordinary close-and-wait interlock rather
+                    // than rising with open jaws.
+                    if (grabRise_) enter(State::CLAMPING);
+                    else enter(State::IDLE);
+                    break;
+                }
+                enter(grabRise_ ? State::STACKING : State::IDLE);
+            }
+            break;
+
+        case State::SCORED:
+            break;  // holding above the stack; the next L2 (or B) runs home, R1/L1 move on
+
+        case State::RETURNING:
+            // Press 2's descent. It ends seated on the hard stop; if the lift gives up instead
+            // (BLOCKED / FAULT) let go of the macro so the other buttons work again.
+            if (lift_.isBlocked() || lift_.isFaulted()) {
+                enter(State::IDLE);
+                break;
+            }
+            if (liftArrived(preset::DOWN)) enter(State::IDLE);
+            break;
+
         case State::CLAMPING:
             // Interlock 1: let the jaws shut before the lift pulls away.
             if (elapsed >= static_cast<std::uint32_t>(config::CLAW_CLOSE_TIME_MS)) enter(State::STACKING);
@@ -298,11 +388,13 @@ void Scoring::update() {
                     enter(State::IDLE);
                     break;
                 }
-                // Done once the arm is actually seated on its hard stop at the bottom -- by now the pin
-                // has always been released, either detected or forced by Lift's L2_AUTO_RELEASE_DEG.
-                if (liftArrived(preset::DOWN)) {
+                // PRESS 1 IS DONE once the lift is holding L2_CLEAR_RISE_DEG above the stack (the pin
+                // has always been released by then, either detected or forced by L2_AUTO_RELEASE_DEG).
+                // The arm STAYS there -- no automatic descent -- so the driver can drive away with the
+                // claw above the pins; the next L2 is the run home.
+                if (lift_.isScoredAbove() && lift_.isSettled()) {
                     scoreToHome_ = false;
-                    enter(State::IDLE);
+                    enter(State::SCORED);
                 }
             } else if (elapsed >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS)) {
                 // Interlock 3 (scoreOrMatchload() only -- score()/L2 above no longer waits on this).
@@ -337,7 +429,10 @@ const char* Scoring::stateName() const {
         case State::MATCHLOAD_POS: return "MATCHLOAD";
         case State::CLAMPING: return "CLAMPING";
         case State::STACKING: return "STACKING";
+        case State::GRABBING: return "GRABBING";
         case State::RELEASING: return "RELEASING";
+        case State::SCORED: return "SCORED UP";
+        case State::RETURNING: return "RETURNING";
         case State::MOVING: return "MOVING";
     }
     return "?";

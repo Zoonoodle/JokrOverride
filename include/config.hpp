@@ -332,6 +332,32 @@ inline constexpr double LIFT_SEAT_ZERO_DEG = 1.0;            // TUNE: within thi
 inline constexpr double LIFT_SEAT_UNSEAT_DEG = 4.0;          // TUNE
 inline constexpr double LIFT_SEAT_TEMP_LIMIT_C = 50.0;       // safety net, not a tuning knob
 
+// --- The L1 GRAB at the intake handoff (see "SCORING WITH L2"'s sibling, "THE GRAB", in lift.hpp) --
+// L1 pressed while the macro is parked at the INTAKE handoff no longer just closes the jaws and
+// rises: the arm first FORCES ITSELF DOWN onto the pin for a moment, closes the jaws while it is
+// pressed down there, and only then rises. The driver's words: "I want the claw to force its way
+// down, stop spinning the intake when its doing that and grabbing (and force it down, like -40 speed
+// or so) while grabbing, should be like a 300ms movement going down for 200ms then grab, then go up."
+// The intake STOPS for the whole push (one decision per tick, in periodic::tick() -- never a second
+// writer), so the rollers cannot drag the pin out from under the jaws while they close.
+// SPEED. Open-loop, a plain percentage of LIFT_MAX_MV like every other *_PCT here. 40% is 4800 mV.
+// (The driver said "-40 speed", which in their old library meant Motor::move(-40) on the -127..127
+// scale, i.e. about 31%. 40% of volts is the same number in this codebase's units and a little
+// firmer; drop it to 31 to match the old library exactly.)
+//   The pin gets pushed out of the jaws / the intake is lifted off the floor: LOWER it.
+//   The jaws close above the pin instead of around it: RAISE it, or raise L1_GRAB_CLOSE_AT_MS.
+inline constexpr double L1_GRAB_PUSH_PCT = 40.0;             // TUNE: % of LIFT_MAX_MV, downward
+// When the jaws close, measured from the start of the push.
+inline constexpr int L1_GRAB_CLOSE_AT_MS = 200;              // TUNE
+// How long the push lasts. The arm keeps pressing down until BOTH this has elapsed AND the jaws have
+// had CLAW_CLOSE_TIME_MS to shut from the moment they were commanded -- it must never pull up out of
+// a claw that is still closing (the same interlock CLAMPING enforces). With the numbers here that is
+// max(300, 200 + 150) = 350 ms of push.
+inline constexpr int L1_GRAB_PUSH_MS = 300;                  // TUNE
+// Safety net: if nobody ever acknowledges the close request (no Scoring::update() running at all),
+// stop pushing after this long anyway rather than leaning on the pin for the rest of the match.
+inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
+
 // --- Clamped-mode R1 / R2 lift (see src/main.cpp and README "Driver guide") --
 // While the claw is CLAMPED on a pin, R1/R2 stop being intake/extake and become lift up/down.
 // Up is plain voltage; down goes through the banded descent above (so it seats at the bottom exactly
@@ -874,8 +900,27 @@ inline constexpr double L2_AUTO_RELEASE_DEG = 32.0;          // TUNE: arm degree
 // Below any plausible landing height and below L2_AUTO_RELEASE_DEG either way, so it can only ever
 // matter once a release (by any path) has already happened or the travel rule structurally cannot.
 inline constexpr double L2_RELEASE_FLOOR_DEG = 10.0;         // TUNE: arm degrees
-// The run home once the claw is free: % of free speed for the top and middle bands of the ordinary
-// descent (the slow final zone and the SEAT are unchanged, so it still cannot slam or bounce).
+// TWO L2 PRESSES PER SCORE (2026-10-02, the driver's own design):
+//   PRESS 1  press the pin down, detect the landing, open the jaws, keep pushing for
+//            L2_POST_RELEASE_PUSH_MS so they slide off, then RISE L2_CLEAR_RISE_DEG and HOLD there,
+//            indefinitely. "this is so i am able to drive away with claw up above the pins without
+//            any chance of knocking over pins."
+//   PRESS 2  the ordinary fast run home: descend at L2_RETURN_SPEED_PCT, FINAL, SEAT at 0.
+// The held position after press 1 is a DELIBERATE, driver-requested hold that press 2 resolves into a
+// proper seat. It is NOT the old "parks a few degrees above the bottom instead of seating" bug that
+// CLAUDE.md bans -- that one was a trip to the BOTTOM that failed to seat, with no second step.
+// How long the arm keeps pressing DOWN after the jaws have been told to open, so they slide off the
+// pin instead of lifting it back out of the cup.
+//   The pin comes back up with the claw: raise it (100 -> 200).
+//   The jaws grind on the pin / the stack gets pushed: lower it.
+inline constexpr int L2_POST_RELEASE_PUSH_MS = 100;          // TUNE
+// How far the arm rises after that, relative to wherever it actually stopped, before it holds. It has
+// to clear the top of the stack by enough that driving away cannot knock a pin over.
+//   Still catches a pin on the way out: raise it.
+//   The arm is in the way of the next pickup: lower it.
+inline constexpr double L2_CLEAR_RISE_DEG = 20.0;            // TUNE: arm degrees, RELATIVE
+// The run home on PRESS 2, once the claw is free: % of free speed for the top and middle bands of the
+// ordinary descent (the slow final zone and the SEAT are unchanged, so it still cannot slam or bounce).
 //   "Don't hesitate to be going down faster than we currently are going when we are done scoring."
 inline constexpr double L2_RETURN_SPEED_PCT = 95.0;          // TUNE
 
@@ -905,6 +950,8 @@ inline constexpr int AUTON_SCORE_TIMEOUT_MS = 6000;
 inline constexpr int AUTON_CLAW_TIMEOUT_MS = 500;
 // auton::waitUntilClamped(): long enough to drive into a pin and have the autoclamp confirm it.
 inline constexpr int AUTON_CLAMP_TIMEOUT_MS = 2000;
+// auton::grabAndWait(): the push (L1_GRAB_PUSH_MS, plus the jaws' own close time) and a little slack.
+inline constexpr int AUTON_GRAB_TIMEOUT_MS = 1500;
 // How long autonomous() will wait for odometry/IMU calibration before starting the route anyway. It
 // is a BOUND, not a requirement: an unplugged or non-answering IMU must not be able to eat the whole
 // autonomous period, and a route that never drives (the lift test) does not need odometry at all.

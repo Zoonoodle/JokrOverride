@@ -20,6 +20,9 @@ std::uint32_t autoIntakeStart = 0;
 // until the score descent ends and a fresh one starts.
 std::uint32_t autoOuttakeStart = 0;
 bool autoOuttakeExpired = false;
+// An L1 that opened the auto-intake sweep while the GRAB push was running: the sweep waits and starts
+// from the RISE, never during the push (the rollers must not drag the pin out from under the jaws).
+bool sweepAfterGrab = false;
 
 pros::Mutex gate;
 }  // namespace
@@ -31,6 +34,7 @@ void reset() {
     autoIntakeStart = 0;
     autoOuttakeStart = 0;
     autoOuttakeExpired = false;
+    sweepAfterGrab = false;
     screen::autoIntake = false;
     screen::autoOuttake = false;
 }
@@ -39,6 +43,10 @@ void tick(const Inputs& in) {
     std::lock_guard<pros::Mutex> guard(gate);
 
     const double liftPos = robot::lift.getPosition();
+    // THE GRAB: while the arm is forcing the claw down onto a pin, the intake STOPS -- every input,
+    // including the driver's R1/R2 and L1's own sweep. The rollers would otherwise drag the pin out
+    // from under the jaws exactly as they close. See "THE GRAB" in lift.hpp and config::L1_GRAB_*.
+    const bool grabbing = robot::lift.isGrabbing();
 
     // --- L2 auto-outtake: while an L2 SCORE descent (not the at-the-bottom clamp toggle, not
     // scoreOrMatchload()'s INTAKE lower) is under L2_OUTTAKE_BELOW_DEG, eject through the rest of the
@@ -58,7 +66,10 @@ void tick(const Inputs& in) {
         // it -- the manual override, B, a stuck score, or a lift that gave up on the move entirely
         // (BLOCKED/FAULT).
         const bool done = liftPos <= config::L2_OUTTAKE_STOP_DEG;
-        const bool cancelled = in.manualLift || in.abort || robot::lift.isScoreStuck() ||
+        // ...and the moment the descent it belongs to is over. With the two-press L2 that is the end
+        // of PRESS 1 (the arm stops L2_CLEAR_RISE_DEG above the stack rather than carrying on to 0,
+        // so the stop-height test below would never be met), and the end of press 2's run home.
+        const bool cancelled = in.manualLift || in.abort || !scoringDown || robot::lift.isScoreStuck() ||
                                robot::lift.isBlocked() || robot::lift.isFaulted();
         const bool timedOut =
             pros::millis() - autoOuttakeStart >= static_cast<std::uint32_t>(config::L2_OUTTAKE_MAX_MS);
@@ -74,11 +85,24 @@ void tick(const Inputs& in) {
     // taps during the same rise neither restart nor extend it (the window only opens while it is
     // closed), and an L1 from a stack level never opens it at all. This is ONE INPUT to the single
     // intake.set() below, never a second writer. ---
-    if (in.stepUpPressed && autoIntakeStart == 0 && !in.manualLift &&
+    if (in.stepUpPressed && autoIntakeStart == 0 && !in.manualLift && !sweepAfterGrab &&
         robot::scoring.getState() != Scoring::State::RELEASING &&
         (robot::lift.isSeated() || liftPos <= config::LIFT_BOTTOM_GOAL_DEG ||
-         robot::scoring.getState() == Scoring::State::INTAKE_POS)) {
-        autoIntakeStart = pros::millis();
+         robot::scoring.getState() == Scoring::State::INTAKE_POS ||
+         robot::scoring.getState() == Scoring::State::GRABBING)) {
+        // An L1 from the handoff starts the GRAB push first; the sweep then belongs to the RISE that
+        // follows it, not to the push.
+        if (grabbing) sweepAfterGrab = true;
+        else autoIntakeStart = pros::millis();
+    }
+    if (sweepAfterGrab) {
+        const bool cancelled = in.manualLift || in.abort || in.scorePressed || in.liftButtonMode ||
+                               robot::lift.isBlocked() || robot::lift.isFaulted();
+        if (cancelled) sweepAfterGrab = false;
+        else if (!grabbing) {  // the push is over and the rise is starting: sweep now
+            sweepAfterGrab = false;
+            autoIntakeStart = pros::millis();
+        }
     }
     if (autoIntakeStart != 0) {
         // Done when the arm is clear of the floor; cancelled by anything that abandons the rise -- the
@@ -97,7 +121,8 @@ void tick(const Inputs& in) {
     // intakeIn()/intakeOut() land in the same place. Then L2's auto-outtake (so a score always ejects),
     // then L1's auto-intake -- they can never both be active (one needs the claw empty and rising, the
     // other a pin held and descending) -- then stop. ONE intake.set() call, the single writer decision.
-    if (in.intakeRequest != Intake::Mode::STOP) robot::intake.set(in.intakeRequest, in.intakePower);
+    if (grabbing) robot::intake.set(Intake::Mode::STOP);  // the grab push beats every other input
+    else if (in.intakeRequest != Intake::Mode::STOP) robot::intake.set(in.intakeRequest, in.intakePower);
     else if (screen::autoOuttake) robot::intake.set(Intake::Mode::OUT, config::L2_OUTTAKE_PCT / 100.0);
     else if (screen::autoIntake) robot::intake.set(Intake::Mode::IN);
     else robot::intake.set(Intake::Mode::STOP);
@@ -106,7 +131,11 @@ void tick(const Inputs& in) {
     // the jaws already shut, and the moment they open the stack is a few millimetres away. Claw's own
     // re-arm rule (wait for a clear reading) already covers the aftermath; this covers the press
     // itself, explicitly, every tick. See include/subsystems/autoclamp_detector.hpp.
-    robot::claw.setInhibit(robot::scoring.isScoreDescent() || robot::lift.isScoring());
+    // ...and for the WHOLE two-press score cycle (Lift::isScoreCycle(): press 1, the hold above the
+    // stack, press 2's descent, until the arm is seated). Without that, the autoclamp would re-arm as
+    // soon as the arm rose clear of the pin and then grab it again on the way back down past it.
+    robot::claw.setInhibit(robot::scoring.isScoreDescent() || robot::lift.isScoring() ||
+                           robot::lift.isScoreCycle());
 
     robot::claw.update();
     robot::scoring.update();

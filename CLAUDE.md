@@ -166,8 +166,14 @@ through, then judges once by position — within `LIFT_SEAT_ZERO_DEG` of 0 is pl
 `SEAT(short)` — rather than the earlier conditional version (seat early once "close and still", else
 give up after a budget), which `LIFT_SEAT_MAX_MS`/`LIFT_SEAT_STILL_*` belonged to and are now gone. →
 SEAT (a constant `LIFT_SEAT_MV`, −1500 pressed into the hard stop, so it does not park above the frame
-and cannot bounce). An **L2 score** is
-a third kind: `Lift::startScore()` (records `scoreStartPos_`, the arm's position right then, fixed for
+and cannot bounce). A **grab** (L1 from the INTAKE handoff, and `auton::grab()`) is a third kind: `Lift::startGrab()` presses the
+arm DOWN open-loop at `L1_GRAB_PUSH_PCT` (40%), raises `needsClawGrip()` at `L1_GRAB_CLOSE_AT_MS` (200 ms)
+for **Scoring** to shut the jaws, keeps pressing until both `L1_GRAB_PUSH_MS` (300) and the jaws'
+`CLAW_CLOSE_TIME_MS` are satisfied (~350 ms total), then HOLDS where it ended — L1 commands the rise
+afterwards, `auton::grab()` simply does not. The intake is forced STOPped for the whole push in
+`periodic::tick()`, and L1's floor sweep is deferred to the rise. It is refused while homing (the caller
+falls back to the old close-then-rise). An **L2 score** is
+a fourth kind, and it is now TWO PRESSES: `Lift::startScore()` (records `scoreStartPos_`, the arm's position right then, fixed for
 the whole score) → PRESS (push the pin onto the stack with the jaws **shut**, capped at
 `L2_PRESS_MAX_MV`, 7000 mV — raised from 5000, see loaded-claw note below) → contact, decided by
 `subsystems::ContactDetector` **OR** forced by `L2_AUTO_RELEASE_DEG` (32°, corrected 2026-10-02 to be
@@ -180,8 +186,17 @@ raises `needsClawRelease()`, shown as `REL(32)` for the travel rule or `REL(floo
 fallback; **Scoring** opens the claw, the lift never touches a cylinder) → the freed check (gated on
 `clawReleased_` before honoring `L2_RELEASE_FLOOR_DEG`'s own safety-net role here too, so a PRESS-side
 floor release landing exactly on that height can never race Scoring out of ever seeing
-`needsClawRelease()`) → UNSTK up `L2_UNSTICK_UP_DEG` and retry if the claw is caught → the descent
-above at `L2_RETURN_SPEED_PCT`. **The detector's rule, learned the hard way:** never threshold against
+`needsClawRelease()`) → UNSTK up `L2_UNSTICK_UP_DEG` and retry if the claw is caught → a further `L2_POST_RELEASE_PUSH_MS` (100 ms) of pressing
+so the jaws slide clear → **a RISE of `L2_CLEAR_RISE_DEG` (20°) above wherever it stopped, held there
+indefinitely** (`SCORED UP`). **That is the end of press 1: there is no automatic descent any more**, because
+the driver asked to be able to drive away with the claw above the pins. **Press 2** (L2 again, or B, or
+`auton::scoreReturn()`) is `Lift::startScoreReturn()`: the descent above at `L2_RETURN_SPEED_PCT`, FINAL, SEAT.
+**The held +20° is a deliberate, user-requested hold that press 2 resolves into a real seat — it is NOT the
+banned "parks a few degrees above the bottom instead of seating" design**, which was a trip to the BOTTOM that
+failed to seat and had no second step. Do not "fix" it. The clear rise is only ever reached through the FREED
+check, so it can never drag a pin the claw is still hooked on; UNSTK and `SCORE STUCK` are unchanged. The
+claw's autoclamp is inhibited for the whole cycle (`Lift::isScoreCycle()`, press 1 → the hold → press 2 →
+seated) so the pin just released cannot be re-grabbed on the way back down. **The detector's rule, learned the hard way:** never threshold against
 the *nominal command* — the first version did, and could never fire, because this six-bar often cannot
 make the commanded descent speed at all (the arm swings up and *back*, so gravity resists the descent
 over much of the arc and the press cap limits the push). Every signal is measured against a **learned

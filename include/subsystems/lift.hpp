@@ -647,6 +647,7 @@ class Lift {
     int seatTempTick_ = 0;          // temperature is only read every 50th SEAT tick
     bool seatShort_ = false;        // this SEAT ended FINAL's forcing window still above LIFT_SEAT_ZERO_DEG
     std::uint32_t seatStillSince_ = 0;  // when the seated arm was first seen still (0 = moving)
+    std::uint32_t finalSteadySince_ = 0;  // when FINAL first saw the arm at 0 AND still (0 = not yet)
     int restWakes_ = 0;             // how many times REST has had to re-seat a creeping arm this command
 
     // settling (PARK / REST)

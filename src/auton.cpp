@@ -173,6 +173,7 @@ void liftTo(double degrees, bool precise) {
 void liftTo(Level level) { liftTo(heightOf(level)); }
 void liftToIntake() { liftTo(preset::INTAKE, true); }
 void liftToMatchload() { liftTo(preset::MATCHLOAD); }
+void liftToFirstScore() { liftTo(preset::FIRST_SCORE); }
 void liftToFrontToggle() {
     AUTON_LOCK;
     robot::scoring.reset();
@@ -217,6 +218,20 @@ void liftPushFor(int ms, double percent) {
     liftPushStop();
 }
 
+void liftPushUp(double percent) {
+    AUTON_LOCK;
+    robot::scoring.reset();  // same reason as liftPush(): the macro must stop re-issuing a height
+    if (percent < 0.0) percent = -percent;  // a magnitude; up is the only direction
+    if (percent > 100.0) percent = 100.0;
+    robot::lift.driverPower(percent / 100.0);  // positive = up, the same path the D-pad feeds
+}
+
+void liftPushUpFor(int ms, double percent) {
+    liftPushUp(percent);
+    wait(ms);
+    liftPushStop();
+}
+
 bool waitLift(int timeoutMs) {
     return waitLiftUntil([] { return robot::lift.isSettled(); }, timeoutMs);
 }
@@ -241,6 +256,8 @@ bool liftDownAndWait(int timeoutMs) {
 }
 
 bool liftToFrontToggleAndWait(int timeoutMs) { return liftToAndWait(preset::FRONT_TOGGLE, timeoutMs); }
+
+bool liftToFirstScoreAndWait(int timeoutMs) { return liftToAndWait(preset::FIRST_SCORE, timeoutMs); }
 
 bool liftDownFastAndWait(int timeoutMs) {
     liftDownFast();

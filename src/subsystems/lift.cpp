@@ -77,6 +77,7 @@ void Lift::zero() {
     clampRise_ = clampRiseRequest_ = false;
     seatHot_ = false;
     seatStillSince_ = 0;
+    finalSteadySince_ = 0;
     restWakes_ = 0;
     parkMv_ = 0.0;
     parkTimeout_ = false;
@@ -436,6 +437,7 @@ const char* Lift::activePresetName() const {
     if (goal_ == preset::INTAKE) return "INTAKE";
     if (goal_ == preset::MATCHLOAD) return "MATCHLOAD";
     if (goal_ == preset::FRONT_TOGGLE) return "FRONT TOGGLE";
+    if (goal_ == preset::FIRST_SCORE) return "FIRST SCORE";
     if (goal_ == preset::MAX) return "MAX";
     static const char* const kLevelNames[preset::STACK_LEVEL_COUNT] = {"STACK 1", "STACK 2", "STACK 3", "STACK 4",
                                                                         "STACK 5"};
@@ -667,7 +669,8 @@ void Lift::enterDescend(std::uint32_t now, double position, double topPct, doubl
 
 void Lift::enterFinal(std::uint32_t now) {
     phase_ = Phase::FINAL;
-    phaseStart_ = now;  // FINAL's own clock -- it forces for exactly LIFT_FINAL_FORCE_MS from here
+    finalSteadySince_ = 0;  // "has it been at 0 and still?" starts fresh for this attempt
+    phaseStart_ = now;  // FINAL's own clock -- LIFT_FINAL_FORCE_MS minimum, LIFT_FINAL_MAX_MS cap
     stallStart_ = 0;
     descentRef_ = std::max(-velocity_, 0.0);  // ramp on from whatever DESCEND already had it doing
     velI_ = std::clamp(gravityMv_, -static_cast<double>(config::LIFT_FINAL_MAX_MV),
@@ -970,6 +973,13 @@ void Lift::startScoreReturn() {
     returnRequest_ = true;  // one-shot: tells setTarget() this is press 2, so the cycle flag survives
     descendRequest_ = false;
     returnFast_ = true;     // brain/trace: RETURN
+    // ...and ask for the FAST descent's RAMP. At L2_RETURN_SPEED_PCT = 110 (~165 deg/s) the normal 1200
+    // deg/s^2 ramp cannot shed enough speed inside the 14 -> 3 deg approach zone -- it needs 10.5 deg of
+    // the 11 available just to reach the 45 deg/s cruise, leaving nothing in which to slow to FINAL's
+    // handover, so the arm would arrive at the floor still carrying real speed. The fast ramp (2000)
+    // does it in 6.3 deg. The bands themselves are overridden below; this one-shot is only here for the
+    // ramp, which enterDescend() does not take as an argument. See L2_RETURN_SPEED_PCT in config.hpp.
+    fastRequest_ = true;
     setTarget(config::lift_preset::DOWN);
     // setTarget() picked the config descent bands; press 2 is the FAST run home, so re-enter with
     // L2_RETURN_SPEED_PCT for both fast bands (the slow zone, FINAL and SEAT are untouched).
@@ -1227,12 +1237,35 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
             blocked_ = true;
             enterHold(now, position);  // hold where it stopped, never push into the jam
         }
-    } else if (phase_ == Phase::FINAL && now - phaseStart_ >= static_cast<std::uint32_t>(config::LIFT_FINAL_FORCE_MS)) {
-        // TIME-BASED, ON PURPOSE: force at LIFT_FINAL_DEG_PER_S/LIFT_FINAL_MAX_MV for the whole window
-        // regardless of how settled the arm looks partway through, then judge by POSITION alone, once,
-        // right here -- within LIFT_SEAT_ZERO_DEG of 0 is a true SEAT, anything more is SEAT(short) (a
-        // genuine jam, not just friction; LIFT_SEAT_MV still holds it down either way).
-        enterSeat(now, position > config::LIFT_SEAT_ZERO_DEG);
+    } else if (phase_ == Phase::FINAL) {
+        // FORCE DOWN UNTIL THE ARM IS REALLY AT 0 -- the driver's 2026-10-03 request for the auton reset:
+        // "needs to constant apply down so its in that position until rotation reads steady around 0".
+        //
+        // LIFT_FINAL_FORCE_MS is a MINIMUM, not the window. It cannot seat before that has elapsed no
+        // matter how settled the arm looks (a friction stall a few degrees short looks perfectly still,
+        // which is the whole reason this phase stopped trusting stillness in the first place). After it,
+        // the phase keeps forcing until the position really is within LIFT_SEAT_ZERO_DEG of 0 AND has
+        // been steady there for LIFT_FINAL_STEADY_MS -- or until LIFT_FINAL_MAX_MS, the backstop, which
+        // hands over as SEAT(short) so the driver can see it never got there.
+        //
+        // WHY THIS IS NOT THE DESIGN CLAUDE.md BANS. That one was CONDITIONAL IN THE OTHER DIRECTION: it
+        // could exit EARLY the moment the arm looked "close and still", so a stall short of the stop was
+        // declared SEAT and only the weak LIFT_SEAT_MV was ever applied again -- the arm parked above the
+        // frame. This version can only ever exit LATE. A stall short of 0 no longer ends the phase at
+        // all; it keeps getting LIFT_FINAL_MAX_MV of push until it either moves or the cap gives up on it.
+        const bool forcedLongEnough =
+            now - phaseStart_ >= static_cast<std::uint32_t>(config::LIFT_FINAL_FORCE_MS);
+        const bool atZero = std::fabs(position) <= config::LIFT_SEAT_ZERO_DEG;
+        if (atZero && std::fabs(velocity_) <= config::LIFT_FINAL_STEADY_DEG_PER_S) {
+            if (finalSteadySince_ == 0) finalSteadySince_ = now;
+        } else {
+            finalSteadySince_ = 0;  // moved, or drifted back out of the band: the window restarts
+        }
+        const bool steadyAtZero =
+            finalSteadySince_ != 0 &&
+            now - finalSteadySince_ >= static_cast<std::uint32_t>(config::LIFT_FINAL_STEADY_MS);
+        const bool capped = now - phaseStart_ >= static_cast<std::uint32_t>(config::LIFT_FINAL_MAX_MS);
+        if (capped || (forcedLongEnough && steadyAtZero)) enterSeat(now, !atZero);
     }
 
     // --- output ---

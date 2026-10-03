@@ -118,6 +118,24 @@ inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covere
 // constant rather than STACK_LEVELS[0] (31.0), which it is near: the two are tuned for different jobs
 // and must be able to move apart.
 inline constexpr double FRONT_TOGGLE = 30.0;                 // TUNE: arm degrees
+// FIRST SCORE: a low "just off the floor" height for putting the FIRST pin down, where there is no stack
+// under it yet. The driver, 2026-10-03: "we also need a slightly lift up state for our first pin score,
+// we are doing level 1 rn but should be like 9 deg up" -- STACK_LEVELS[0] (31.0) is a whole stack's worth
+// too high for a pin that is going onto bare floor.
+// ITS OWN CONSTANT, not a STACK_LEVELS entry, because it is not a stack level: nothing stacks on top of
+// it and it is tuned for clearing the floor, not for landing on a tower.
+// READ THIS BEFORE SCORING FROM IT WITH L2. At 9 deg the L2 sensing scorer cannot sense anything: the
+// press starts BELOW L2_RELEASE_FLOOR_DEG (10), so the floor rule fires on the very first PRESS tick and
+// the jaws open immediately (`REL(floor)` on the brain). That is not a bug and not worth "fixing" by
+// lowering the floor -- there is only 9 deg of travel available, which is not enough to detect a landing
+// in. For the first pin either accept that (it is then simply "lower to 9 and let go", which is what
+// scoring onto bare floor IS), or skip the scorer and do it explicitly:
+//     auton::liftToFirstScoreAndWait();
+//     auton::clawOpen();
+//     auton::liftPushFor(300);   // press down while the jaws clear the pin
+// It is deliberately kept clear of lift_preset::INTAKE (6.1) by more than the half-degree window
+// setTarget() uses to auto-promote a goal to PRECISE, so this stays an ordinary, fast position move.
+inline constexpr double FIRST_SCORE = 9.0;                   // TUNE: arm degrees (driver, 2026-10-03)
 // L1 taps: tap 1 -> level 1, tap 2 -> level 2 ... tap 5 -> level 5 (stays at 5, the top). One entry
 // per pin-stack height.
 //
@@ -356,7 +374,12 @@ inline constexpr int LIFT_MOVE_TIMEOUT_MS = 2500;            // TUNE
 //     more room to decelerate.
 //   The whole descent takes too long: raise LIFT_DESCENT_MID_PCT, lower LIFT_DESCENT_SLOW_ZONE_DEG, or
 //     raise LIFT_DESCENT_SLOW_PCT (the approach cruise itself).
-inline constexpr double LIFT_DESCENT_TOP_PCT = 80.0;         // TUNE: ~120 deg/s
+// RAISED 80 -> 95 (2026-10-03, the driver: the auton resets "need more speed/power to go down"). The
+// top band is the one that runs while the arm is high and gravity is helping least, so it is where the
+// time actually goes. MID was already 95, so the two fast bands are now the same speed and the descent
+// is effectively one fast run down to LIFT_DESCENT_SLOW_ZONE_DEG -- the ramp sizing below was already
+// computed for entering the slow zone at MID's ~142 deg/s, so nothing downstream had to change.
+inline constexpr double LIFT_DESCENT_TOP_PCT = 95.0;         // TUNE: ~142 deg/s (was 80)
 inline constexpr double LIFT_DESCENT_MID_PCT = 95.0;         // TUNE: ~142 deg/s
 inline constexpr double LIFT_DESCENT_SLOW_PCT = 30.0;        // TUNE: ~45 deg/s, the approach cruise (was 12% / 18 deg/s)
 inline constexpr double LIFT_DESCENT_SLOW_ZONE_DEG = 14.0;   // TUNE: approach zone starts this many deg above 0 (was 20)
@@ -440,13 +463,39 @@ inline constexpr float LIFT_SEAT_MV = -1500.0f;              // TUNE: constant d
 // un-seating (see LIFT_SEAT_UNSEAT_DEG below) -- was a separate constant (LIFT_SEAT_DETECT_DEG, 6 deg)
 // before the 2026-10-02 retune moved the whole handover down to 3 so the fast bands run longer.
 inline constexpr double LIFT_FINAL_START_DEG = 3.0;          // TUNE: hand DESCEND over to FINAL this close to 0
-inline constexpr double LIFT_FINAL_DEG_PER_S = 12.0;         // TUNE: constant creep speed for the last stretch
-inline constexpr float LIFT_FINAL_MAX_MV = 5000.0f;          // TUNE: magnitude, downward authority during FINAL
+inline constexpr double LIFT_FINAL_DEG_PER_S = 20.0;         // TUNE: constant creep speed for the last stretch (was 12)
+// RAISED 5000 -> 7000 (2026-10-03). The driver's reset complaint was "more speed/power to go down to
+// reset", and this is the "power" half: FINAL is the only phase with real authority below
+// LIFT_FINAL_START_DEG, and 5000 mV was not always enough to push the last couple of degrees through a
+// cup caught in the intake or plain six-bar/chain friction -- which is exactly what SEAT(short) means.
+// 7000 is the same cap L2_PRESS_MAX_MV uses to press a pin onto a stack without crumpling it, so it is a
+// force this mechanism is already known to survive; it is still well under DESCEND's full 12000.
+inline constexpr float LIFT_FINAL_MAX_MV = 7000.0f;          // TUNE: magnitude, downward authority during FINAL (was 5000)
 // FINAL forces at the above speed/authority for exactly this long, then hands to SEAT regardless of
 // where it ended up (see LIFT_SEAT_ZERO_DEG for how that is judged). ~1.2 deg of this 1.5 s is normally
 // spent just closing the remaining 3 deg at LIFT_FINAL_DEG_PER_S; the rest is pure forcing time against
 // resistance.
 inline constexpr int LIFT_FINAL_FORCE_MS = 1500;             // TUNE: "a second or two" of forcing, per the user
+// ...AND THEN IT KEEPS GOING UNTIL THE ARM IS REALLY AT 0 (2026-10-03). The driver: the reset "needs to
+// constant apply down so its in that position until rotation reads steady around 0". So
+// LIFT_FINAL_FORCE_MS is now a MINIMUM, not the whole window: once it has elapsed, FINAL carries on
+// forcing until the position is within LIFT_SEAT_ZERO_DEG of 0 AND the arm has been still for
+// LIFT_FINAL_STEADY_MS -- or until LIFT_FINAL_MAX_MS, the backstop, which hands over as SEAT(short).
+//
+// THIS IS STRICTLY MORE FORCING THAN BEFORE, AND THAT IS THE POINT -- read this before "simplifying" it.
+// CLAUDE.md bans an earlier CONDITIONAL version of this handover, and it is worth being precise about
+// why this is not that: the banned one could exit EARLY, the moment the arm looked "close and still",
+// and a friction stall three degrees short looks exactly like that -- so it declared SEAT above the
+// frame. This one can only ever exit LATE. It cannot seat before LIFT_FINAL_FORCE_MS no matter how
+// settled the arm looks, and after that the only thing that ends it early is being genuinely AT zero.
+// A stall short of 0 no longer ends the phase at all; it just keeps getting pushed until the cap.
+//   Still shows SEAT(short) with the arm visibly short: raise LIFT_FINAL_MAX_MV first, then
+//     LIFT_FINAL_MAX_MS. Check the ROT line really does read ~0 at the hard stop.
+//   The reset takes too long before the route moves on: lower LIFT_FINAL_MAX_MS (it is the only thing
+//     that can make this phase long), or raise LIFT_FINAL_STEADY_DEG_PER_S so "still" is easier to meet.
+inline constexpr double LIFT_FINAL_STEADY_DEG_PER_S = 3.0;   // TUNE: what counts as "steady" (mirrors REST's)
+inline constexpr int LIFT_FINAL_STEADY_MS = 100;             // TUNE: ...held this long, within SEAT_ZERO of 0
+inline constexpr int LIFT_FINAL_MAX_MS = 3000;               // TUNE: hard cap on the whole forcing phase
 inline constexpr double LIFT_SEAT_ZERO_DEG = 1.0;            // TUNE: within this of 0 when FINAL ends = true SEAT
 // If something knocks a seated arm this far back up above LIFT_FINAL_START_DEG, the descent restarts
 // (DESCEND, then FINAL again) and walks it back down rather than leaving it hanging.
@@ -577,6 +626,18 @@ inline constexpr double LIFT_MANUAL_DOWN_PCT = 50.0;         // TUNE: D-pad Down
 //   It lifts the back of the robot / stalls the motors warm: LOWER it. 40% is 4800 mV, the same force
 //     L1_GRAB_PUSH_PCT uses, and it is open-loop, so nothing tapers it off at the bottom.
 inline constexpr double AUTON_LIFT_PUSH_PCT = 40.0;          // TUNE: % of LIFT_MAX_MV, downward
+// ...and the same thing UPWARD (auton::liftPushUp() / liftPushUpFor()), for the driver's first-pin nudge.
+// THIS IS THE TRANSLATION OF THEIR OLD-LIBRARY LINES, which were:
+//     liftMotors.move(50);  pros::delay(300);  liftMotors.move(0);
+// move() took -127..127, so 50 there is 50/127 = 39.4% of full volts -- hence 40 here, and
+// `auton::liftPushUpFor(300)` is those three lines exactly, in this codebase's units and through the one
+// code path that owns the lift motors.
+// WORTH KNOWING BEFORE CHOOSING IT: a timed open-loop push is not repeatable. How far the arm actually
+// travels in 300 ms depends on battery voltage, whether a pin is held, and where in the six-bar's arc it
+// starts -- a fresh battery and an empty claw go visibly further than a flat one with a pin. If what is
+// wanted is "end up 9 degrees up", lift_preset::FIRST_SCORE + auton::liftToFirstScore() lands there
+// repeatably instead. This is here because it is what the driver already knows works.
+inline constexpr double AUTON_LIFT_PUSH_UP_PCT = 40.0;       // TUNE: % of LIFT_MAX_MV, upward (old move(50))
 
 // --- Clamped-mode R1 / R2 lift (see src/main.cpp and README "Driver guide") --
 // While the claw is CLAMPED on a pin, R1/R2 stop being intake/extake and become lift up/down.
@@ -1305,7 +1366,15 @@ inline constexpr int SCORING_SETTLE_WAIT_MS = 3000;          // TUNE
 // The run home on PRESS 2, once the claw is free: % of free speed for the top and middle bands of the
 // ordinary descent (the slow final zone and the SEAT are unchanged, so it still cannot slam or bounce).
 //   "Don't hesitate to be going down faster than we currently are going when we are done scoring."
-inline constexpr double L2_RETURN_SPEED_PCT = 95.0;          // TUNE
+// RAISED 95 -> 110 (2026-10-03, same driver request as LIFT_DESCENT_TOP_PCT: the resets need more speed).
+// Over 100% is not a speed the arm can reach -- it is how you say "do not hold back", i.e. let the
+// velocity loop saturate at its full downward authority. It also now runs on the FAST descent's ramp
+// (LIFT_FAST_DESCENT_RAMP_DEG_PER_S2, 2000) rather than the normal 1200, which is NOT optional at this
+// speed: decelerating from ~165 deg/s to the 45 deg/s approach cruise takes (165^2 - 45^2) / (2 * 1200) =
+// 10.5 deg at the old ramp -- nearly the whole 14 -> 3 deg approach zone, leaving nothing in which to
+// slow to FINAL's handover -- but only 6.3 deg at 2000, which leaves a real cruise before the floor.
+// See startScoreReturn() in lift.cpp, and the same arithmetic spelled out on LIFT_FAST_DESCENT_*.
+inline constexpr double L2_RETURN_SPEED_PCT = 110.0;         // TUNE (was 95)
 
 // ---------------------------------------------------------------------------
 // Autonomous — the auton API and its tick. See include/auton.hpp, include/periodic.hpp.

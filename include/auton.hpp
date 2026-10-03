@@ -115,6 +115,20 @@ void liftToMatchload();
 /** The front-toggle height (config::lift_preset::FRONT_TOGGLE, 30 deg): an ordinary position move.
  *  Non-blocking. */
 void liftToFrontToggle();
+/**
+ * THE FIRST-PIN SCORE HEIGHT (config::lift_preset::FIRST_SCORE, 9 deg): a low "just off the floor" lift
+ * for putting the first pin down, where there is no stack under it yet and stack level 1 (31 deg) is far
+ * too high. An ordinary, fast position move -- non-blocking.
+ *
+ * DO NOT EXPECT auton::score() TO SENSE ANYTHING FROM HERE. 9 deg is below L2_RELEASE_FLOOR_DEG (10), so
+ * the scorer's floor rule fires on its very first press tick and the jaws just open (`REL(floor)`).
+ * There is only 9 deg of travel to work with, which is not enough to detect a landing in, so that is the
+ * honest outcome rather than a bug. For the first pin, do it explicitly instead:
+ *     auton::liftToFirstScoreAndWait();
+ *     auton::clawOpen();
+ *     auton::liftPushFor(300);   // keep pressing down so the jaws slide clear of the pin
+ */
+void liftToFirstScore();
 /** The trip to the bottom: the banded descent that ends SEATED on the hard stop, the same one L2's
  *  run home, B and R2 use. Non-blocking. */
 void liftDown();
@@ -164,6 +178,27 @@ void liftPushStop();
 /** liftPush() + wait(ms) + liftPushStop(), the one-liner form. BLOCKS for ms. */
 void liftPushFor(int ms, double percent = config::AUTON_LIFT_PUSH_PCT);
 
+/**
+ * THE SAME THING UPWARD -- a brief open-loop nudge UP, at config::AUTON_LIFT_PUSH_UP_PCT (40%).
+ *
+ * This is the direct translation of the driver's old-library lines:
+ *     liftMotors.move(50);  pros::delay(300);  liftMotors.move(0);
+ * becomes
+ *     auton::liftPushUpFor(300);
+ * (move() was on the -127..127 scale, so 50 there is ~39% of volts -- see AUTON_LIFT_PUSH_UP_PCT.)
+ * Same path, same rules as liftPush(): plain voltage through Lift::driverPower(), it cancels any target
+ * and the Scoring macro, liftPushStop() brake-holds where the arm is, auton::end() releases it, and
+ * `percent` is a magnitude -- the direction is always UP.
+ *
+ * PREFER liftToFirstScore() IF WHAT YOU WANT IS A HEIGHT. A timed open-loop push lands wherever battery
+ * voltage, the load in the claw and the arc put it that run; a commanded height lands on the height.
+ * This exists because it is the behaviour the driver already has confidence in.
+ */
+void liftPushUp(double percent = config::AUTON_LIFT_PUSH_UP_PCT);
+/** liftPushUp() + wait(ms) + liftPushStop(). BLOCKS for ms. `liftPushUpFor(300)` is the old
+ *  move(50)/delay(300)/move(0) in one call. */
+void liftPushUpFor(int ms, double percent = config::AUTON_LIFT_PUSH_UP_PCT);
+
 /** Block until the lift arrives (HOLD at a level, or SEAT at the bottom). True = arrived; false =
  *  BLOCKED, FAULT, or the timeout. Returns false immediately if no target is active. */
 bool waitLift(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
@@ -179,6 +214,8 @@ bool liftToIntakeAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 bool liftDownAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 /** liftToFrontToggle() + waitLift(). */
 bool liftToFrontToggleAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+/** liftToFirstScore() + waitLift(). */
+bool liftToFirstScoreAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 /** liftDownFast() + waitLiftSeated() -- including any queued wait for the toggle height. */
 bool liftDownFastAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 

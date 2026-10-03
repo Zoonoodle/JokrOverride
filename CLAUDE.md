@@ -228,10 +228,16 @@ dedicated closed-loop push at a constant `LIFT_FINAL_DEG_PER_S` with up to `LIFT
 downward authority — more force than SEAT's hold, so it can push through a cup caught in the intake or
 plain six-bar/chain friction a few degrees short of 0, which is what "stopped under 6°" used to get
 mistaken for seated). **FINAL is TIME-BASED (2026-10-02 retune):** it forces at that speed/authority for
-a fixed `LIFT_FINAL_FORCE_MS` (1.5 s, "a second or two") regardless of how settled it looks partway
-through, then judges once by position — within `LIFT_SEAT_ZERO_DEG` of 0 is plain SEAT, anything more is
-`SEAT(short)` — rather than the earlier conditional version (seat early once "close and still", else
-give up after a budget), which `LIFT_SEAT_MAX_MS`/`LIFT_SEAT_STILL_*` belonged to and are now gone. →
+at least `LIFT_FINAL_FORCE_MS` (1.5 s, "a second or two") regardless of how settled it looks partway
+through, **and then keeps forcing until the arm really IS at 0** (2026-10-03, the driver: the reset "needs
+to constant apply down so its in that position until rotation reads steady around 0"): within
+`LIFT_SEAT_ZERO_DEG` of 0 AND still for `LIFT_FINAL_STEADY_MS` → plain SEAT; `LIFT_FINAL_MAX_MS` reached
+without that → `SEAT(short)`, a real jam rather than impatience. **This is NOT the banned conditional
+version** (`LIFT_SEAT_MAX_MS`/`LIFT_SEAT_STILL_*`, now gone): that one could exit EARLY the moment the arm
+looked "close and still", so a friction stall short of the stop got declared SEAT and parked above the
+frame. This one can only exit LATE — the time window is a MINIMUM, and a stall short of 0 no longer ends
+the phase at all, it just keeps getting `LIFT_FINAL_MAX_MV` (raised 5000 → 7000) of push until it moves or
+the cap gives up. →
 SEAT (a constant `LIFT_SEAT_MV`, −1500 pressed into the hard stop, so it does not park above the frame
 and cannot bounce) → **REST** (`LIFT_REST_AFTER_MS`, 300 ms, after the seated arm goes still: brake mode
 **COAST** and 0 V — no PID, no seat push, not even the firmware hold, so the motors draw nothing. The
@@ -268,7 +274,9 @@ floor release landing exactly on that height can never race Scoring out of ever 
 so the jaws slide clear → **a RISE of `L2_CLEAR_RISE_DEG` (20°) above wherever it stopped, held there
 indefinitely** (`SCORED UP`). **That is the end of press 1: there is no automatic descent any more**, because
 the driver asked to be able to drive away with the claw above the pins. **Press 2** (L2 again, or B, or
-`auton::scoreReturn()`) is `Lift::startScoreReturn()`: the descent above at `L2_RETURN_SPEED_PCT`, FINAL, SEAT.
+`auton::scoreReturn()`) is `Lift::startScoreReturn()`: the descent above at `L2_RETURN_SPEED_PCT` (110 since
+2026-10-03, on the FAST 2000 deg/s² ramp — at 110% the normal 1200 ramp cannot shed enough speed inside the
+approach zone), FINAL, SEAT.
 **The held +20° is a deliberate, user-requested hold that press 2 resolves into a real seat — it is NOT the
 banned "parks a few degrees above the bottom instead of seating" design**, which was a trip to the BOTTOM that
 failed to seat and had no second step. Do not "fix" it. The clear rise is only ever reached through the FREED
@@ -316,6 +324,18 @@ brake-holds where the arm is and never resumes an old target). It is LATCHED lik
 `auton::end()` releases it, so a route that forgets — or one the field switch cuts off mid-push — cannot
 hand driver control an arm still leaning on the floor. `liftPush()`'s `pct` is a magnitude; down is the
 only direction.
+
+**The first-pin score height.** `lift_preset::FIRST_SCORE` (9°, TUNE) + `auton::liftToFirstScore()`, the
+driver's 2026-10-03 "slightly lift up state for our first pin score… should be like 9 deg up" — stack
+level 1 (31°) is a whole stack too high for a pin going onto bare floor. Its own constant, deliberately
+not a `STACK_LEVELS` entry (nothing stacks on it) and deliberately clear of `INTAKE` (6.1) by more than
+setTarget()'s half-degree precise-promotion window. **`score()` cannot sense from 9°** — it is below
+`L2_RELEASE_FLOOR_DEG` (10), so the floor rule releases on the first PRESS tick; that is honest, not a bug
+(9° of travel cannot contain a landing detection), so the first pin is scored explicitly:
+`liftToFirstScoreAndWait(); clawOpen(); liftPushFor(300);`. `auton::liftPushUp()` /
+`liftPushUpFor(ms)` is the open-loop mirror of `liftPush()` and the literal translation of the driver's old
+`liftMotors.move(50); delay(300); liftMotors.move(0);` — but a timed push is not repeatable across battery
+states, so prefer the height.
 
 **Keep the README port map and button map in sync** whenever a port or a button changes.
 

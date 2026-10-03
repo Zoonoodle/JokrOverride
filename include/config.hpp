@@ -117,7 +117,7 @@ inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covere
 // then comes straight back down from (fast -- see auton::liftDownFast()). Deliberately its OWN
 // constant rather than STACK_LEVELS[0] (31.0), which it is near: the two are tuned for different jobs
 // and must be able to move apart.
-inline constexpr double FRONT_TOGGLE = 38.0;                 // TUNE: arm degrees (was 30; +8 by the driver 2026-10-03)
+inline constexpr double FRONT_TOGGLE = 45.0;                 // TUNE: arm degrees (30 -> 38 -> 45, driver 2026-10-03)
 // FIRST SCORE: a low "just off the floor" height for putting the FIRST pin down, where there is no stack
 // under it yet. The driver, 2026-10-03: "we also need a slightly lift up state for our first pin score,
 // we are doing level 1 rn but should be like 9 deg up" -- STACK_LEVELS[0] (31.0) is a whole stack's worth
@@ -455,9 +455,11 @@ inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 1200.0;// TUNE: how quick
 // REST, with ONLY the two fast bands raised; the approach cruise below LIFT_DESCENT_SLOW_ZONE_DEG,
 // FINAL's forced push and SEAT/REST are byte-for-byte the normal ones, so it still slows near 0 and
 // settles exactly the same way.
-// From the toggle height (38 deg, raised from 30 on 2026-10-03) BOTH fast bands still run: the mid
-// boundary is SLOW_ZONE + 0.5 * (38 - SLOW_ZONE) = 26, so TOP covers 38 -> 26 and MID covers 26 -> 14.
-// The boundary is a FRACTION of the travel, so raising the toggle height needed no change here.
+// From the toggle height (45 deg; it went 30 -> 38 -> 45 on 2026-10-03) BOTH fast bands still run: the
+// mid boundary is SLOW_ZONE + 0.5 * (45 - SLOW_ZONE) = 29.5, so TOP covers 45 -> 29.5 and MID covers
+// 29.5 -> 14. The boundary is a FRACTION of the travel, which is why raising the toggle height twice has
+// needed no change here either time -- and the taller the toggle gets, the MORE room both fast bands
+// have, so this only ever gets safer in that direction.
 // 120% of free speed is not a speed the arm can reach on its own -- it is how you say "do not hold
 // back": the velocity loop saturates at its full 12000 mV of downward authority, which is the
 // "forcefully" the driver asked for.

@@ -339,6 +339,20 @@ class Lift {
      */
     void moveTo(double degrees, int timeoutMs = config::LIFT_DEFAULT_TIMEOUT_MS, bool waitUntilSettled = false);
 
+    /**
+     * THE FAST TRIP TO THE BOTTOM (the front toggle's way back down; auton::liftDownFast()). Exactly
+     * the banded DESCEND -> FINAL -> SEAT -> REST of setTarget(DOWN), but with LIFT_FAST_DESCENT_*
+     * for the two FAST bands only -- the approach cruise, FINAL and the seat are unchanged, so it
+     * still slows near 0 and settles the same way. Never blocks.
+     *
+     * QUEUED BEHIND A TOGGLE RISE: if a move to lift_preset::FRONT_TOGGLE is still climbing when this
+     * is called, the descent WAITS until the arm is within LIFT_FRONT_TOGGLE_REACH_DEG of that height
+     * (or LIFT_FRONT_TOGGLE_MAX_WAIT_MS runs out) and then starts immediately -- the arm touches the
+     * toggle height and turns straight around rather than settling on it. The route is never blocked;
+     * the waiting happens inside this task. Brain: `TOGGLE ^`.
+     */
+    void descendFast();
+
     /** Stop chasing whatever target is active and brake-hold right where the lift is. Does not
      *  resume any previous target later -- same "no old target" rule as releasing the manual override. */
     void cancel();
@@ -631,6 +645,10 @@ class Lift {
     bool descendHeld_ = false;  // R2 held, from descendManual()
     bool descendOwned_ = false; // this descent was started by descendManual(), so releasing R2 ends it
     bool descendRequest_ = false;  // one-shot: the next setTarget() came from descendManual()
+    bool fastRequest_ = false;     // one-shot: the next setTarget() is the FAST descent
+    bool descentFast_ = false;     // this descent is using the LIFT_FAST_DESCENT_* bands and ramp
+    bool toggleWait_ = false;      // a fast descent is queued behind a FRONT_TOGGLE rise
+    std::uint32_t toggleWaitStart_ = 0;
 
     // the grab push
     bool grab_ = false;

@@ -199,6 +199,8 @@ auton::scoreAndWait();
 | `auton::liftTo(deg, precise=false)` | an arbitrary height, clamped to `0..lift_preset::MAX` |
 | `auton::liftTo(Level::ONE..FIVE)` | a stack level (`config::lift_preset::STACK_LEVELS`) |
 | `auton::liftToIntake()` | the precise INTAKE handoff height (tight tolerance, slow final approach, never seats) |
+| `auton::liftToFrontToggle()` / `liftToFrontToggleAndWait(ms)` | the front-toggle height, `lift_preset::FRONT_TOGGLE` (30°, its own constant -- deliberately *not* stack level 1 at 31°, so the two can be tuned apart). An ordinary position move |
+| `auton::liftDownFast()` / `liftDownFastAndWait(ms)` | the **fast** trip to the bottom -- the toggle's way back down. Same bands → `FINAL` → `SEAT` → `REST` as `liftDown()`, with only the two *fast* bands raised (`LIFT_FAST_DESCENT_TOP_PCT` 105 % vs 80, `_MID_PCT` 120 % vs 95) and a firmer ramp (2000 vs 1200 deg/s²). The approach cruise, `FINAL` and the seat are unchanged, so it still slows near 0 and settles. **Queued behind a toggle rise:** called while a `FRONT_TOGGLE` move is still climbing, it waits (inside the lift task, never blocking the route) until the arm *touches* the toggle height and turns straight around -- brain `TOGGLE ^`, then `DESC FAST` |
 | `auton::liftToMatchload()` | the MATCHLOAD height |
 | `auton::liftDown()` | the banded descent that ends **SEATED** on the hard stop (same as L2's run home, B, R2) |
 | `auton::liftStop()` | abandon the move and brake-hold here, **no target active**. The one call that leaves a passive hold -- for stopping a move, not for ending a routine |
@@ -620,6 +622,18 @@ assumes the one above is settled. **Start from the values in `config.hpp` -- the
      `LIFT_DESCENT_RAMP_DEG_PER_S2` further so it finishes braking with more margin before the zone ends
    - the whole descent is too slow → raise `LIFT_DESCENT_MID_PCT`, lower `LIFT_DESCENT_SLOW_ZONE_DEG`,
      or raise `LIFT_DESCENT_SLOW_PCT` (the approach cruise itself, 30%)
+7b. **The fast descent (`auton::liftDownFast()`, the front toggle's way down).** Only the two fast
+   bands and the ramp differ: `LIFT_FAST_DESCENT_TOP_PCT` (105 %, ~157 °/s, vs 80 %/120) and
+   `LIFT_FAST_DESCENT_MID_PCT` (120 %, ~180 °/s, vs 95 %/142), with
+   `LIFT_FAST_DESCENT_RAMP_DEG_PER_S2` 2000 vs 1200. 120 % of free speed is not a speed the arm can
+   reach -- it is how you tell the velocity loop not to hold back, so it pushes with its full
+   12 000 mV. From 30° both bands run (the mid boundary is 22°). Watch the `V` lines.
+   - it thumps into the approach zone or the floor → **lower `LIFT_FAST_DESCENT_MID_PCT` first**
+     (120 → 110), then raise the fast ramp. The two go together: decelerating v1 → 45 °/s needs
+     (v1² − 45²)/2a degrees and only ~11° of zone (14 → 3) is available
+   - it is not noticeably faster than a normal descent → raise `_MID_PCT`, and the ramp with it
+   - the approach cruise, `FINAL` and `SEAT`/`REST` are deliberately identical to the normal descent;
+     tune those in steps 8 / 8b, not here
 8. **Seating.** Below `LIFT_FINAL_START_DEG` (3°) the phase goes `V` → `Z` (`FINAL`, pushing with up to
    `LIFT_FINAL_MAX_MV` for a fixed `LIFT_FINAL_FORCE_MS`, 1.5 s) → `S` (`SEAT`, holding `LIFT_SEAT_MV`).
    `FINAL` no longer early-exits the moment it looks settled -- it forces the whole window on purpose,

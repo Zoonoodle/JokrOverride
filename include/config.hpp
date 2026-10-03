@@ -104,6 +104,11 @@ inline constexpr double DOWN = 0.0;                          // resting / start 
 // intake handoff, read the brain's LIFT line, and put that number here.
 inline constexpr double INTAKE = 1.1;                        // TODO(team): re-measure, see above (photo IMG_6089)
 inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covered by the reference photos yet
+// FRONT TOGGLE: the height the arm goes to at the start of the match route to flip the front toggle,
+// then comes straight back down from (fast -- see auton::liftDownFast()). Deliberately its OWN
+// constant rather than STACK_LEVELS[0] (31.0), which it is near: the two are tuned for different jobs
+// and must be able to move apart.
+inline constexpr double FRONT_TOGGLE = 30.0;                 // TUNE: arm degrees
 // L1 taps: tap 1 -> level 1, tap 2 -> level 2 ... tap 5 -> level 5 (stays at 5, the top). One entry
 // per pin-stack height.
 //
@@ -317,6 +322,39 @@ inline constexpr double LIFT_DESCENT_SLOW_PCT = 30.0;        // TUNE: ~45 deg/s,
 inline constexpr double LIFT_DESCENT_SLOW_ZONE_DEG = 14.0;   // TUNE: approach zone starts this many deg above 0 (was 20)
 inline constexpr double LIFT_DESCENT_MID_FRACTION = 0.5;     // TUNE: 0.5 = the mid band is the lower half of the fast travel
 inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 1200.0;// TUNE: how quickly the reference may change between bands (was 800)
+
+// --- The FAST descent (auton::liftDownFast(), the front toggle's trip back down) ---------------
+// "needs to go acautally fast and forcefully down to, but still slow when it approvhes our 0 and
+// settle, just a bit faster down than normal for toggle." Same banded DESCEND -> FINAL -> SEAT ->
+// REST, with ONLY the two fast bands raised; the approach cruise below LIFT_DESCENT_SLOW_ZONE_DEG,
+// FINAL's forced push and SEAT/REST are byte-for-byte the normal ones, so it still slows near 0 and
+// settles exactly the same way.
+// From the toggle height (30 deg) BOTH fast bands run: the mid boundary is
+// SLOW_ZONE + 0.5 * (30 - SLOW_ZONE) = 22, so TOP covers 30 -> 22 and MID covers 22 -> 14.
+// 120% of free speed is not a speed the arm can reach on its own -- it is how you say "do not hold
+// back": the velocity loop saturates at its full 12000 mV of downward authority, which is the
+// "forcefully" the driver asked for.
+inline constexpr double LIFT_FAST_DESCENT_TOP_PCT = 105.0;   // TUNE: ~157 deg/s (normal: 80 -> 120)
+inline constexpr double LIFT_FAST_DESCENT_MID_PCT = 120.0;   // TUNE: ~180 deg/s (normal: 95 -> 142)
+// AND A FIRMER RAMP, which is not optional at those speeds. Decelerating v1 -> v2 at rate a covers
+// (v1^2 - v2^2) / 2a degrees. Entering the approach zone at MID's ~180 deg/s and needing the 45 deg/s
+// cruise: at the NORMAL 1200 that takes (32400 - 2025) / 2400 = 12.7 deg -- more than the whole
+// 14 -> 3 deg zone, so the arm would still be doing 70+ deg/s when FINAL took over, right at the
+// floor. At 2000 it takes 7.6 deg, landing at about position 6.4 with ~3.4 deg of real cruise at
+// 45 deg/s before FINAL -- the same comfortable margin the normal descent was sized for.
+//   It thumps / arrives at the slow zone hot: LOWER LIFT_FAST_DESCENT_MID_PCT first (120 -> 110),
+//     then raise this ramp.
+//   It is not noticeably faster than a normal descent: raise LIFT_FAST_DESCENT_MID_PCT (and the ramp
+//     with it, by the sum above).
+inline constexpr double LIFT_FAST_DESCENT_RAMP_DEG_PER_S2 = 2000.0;  // TUNE (normal: 1200)
+// THE QUEUED TOGGLE. The route asks for the way down only 300 ms after the way up, which is less than
+// a 0 -> 30 deg rise takes, so a fast descent requested while a FRONT_TOGGLE rise is still climbing is
+// QUEUED rather than obeyed: the arm keeps rising until it is within LIFT_FRONT_TOGGLE_REACH_DEG of
+// the toggle height and then turns straight around -- it touches the height, it does not settle on it.
+// Shown as `TOGGLE ^` on the brain's LIFT line. If the rise never gets there (jammed, BLOCKED), it
+// descends anyway after LIFT_FRONT_TOGGLE_MAX_WAIT_MS rather than hanging on the way up.
+inline constexpr double LIFT_FRONT_TOGGLE_REACH_DEG = 2.0;   // TUNE: close enough to call it touched
+inline constexpr int LIFT_FRONT_TOGGLE_MAX_WAIT_MS = 1500;   // TUNE: then go down regardless
 
 // --- Seating on the hard stop (phases FINAL, then SEAT) ---------------------
 // The point of the final descent is that the arm does not STOP above the frame -- it keeps walking

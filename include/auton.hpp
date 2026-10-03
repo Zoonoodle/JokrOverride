@@ -112,9 +112,24 @@ void liftTo(Level level);
 void liftToIntake();
 /** Command the MATCHLOAD height. */
 void liftToMatchload();
+/** The front-toggle height (config::lift_preset::FRONT_TOGGLE, 30 deg): an ordinary position move.
+ *  Non-blocking. */
+void liftToFrontToggle();
 /** The trip to the bottom: the banded descent that ends SEATED on the hard stop, the same one L2's
  *  run home, B and R2 use. Non-blocking. */
 void liftDown();
+/**
+ * The FAST trip to the bottom -- the front toggle's way back down. The same banded descent, FINAL and
+ * SEAT/REST as liftDown(), with only the two fast bands raised (config::LIFT_FAST_DESCENT_*), so it
+ * comes down noticeably harder but still slows into the approach cruise and settles on the stop the
+ * normal way. Non-blocking.
+ *
+ * QUEUED BEHIND A TOGGLE RISE: called while a move to FRONT_TOGGLE is still climbing, it waits (inside
+ * the lift task, never blocking the route) until the arm TOUCHES the toggle height and then turns
+ * straight around -- so a route can ask for the way down a few hundred ms after the way up and still
+ * get a real toggle. Brain: `TOGGLE ^`, then `DESC FAST`.
+ */
+void liftDownFast();
 /** Abandon whatever the lift is doing and brake-hold right here, with NO target active. The one call
  *  in this header that leaves a passive hold -- use it to stop a move, not to end a routine. */
 void liftStop();
@@ -132,6 +147,10 @@ bool liftToAndWait(Level level, int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 bool liftToIntakeAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 /** liftDown() + waitLiftSeated(). True = really seated at the bottom. */
 bool liftDownAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+/** liftToFrontToggle() + waitLift(). */
+bool liftToFrontToggleAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
+/** liftDownFast() + waitLiftSeated() -- including any queued wait for the toggle height. */
+bool liftDownFastAndWait(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 
 /** Non-blocking status, for a routine that wants to drive while the arm moves. */
 double liftPosition();

@@ -72,6 +72,7 @@ void Lift::zero() {
     velI_ = 0.0;
     gravityMv_ = 0.0;
     descendHeld_ = descendOwned_ = descendRequest_ = false;
+    fastRequest_ = descentFast_ = toggleWait_ = false;
     seatHot_ = false;
     seatStillSince_ = 0;
     restWakes_ = 0;
@@ -255,6 +256,11 @@ void Lift::setTarget(double degrees, bool precise) {
     // a queued or ignored request can't leak into a later, unrelated move.
     const bool fromR2 = descendRequest_;
     descendRequest_ = false;
+    // ...and whether it is the FAST descent (the front toggle's way down).
+    const bool fromFast = fastRequest_;
+    fastRequest_ = false;
+    // Any deliberate new command cancels a fast descent that was queued behind a toggle rise.
+    toggleWait_ = false;
     const double clamped = std::clamp(degrees, config::lift_preset::DOWN, config::lift_preset::MAX);
     // INTAKE is always precise, wherever it is commanded from, so no call site can forget: it is the
     // one height that has to physically line up with the intake handoff (see LIFT_PRECISE_* in
@@ -321,6 +327,7 @@ void Lift::setTarget(double degrees, bool precise) {
 
     active_ = true;
     descendOwned_ = fromR2;
+    descentFast_ = fromFast;
     // A deliberate new command clears a latched runaway fault or a stall: the guards' job is to stop
     // the motion that was happening, not to brick every button until someone wiggles the D-pad. A real
     // wiring fault or jam simply re-trips on the next DRIVE, so nothing is lost.
@@ -336,8 +343,14 @@ void Lift::setTarget(double degrees, bool precise) {
     const double position = getPosition();
     if (descent_) {
         // R2's descent has its own, gentler top band; L2/B/auton use the config bands.
-        const double top = descendOwned_ ? config::R_LIFT_DOWN_PCT : config::LIFT_DESCENT_TOP_PCT;
-        const double mid = descendOwned_ ? config::R_LIFT_DOWN_PCT : config::LIFT_DESCENT_MID_PCT;
+        // R2's descent has its own gentler top band; the front toggle's has its own FASTER ones;
+        // everything else uses the config bands.
+        const double top = descendOwned_  ? config::R_LIFT_DOWN_PCT
+                           : descentFast_ ? config::LIFT_FAST_DESCENT_TOP_PCT
+                                          : config::LIFT_DESCENT_TOP_PCT;
+        const double mid = descendOwned_  ? config::R_LIFT_DOWN_PCT
+                           : descentFast_ ? config::LIFT_FAST_DESCENT_MID_PCT
+                                          : config::LIFT_DESCENT_MID_PCT;
         enterDescend(now, position, top, mid);
         return;
     }
@@ -359,7 +372,9 @@ void Lift::moveTo(double degrees, int timeoutMs, bool waitUntilSettled) {
 }
 
 void Lift::cancel() {
-    wakeMotors();  // never leave the motors coasting once nothing is commanding the lift
+    wakeMotors();
+    toggleWait_ = false;
+    fastRequest_ = false;  // never leave the motors coasting once nothing is commanding the lift
     active_ = false;
     blocked_ = false;
     stallStart_ = 0;
@@ -385,6 +400,7 @@ const char* Lift::activePresetName() const {
     if (goal_ == preset::DOWN) return "DOWN";
     if (goal_ == preset::INTAKE) return "INTAKE";
     if (goal_ == preset::MATCHLOAD) return "MATCHLOAD";
+    if (goal_ == preset::FRONT_TOGGLE) return "FRONT TOGGLE";
     if (goal_ == preset::MAX) return "MAX";
     static const char* const kLevelNames[preset::STACK_LEVEL_COUNT] = {"STACK 1", "STACK 2", "STACK 3", "STACK 4",
                                                                         "STACK 5"};
@@ -395,6 +411,9 @@ const char* Lift::activePresetName() const {
 
 const char* Lift::phaseName() const {
     if (!active_) return "";
+    // A fast descent queued behind a toggle rise: the arm is still going UP, on its way to touching
+    // the toggle height, and will turn around the moment it gets there.
+    if (toggleWait_) return "TOGGLE ^";
     switch (phase_) {
         case Phase::DRIVE: return "DRIVE";
         case Phase::BRAKE: return "BRAKE";
@@ -407,7 +426,9 @@ const char* Lift::phaseName() const {
             if (scoredAbove_) return "SCORED UP";
             return parkTimeout_ ? "PARK(t/o)" : "PARK";
         case Phase::REST: return "REST";
-        case Phase::DESCEND: return returnFast_ ? "RETURN" : "DESCEND";
+        case Phase::DESCEND:
+            if (returnFast_) return "RETURN";
+            return descentFast_ ? "DESC FAST" : "DESCEND";
         case Phase::FINAL: return "FINAL";
         case Phase::SEAT: return seatHot_ ? "SEAT(hot)" : (seatShort_ ? "SEAT(short)" : "SEAT");
         case Phase::PRESS: return "PRESS";
@@ -434,6 +455,23 @@ const char* Lift::phaseName() const {
 }
 
 void Lift::driverPower(double input) { manualPower_ = std::clamp(input, -1.0, 1.0); }
+
+void Lift::descendFast() {
+    // QUEUE BEHIND A TOGGLE RISE. The route asks for the way down barely 300 ms after the way up,
+    // which is less than a 0 -> 30 deg rise takes, so obeying immediately would turn the arm around
+    // short of the toggle height and the toggle would never flip. Wait for the arm to TOUCH the
+    // height instead -- not to settle on it -- and then go straight down.
+    const bool togglingUp = active_ && !descent_ && !score_ && !grab_ && !blocked_ && !faulted_ &&
+                            goal_ == config::lift_preset::FRONT_TOGGLE &&
+                            getPosition() < goal_ - config::LIFT_FRONT_TOGGLE_REACH_DEG;
+    if (togglingUp) {
+        toggleWait_ = true;
+        toggleWaitStart_ = pros::millis();
+        return;
+    }
+    fastRequest_ = true;
+    setTarget(config::lift_preset::DOWN);
+}
 
 void Lift::descendManual(bool held) {
     if (!held) {
@@ -1185,9 +1223,13 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
     }
 
     // DESCEND: ramp the banded reference and let the velocity loop track it. Closed loop on the
-    // MEASURED arm speed, so gravity plus the pin's weight cannot make the descent run away.
+    // MEASURED arm speed, so gravity plus the pin's weight cannot make the descent run away. The fast
+    // descent ramps harder (LIFT_FAST_DESCENT_RAMP_DEG_PER_S2) because it has much more speed to shed
+    // before the approach zone -- see the sizing arithmetic in config.hpp. FINAL deliberately keeps
+    // the normal ramp: it is unchanged in every mode.
     const double want = descentSpeed(position);
-    const double maxStep = config::LIFT_DESCENT_RAMP_DEG_PER_S2 * dt;
+    const double maxStep = (descentFast_ ? config::LIFT_FAST_DESCENT_RAMP_DEG_PER_S2
+                                         : config::LIFT_DESCENT_RAMP_DEG_PER_S2) * dt;
     descentRef_ += std::clamp(want - descentRef_, -maxStep, maxStep);
     lastVRef_ = -descentRef_;  // signed: down is negative
     const double mv = runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, config::LIFT_VEL_MAX_MV);
@@ -1280,6 +1322,20 @@ void Lift::update() {
         lastOutput_ = 0.0;
         trace(now, 'F', position, 0.0, false);
         return;
+    }
+
+    // 4b) A fast descent queued behind a FRONT_TOGGLE rise: start it the moment the arm TOUCHES the
+    //     height (not when it settles there), or if it has run out of time / given up trying.
+    if (toggleWait_) {
+        const bool reached = position >= goal_ - config::LIFT_FRONT_TOGGLE_REACH_DEG;
+        const bool timedOut =
+            now - toggleWaitStart_ >= static_cast<std::uint32_t>(config::LIFT_FRONT_TOGGLE_MAX_WAIT_MS);
+        const bool gaveUp = blocked_ || faulted_ || descent_ || score_ || grab_;
+        if (reached || timedOut || gaveUp) {
+            toggleWait_ = false;
+            descendFast();  // togglingUp is false now, so this starts the descent for real
+            return;         // the next tick runs it; one tick is nothing
+        }
     }
 
     // 5) The grab push (L1 at the handoff, auton::grab()): a constant downward force while the jaws

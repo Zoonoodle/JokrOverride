@@ -166,7 +166,14 @@ void liftTo(double degrees, bool precise) {
 void liftTo(Level level) { liftTo(heightOf(level)); }
 void liftToIntake() { liftTo(preset::INTAKE, true); }
 void liftToMatchload() { liftTo(preset::MATCHLOAD); }
+void liftToFrontToggle() { liftTo(preset::FRONT_TOGGLE); }
 void liftDown() { liftTo(preset::DOWN); }
+
+void liftDownFast() {
+    AUTON_LOCK;
+    robot::scoring.reset();  // a direct height command takes the macro out of the way first
+    robot::lift.descendFast();
+}
 
 void liftStop() {
     AUTON_LOCK;
@@ -194,6 +201,13 @@ bool liftToIntakeAndWait(int timeoutMs) { return liftToAndWait(preset::INTAKE, t
 
 bool liftDownAndWait(int timeoutMs) {
     liftDown();
+    return waitLiftSeated(timeoutMs);
+}
+
+bool liftToFrontToggleAndWait(int timeoutMs) { return liftToAndWait(preset::FRONT_TOGGLE, timeoutMs); }
+
+bool liftDownFastAndWait(int timeoutMs) {
+    liftDownFast();
     return waitLiftSeated(timeoutMs);
 }
 

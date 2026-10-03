@@ -141,11 +141,16 @@ void tick(const Inputs& in) {
     // the jaws already shut, and the moment they open the stack is a few millimetres away. Claw's own
     // re-arm rule (wait for a clear reading) already covers the aftermath; this covers the press
     // itself, explicitly, every tick. See include/subsystems/autoclamp_detector.hpp.
-    // ...and for the WHOLE two-press score cycle (Lift::isScoreCycle(): press 1, the hold above the
-    // stack, press 2's descent, until the arm is seated). Without that, the autoclamp would re-arm as
-    // soon as the arm rose clear of the pin and then grab it again on the way back down past it.
-    robot::claw.setInhibit(robot::scoring.isScoreDescent() || robot::lift.isScoring() ||
-                           robot::lift.isScoreCycle());
+    // THE INHIBIT ENDS WHEN PRESS 2 IS PRESSED, not when the arm seats (the driver, 2026-10-03: "from
+    // the moment the second l2 ... auto clamp should be back on, should not wait for that at all"), so
+    // Lift::isScoreCycle() -- which startScoreReturn() now clears -- is what bounds it, together with
+    // isScoring() for the press itself.
+    // NOTE Scoring::isScoreDescent() is deliberately NOT in here any more. It stays true through the
+    // RETURNING state, i.e. all of press 2's descent, so leaving it in would have kept the inhibit on for
+    // exactly the window the driver asked to have the autoclamp live in -- clearing the lift's own flag
+    // alone would have changed nothing. It is still the right signal for the auto-outtake window above,
+    // which DOES want to run through that descent, so the two uses have been split rather than merged.
+    robot::claw.setInhibit(robot::lift.isScoring() || robot::lift.isScoreCycle());
 
     // AT THE R1 INTAKE HANDOFF the autoclamp fires on the FIRST in-range reading rather than after the
     // ordinary AUTOCLAMP_CONFIRM_MS debounce -- the driver wants the pin gripped "at the instant it sees

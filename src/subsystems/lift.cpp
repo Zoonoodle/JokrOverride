@@ -84,7 +84,7 @@ void Lift::zero() {
     holdSettleSince_ = 0;
     idleStillSince_ = 0;
     score_ = returnFast_ = scoreStuck_ = releasedByTravel_ = releasedByFloor_ = false;
-    scoredAbove_ = scoreCycle_ = returnRequest_ = false;
+    scoredAbove_ = scoreCycle_ = false;
     grab_ = gripWanted_ = gripAcked_ = false;
     clawReleaseWanted_ = clawReleased_ = false;
     contact_.reset();
@@ -328,10 +328,12 @@ void Lift::setTarget(double degrees, bool precise) {
     // Leaving the two-press score cycle -- unless this IS press 2's run home, which startScoreReturn()
     // marks with the one-shot below. Everything else (L1, R1, B, a manual nudge) means the driver has
     // moved on, so the autoclamp may arm again.
-    const bool fromReturn = returnRequest_;
-    returnRequest_ = false;
+    // Any new height leaves the two-press score cycle, press 2's own run home included -- see
+    // startScoreReturn(), which now ends the cycle itself so the autoclamp is live for the whole descent
+    // rather than only once the arm has seated. (There used to be a returnRequest_ one-shot here whose
+    // only job was to keep the flag alive through press 2; it is gone with that behaviour.)
     scoredAbove_ = false;
-    if (!fromReturn) scoreCycle_ = false;
+    scoreCycle_ = false;
 
     // "Flying" = really in the middle of a position move, so moving the goal alone is enough (this is
     // what merges rapid L1 taps). Settled states -- HOLD, PARK, REST, SEAT -- and every special mode
@@ -427,7 +429,6 @@ void Lift::cancel() {
     grab_ = gripWanted_ = gripAcked_ = false;
     scoredAbove_ = false;
     scoreCycle_ = false;
-    returnRequest_ = false;
 }
 
 const char* Lift::activePresetName() const {
@@ -970,7 +971,21 @@ void Lift::endScoreClear(std::uint32_t now, double position) {
 void Lift::startScoreReturn() {
     const std::uint32_t now = pros::millis();
     const double position = getPosition();
-    returnRequest_ = true;  // one-shot: tells setTarget() this is press 2, so the cycle flag survives
+    // THE AUTOCLAMP COMES BACK ON THE INSTANT PRESS 2 STARTS -- it does NOT wait for the arm to seat.
+    // The driver, 2026-10-03: "from the moment the second l2, (so when it starts to move down back) auto
+    // clamp should be back on, should not wait for that at all, but the settle and movement still
+    // happens." So scoreCycle_ (what periodic::tick() turns into the autoclamp inhibit) ends here rather
+    // than in enterSeat(), and Claw::update()'s inhibit-falling-edge re-arm fires on this tick.
+    //
+    // WHAT THIS GIVES UP, deliberately. The cycle used to be held through press 2 so the pin just placed
+    // could not be re-grabbed as the arm descended past it. That guard is now the driver's job, and the
+    // two-press design is exactly what makes that reasonable: press 1 ends with the arm held clear ABOVE
+    // the stack precisely so the robot can drive away, and press 2 is pressed after it has. If press 2 is
+    // ever used while still standing over the stack, the pin can be re-grabbed on the way down.
+    // The lift cannot be FOUGHT by that, which is the part that would actually have been dangerous: a
+    // clamp during the descent raises the CLAMP_RISE_DEG hop request, and Scoring::handleClampEvent()
+    // refuses it while a lift move is in flight (hasActiveTarget() && !isSettled()), which a descent is.
+    scoreCycle_ = false;
     descendRequest_ = false;
     returnFast_ = true;     // brain/trace: RETURN
     // ...and ask for the FAST descent's RAMP. At L2_RETURN_SPEED_PCT = 110 (~165 deg/s) the normal 1200

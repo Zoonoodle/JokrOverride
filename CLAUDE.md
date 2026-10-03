@@ -313,8 +313,14 @@ approach zone), FINAL, SEAT.
 banned "parks a few degrees above the bottom instead of seating" design**, which was a trip to the BOTTOM that
 failed to seat and had no second step. Do not "fix" it. The clear rise is only ever reached through the FREED
 check, so it can never drag a pin the claw is still hooked on; UNSTK and `SCORE STUCK` are unchanged. The
-claw's autoclamp is inhibited for the whole cycle (`Lift::isScoreCycle()`, press 1 → the hold → press 2 →
-seated) so the pin just released cannot be re-grabbed on the way back down. **The detector's rule, learned the hard way:** never threshold against
+claw's autoclamp is inhibited for press 1 → the hold above the stack, and **comes back the instant press 2
+is PRESSED** (`startScoreReturn()` clears `scoreCycle_`; the driver's 2026-10-03 request "should not wait
+for that at all"), so press 2's descent runs with the autoclamp live. Two things made that work:
+`Scoring::isScoreDescent()` had to come OUT of `periodic::tick()`'s inhibit expression — it stays true
+through `RETURNING`, so clearing the lift's flag alone would have changed nothing — while staying in the
+auto-outtake window, which does want to run through that descent. And a clamp mid-descent cannot fight the
+lift, because `handleClampEvent()` refuses the `CLAMP_RISE_DEG` hop while a move is in flight. The risk it
+accepts: pressing 2 while still over the stack can re-grab the pin just placed. **The detector's rule, learned the hard way:** never threshold against
 the *nominal command* — the first version did, and could never fire, because this six-bar often cannot
 make the commanded descent speed at all (the arm swings up and *back*, so gravity resists the descent
 over much of the arc and the press cap limits the push). Every signal is measured against a **learned

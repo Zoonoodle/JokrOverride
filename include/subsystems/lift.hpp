@@ -480,9 +480,10 @@ class Lift {
      *  the state the brain shows as SCORED UP. Cleared by any new command, the manual override, or
      *  press 2. */
     bool isScoredAbove() const { return scoredAbove_; }
-    /** True for the WHOLE two-press score cycle: from press 1 until press 2 has seated the arm (or
-     *  anything else takes the lift over). The claw's autoclamp is inhibited while this is true, so
-     *  the pin that was just released cannot be re-grabbed on the way down. */
+    /** True from press 1 until press 2 is PRESSED (or anything else takes the lift over) -- NOT until
+     *  the arm seats. The claw's autoclamp is inhibited while this is true, so the pin cannot be
+     *  re-grabbed during the press or while the arm is held above the stack; press 2's descent runs with
+     *  the autoclamp live, by the driver's request (see startScoreReturn()). */
     bool isScoreCycle() const { return scoreCycle_; }
     /** True while a score sequence is running (PRESS / RELEASE / UNSTICK). */
     bool isScoring() const { return score_; }
@@ -669,8 +670,9 @@ class Lift {
     bool releasedByTravel_ = false;      // this RELEASE was forced by L2_AUTO_RELEASE_DEG's travel rule
     bool releasedByFloor_ = false;       // this RELEASE was forced by L2_RELEASE_FLOOR_DEG (low start)
     bool scoredAbove_ = false;           // press 1 finished: holding L2_CLEAR_RISE_DEG above the stack
-    bool scoreCycle_ = false;            // anywhere inside the two-press score (autoclamp inhibit)
-    bool returnRequest_ = false;         // one-shot: this setTarget() is press 2's run home
+    bool scoreCycle_ = false;            // press 1 + the hold above the stack (autoclamp inhibit). It
+                                          // ENDS when press 2 starts, not when the arm seats -- see
+                                          // startScoreReturn().
     bool clawReleaseWanted_ = false;     // the lift is asking Scoring to open the jaws
     bool clawReleased_ = false;          // Scoring acknowledged (clawReleaseDone())
     std::uint32_t clawReleasedAt_ = 0;

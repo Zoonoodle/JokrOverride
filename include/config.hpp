@@ -117,7 +117,7 @@ inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covere
 // then comes straight back down from (fast -- see auton::liftDownFast()). Deliberately its OWN
 // constant rather than STACK_LEVELS[0] (31.0), which it is near: the two are tuned for different jobs
 // and must be able to move apart.
-inline constexpr double FRONT_TOGGLE = 30.0;                 // TUNE: arm degrees
+inline constexpr double FRONT_TOGGLE = 38.0;                 // TUNE: arm degrees (was 30; +8 by the driver 2026-10-03)
 // FIRST SCORE: a low "just off the floor" height for putting the FIRST pin down, where there is no stack
 // under it yet. The driver, 2026-10-03: "we also need a slightly lift up state for our first pin score,
 // we are doing level 1 rn but should be like 9 deg up" -- STACK_LEVELS[0] (31.0) is a whole stack's worth
@@ -206,8 +206,12 @@ inline constexpr float LIFT_MAX_MV = 12000.0f;               // full battery vol
 // --- How fast a preset move cruises, as a % of the free speed above ---------
 //   Feels sluggish on a long rise: raise LIFT_UP_SPEED_PCT (100 is the hardware limit).
 //   Runs away / slams going down to a LOWER level: lower LIFT_DOWN_SPEED_PCT.
+// RAISED DOWN 60 -> 85 (2026-10-03: "each of our arm movements are just moving too slowly"). 60% capped
+// a downward POSITION move at 90 deg/s, which is most of why coming down the L1 ladder felt sluggish.
+// This is only the cap for a position move BETWEEN heights -- a trip to the bottom has its own
+// LIFT_DESCENT_*_PCT bands and is unaffected.
 inline constexpr double LIFT_UP_SPEED_PCT = 100.0;           // TUNE: cruise speed going up
-inline constexpr double LIFT_DOWN_SPEED_PCT = 60.0;          // TUNE: cruise speed going down (gravity helps, so less)
+inline constexpr double LIFT_DOWN_SPEED_PCT = 85.0;          // TUNE: cruise speed going down (was 60)
 
 // --- When it starts slowing down (the braking curve) ------------------------
 // The arm is never allowed to go faster than sqrt(2 * LIFT_DECEL_DEG_PER_S2 * d) with d = the degrees
@@ -224,7 +228,20 @@ inline constexpr double LIFT_DOWN_SPEED_PCT = 60.0;          // TUNE: cruise spe
 //   a = 1200 -> 9.4 + 5 = 14.4 deg. Half the move is full power. This is the value here.
 //   a = 2000 -> 5.6 + 5 = 10.6 deg, but 2000 deg/s^2 is more than the arm can actually do -- that was
 //                the original overshoot (3723ef2). 1200 is 40% less demanding than that.
-inline constexpr double LIFT_DECEL_DEG_PER_S2 = 1200.0;      // TUNE: how hard it brakes, arm deg/s^2
+// RAISED 1200 -> 1800 (2026-10-03). THIS IS THE MAIN "it moves too slowly" KNOB, because it decides how
+// much of a move is spent braking rather than at full voltage: braking starts 150^2/(2a) + zone degrees
+// out, which was 9.4 + 5 = 14.4 deg of every move and is now 6.25 + 4 = 10.25. On a 20 deg L1 ladder step
+// that is the difference between braking for most of the move and braking for half of it.
+// WHY THIS IS SAFE TO RAISE NOW, given config history says 2000 "is more than the arm can actually do":
+// that was 3723ef2, and it overshot for three reasons that have all since been fixed -- the velocity
+// estimate lagged a whole tick, enterBrake() seeded the loop with an UPWARD kick, and arrival handed a
+// still-moving arm to the firmware's stiff brake-hold. It is also corroborated from the other side: the
+// COARSE move already brakes at 2600 (LIFT_COARSE_DECEL_DEG_PER_S2) and the front toggle works, so the
+// arm tolerates late braking when a little overshoot is acceptable. 1800 sits between the two. And the
+// reported symptom was UNDERshoot, i.e. there was headroom here, not a deficit.
+//   It now OVERSHOOTS or rings on arrival: lower this first (1800 -> 1500 -> 1200), before touching
+//     anything else in this block. That is the one symptom this change can cause.
+inline constexpr double LIFT_DECEL_DEG_PER_S2 = 1800.0;      // TUNE: how hard it brakes, arm deg/s^2 (was 1200)
 
 // --- A COARSE move: speed over precision, overshoot allowed ------------------
 // For a height where only "get there quickly" matters and landing a few degrees past it costs
@@ -264,10 +281,18 @@ inline constexpr double LIFT_COARSE_TOLERANCE_DEG = 10.0;       // TUNE: arrived
 //     LIFT_APPROACH_MIN_DEG_PER_S; shrink LIFT_APPROACH_ZONE_DEG to start the crawl later.
 // At a = 1200 the braking curve is already down to 28 deg/s a third of a degree outside a 5 deg zone,
 // so the handover from braking into the crawl is seamless rather than a step.
-inline constexpr double LIFT_APPROACH_ZONE_DEG = 5.0;        // TUNE: where the crawl starts
-inline constexpr double LIFT_APPROACH_DEG_PER_S = 28.0;      // TUNE: fastest the crawl may be
-inline constexpr double LIFT_APPROACH_MIN_DEG_PER_S = 6.0;   // TUNE: slowest -- no exponential tail
-inline constexpr double LIFT_APPROACH_KP_PER_S = 6.0;        // TUNE: crawl speed per degree left (1/s)
+// ALL FOUR RETUNED FOR SPEED (2026-10-03: "moving too slowly rn and seem to undershoot"). The old
+// numbers walked the last 5 deg in at 28 deg/s tapering to 6, which is ~0.3 s of crawl on EVERY move and
+// is most of what "too slow" actually was. The floor going 6 -> 12 also attacks the UNDERSHOOT directly:
+// at 6 deg/s the arm was barely moving when arrival latched, so wherever it latched is where it stayed;
+// at 12 it still carries into the goal and the hold's damping absorbs the rest.
+//   Still too slow in the last few degrees: raise LIFT_APPROACH_KP_PER_S, then _MIN_DEG_PER_S.
+//   Now overshoots the goal: lower LIFT_APPROACH_DEG_PER_S, or raise LIFT_HOLD_KD (the anti-bounce
+//     term) -- and see the note on LIFT_DECEL_DEG_PER_S2 first, which is the bigger lever.
+inline constexpr double LIFT_APPROACH_ZONE_DEG = 4.0;        // TUNE: where the crawl starts (was 5)
+inline constexpr double LIFT_APPROACH_DEG_PER_S = 50.0;      // TUNE: fastest the crawl may be (was 28)
+inline constexpr double LIFT_APPROACH_MIN_DEG_PER_S = 12.0;  // TUNE: slowest -- no exponential tail (was 6)
+inline constexpr double LIFT_APPROACH_KP_PER_S = 10.0;       // TUNE: crawl speed per degree left (1/s) (was 6)
 
 // --- The velocity loop (phases BRAKE, APPROACH and DESCEND) -----------------
 // Everything that is "go at this speed" runs through this one PI loop on the MEASURED arm speed:
@@ -322,7 +347,12 @@ inline constexpr float LIFT_HOLD_MAX_MV = 7000.0f;           // TUNE: most the h
 // fine"), and the arm is simply left where it stopped instead of being argued with.
 //   Still creeps down out of the band over a few seconds: raise LIFT_HOLD_KI a little, NOT this.
 //   Visibly off the level: lower this (and LIFT_TOLERANCE_DEG with it).
-inline constexpr double LIFT_HOLD_DEADBAND_DEG = 4.0;        // TUNE: stack levels, MATCHLOAD, any custom height
+// NARROWED 4 -> 2.5 (2026-10-03), to attack the UNDERSHOOT. Inside this band the hold applies no position
+// correction at all, and PARK then freezes whatever voltage is holding it -- so the band is a hard floor
+// on how far off the arm can settle and stay. 4 deg of that was most of the visible "it stops short".
+//   It buzzes or twitches while holding: raise this back toward 4 (that is what it was for), or lower
+//     LIFT_HOLD_KP.
+inline constexpr double LIFT_HOLD_DEADBAND_DEG = 2.5;        // TUNE: stack levels, MATCHLOAD, any custom height (was 4)
 // INTAKE must still line up, so a PRECISE goal gets a tight band and keeps correcting right in.
 inline constexpr double LIFT_HOLD_PRECISE_DEADBAND_DEG = 0.5;  // TUNE: INTAKE only
 
@@ -344,8 +374,13 @@ inline constexpr double LIFT_HOLD_PRECISE_DEADBAND_DEG = 0.5;  // TUNE: INTAKE o
 //     lower LIFT_REENGAGE_DEG so the hold wakes sooner.
 //   It still oscillates: LOWER LIFT_SETTLE_TIMEOUT_MS and LIFT_PARK_CONFIRM_MS -- that parks sooner,
 //     i.e. less feedback for less time. This is the knob for "it still hunts".
-inline constexpr int LIFT_PARK_CONFIRM_MS = 150;             // TUNE: inside the band and slow for this long
-inline constexpr int LIFT_SETTLE_TIMEOUT_MS = 700;           // TUNE: ...or just hold this long, then park anyway
+// BOTH SHORTENED (2026-10-03: "we need quick timeout for position, so juist go there fast, and hold, even
+// if its a bit off"). This is that request, precisely: PARK is the "hold, even if it's a bit off" state --
+// a frozen constant voltage with no feedback -- so reaching it sooner is reaching "done" sooner.
+//   It parks visibly off the level: raise LIFT_SETTLE_TIMEOUT_MS so the active hold gets longer to pull
+//     in first (that is the trade being made here), or narrow LIFT_HOLD_DEADBAND_DEG further.
+inline constexpr int LIFT_PARK_CONFIRM_MS = 100;             // TUNE: inside the band and slow for this long (was 150)
+inline constexpr int LIFT_SETTLE_TIMEOUT_MS = 350;           // TUNE: ...or just hold this long, then park anyway (was 700)
 // Once parked, the hold only wakes up again if the arm has really moved away from where it parked (a
 // knock, or a slow sag the frozen voltage could not carry). Deliberately large: waking for anything
 // smaller is exactly the hunting this exists to stop.
@@ -358,7 +393,12 @@ inline constexpr int LIFT_PARK_COOLDOWN_MS = 300;            // TUNE
 // which at the braked profile is well under a second -- plus a wide margin, and it has to cover a
 // CLAMPING/pivot wait in front of the move too.
 //   A real long move gets cut short: raise it.
-inline constexpr int LIFT_MOVE_TIMEOUT_MS = 2500;            // TUNE
+// SHORTENED 2500 -> 1500 (2026-10-03, the "quick timeout for position"). Still comfortably longer than
+// any real move: the longest legitimate one is 0 -> the top level, 107 deg, which at the retuned profile
+// above is well under a second, and moveStart_ is set when the height is actually COMMANDED (Scoring's
+// CLAMPING wait happens before that, so this does not have to cover it).
+//   A real long move gets cut short and shows PARK(t/o): raise it.
+inline constexpr int LIFT_MOVE_TIMEOUT_MS = 1500;            // TUNE (was 2500)
 
 // --- The descent to the bottom (L2, B, auton DOWN, and R2 in clamped mode) --
 // Three speed bands on the way down, as % of the free speed, so the arm walks itself onto its hard
@@ -415,8 +455,9 @@ inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 1200.0;// TUNE: how quick
 // REST, with ONLY the two fast bands raised; the approach cruise below LIFT_DESCENT_SLOW_ZONE_DEG,
 // FINAL's forced push and SEAT/REST are byte-for-byte the normal ones, so it still slows near 0 and
 // settles exactly the same way.
-// From the toggle height (30 deg) BOTH fast bands run: the mid boundary is
-// SLOW_ZONE + 0.5 * (30 - SLOW_ZONE) = 22, so TOP covers 30 -> 22 and MID covers 22 -> 14.
+// From the toggle height (38 deg, raised from 30 on 2026-10-03) BOTH fast bands still run: the mid
+// boundary is SLOW_ZONE + 0.5 * (38 - SLOW_ZONE) = 26, so TOP covers 38 -> 26 and MID covers 26 -> 14.
+// The boundary is a FRACTION of the travel, so raising the toggle height needed no change here.
 // 120% of free speed is not a speed the arm can reach on its own -- it is how you say "do not hold
 // back": the velocity loop saturates at its full 12000 mV of downward authority, which is the
 // "forcefully" the driver asked for.
@@ -700,10 +741,21 @@ inline constexpr double LIFT_BOTTOM_GOAL_DEG = 5.0;          // TUNE
 // tolerance, and the hold's LIFT_HOLD_KD (90) then absorbs 12 deg/s as ~1080 mV of opposing voltage.
 //   Any bounce as it grabs the hold: raise LIFT_HOLD_KD first; lowering this to 8 is the second lever
 //   (gentler handover, slightly slower finish).
-inline constexpr double LIFT_STOPPED_DEG_PER_S = 12.0;       // TUNE
+// RAISED 12 -> 25 (2026-10-03), and this one is NOT optional: it must stay ABOVE
+// LIFT_APPROACH_MIN_DEG_PER_S (now 12) or arrival can never latch -- the crawl's own floor speed would
+// keep failing the test and every move would end on LIFT_APPROACH_TIMEOUT_MS instead. 25 also means a
+// move latches into the hold sooner and while still moving a little, which is exactly the "go there fast
+// and hold, even if its a bit off" that was asked for; LIFT_HOLD_KD (90) absorbs 25 deg/s as ~2250 mV of
+// opposing voltage, so the arrival is damped rather than bounced.
+//   Any bounce as it grabs the hold: raise LIFT_HOLD_KD first, then lower this (but never to or below
+//   LIFT_APPROACH_MIN_DEG_PER_S).
+inline constexpr double LIFT_STOPPED_DEG_PER_S = 25.0;       // TUNE: must stay > LIFT_APPROACH_MIN_DEG_PER_S (was 12)
 // The final approach can't take longer than this (arm fighting something, loop badly tuned): the lift
 // hands over to HOLD, whose position term then pulls in whatever is left, gently.
-inline constexpr int LIFT_APPROACH_TIMEOUT_MS = 1500;        // TUNE
+// SHORTENED 1500 -> 400 (2026-10-03). This is the backstop that stops the final crawl dragging on: it
+// hands over to the hold, whose position term pulls in whatever is left. With the retuned approach above
+// the crawl covers 4 deg in well under 200 ms, so 400 is a real backstop and not the normal path.
+inline constexpr int LIFT_APPROACH_TIMEOUT_MS = 400;         // TUNE (was 1500)
 // Velocity estimate: position differenced every tick, then this much of each new sample is blended in
 // (1.0 = raw, no filtering). The rotation sensor's quantisation is 0.0025 arm deg, i.e. 0.25 deg/s per
 // count, so there is nothing to filter out except task jitter -- and filtering costs LAG, which makes

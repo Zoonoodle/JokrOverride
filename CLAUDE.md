@@ -216,6 +216,20 @@ and runaway thresholds, and the `LIFT_TRACE` switch. `TODO(team): confirm` = nev
 robot. `TUNE` = a starting value, not a tuned one. Procedures are in `README.md` ("Lift direction
 check", "Lift speed and motion", "Tuning the lift", "Capturing a trace", "Tuning the claw positions").
 
+**Lift speed retune, 2026-10-03** ("each of our arm movements are just moving too slowly rn and seem to
+undershoot… we need quick timeout for position, so juist go there fast, and hold, even if its a bit off"):
+`LIFT_DECEL_DEG_PER_S2` 1200 → **1800** (the main lever — it sets how much of a move is braking rather
+than full voltage: 14.4° of every move became 10.25°), `LIFT_DOWN_SPEED_PCT` 60 → **85**, the approach
+tail `LIFT_APPROACH_DEG_PER_S`/`_MIN`/`_KP` 28/6/6 → **50/12/10** with the zone 5 → 4,
+`LIFT_STOPPED_DEG_PER_S` 12 → **25** (**must stay above `LIFT_APPROACH_MIN_DEG_PER_S` or arrival can never
+latch**), `LIFT_HOLD_DEADBAND_DEG` 4 → **2.5** (the band is a hard floor on how far off it can settle and
+stay — that was the visible undershoot), and the "quick timeout": `LIFT_SETTLE_TIMEOUT_MS` 700 → **350**,
+`LIFT_APPROACH_TIMEOUT_MS` 1500 → **400**, `LIFT_MOVE_TIMEOUT_MS` 2500 → **1500**. PARK *is* "hold even if
+it's a bit off", so reaching it sooner is reaching done sooner. **If it now overshoots or rings, lower
+`LIFT_DECEL_DEG_PER_S2` first** — that is the one symptom this can cause, and 1800 is defensible only
+because the three reasons 2000 rang in `3723ef2` (lagging velocity estimate, upward brake seed, firmware
+brake-hold on arrival) are all long fixed, and the COARSE move already brakes at 2600.
+
 **Lift motion, in one line:** there are two kinds of commanded move and one manual input, all inside
 the single 10 ms `Lift::update()`. A **position move** (everything except a trip to the bottom) is
 DRIVE (full ±12000 mV off the line, like the D-pad) → BRAKE (a velocity loop tracks

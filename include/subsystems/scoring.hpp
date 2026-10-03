@@ -190,6 +190,20 @@ class Scoring {
         return state_ == State::GRABBING ||
                (state_ == State::LIFT_SETTLE && pendingAfterSettle_ == State::GRABBING);
     }
+    /**
+     * TRUE WHILE THE MACRO IS AT (OR COMING DOWN INTO) THE R1 INTAKE HANDOFF. Two jobs, both read by
+     * periodic::tick() every tick:
+     *   - Claw::setIntakeMode(): the autoclamp fires on the FIRST in-range reading here
+     *     (config::AUTOCLAMP_INTAKE_CONFIRM_MS), instead of the ordinary 50 ms debounce;
+     *   - this class's own clamp handler: a clamp here gets the forced push DOWN
+     *     (config::AUTOCLAMP_INTAKE_PUSH_MS) instead of the CLAMP_RISE_DEG hop.
+     * MOVING counts only once the arm is actually inside the handoff zone, so an arm still up at a stack
+     * level on its way down is not yet "at the intake".
+     */
+    bool isAtIntakeHandoff() const {
+        return state_ == State::INTAKE_POS ||
+               (state_ == State::MOVING && moveDest_ == State::INTAKE_POS && inHandoffZone());
+    }
     /** True while an L2 score has been asked for but is still waiting for the lift to arrive. The
      *  score has NOT started yet -- nothing is pressing -- but it will. */
     bool isScorePending() const {
@@ -214,6 +228,18 @@ class Scoring {
      *  able to command the lift and the drivetrain together and then score, without the press ever
      *  starting from a moving arm. */
     void enterWhenSettled(State next);
+    /**
+     * THE CLAMP REACTION, run once at the top of every update() tick. It always CONSUMES
+     * Claw::takeClampEvent(), so an event can never queue, and then does exactly one of three things:
+     *   - at the R1 handoff, for a clamp the AUTOCLAMP made: Lift::startClampPush() -- force the claw
+     *     down onto the pin for config::AUTOCLAMP_INTAKE_PUSH_MS and hold there ("move down a bit");
+     *   - nothing at all, if the rise would fight something that already owns the lift (see the skip
+     *     list in the implementation) or if the clamp was a manual one at the handoff;
+     *   - otherwise: Lift::startClampRise() -- up config::CLAMP_RISE_DEG from wherever the arm is.
+     * It is the ONLY thing in the program that turns a clamp into lift motion, and it still goes through
+     * the lift's own command API -- it never writes a motor (CLAUDE.md safety rule 2).
+     */
+    void handleClampEvent();
     void moveTo(State destination);
     void command(double degrees, bool precise = false);
     /** True while the arm is inside the handoff zone, INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG. */

@@ -490,6 +490,37 @@ inline constexpr int L1_GRAB_PUSH_MS = 300;                  // TUNE
 // stop pushing after this long anyway rather than leaning on the pin for the rest of the match.
 inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 
+// --- THE CLAMP-RISE: every clamp lifts the arm a little, at once ------------
+// THE DRIVER'S REQUEST, 2026-10-03: "when we clamp whether manual in driver or auto clamp in auto, we
+// need the lift to automatically always move up just very slightly, move up to 5 degrees quick and
+// nice." So the instant the jaws shut -- A, the autoclamp, L2's at-the-bottom clamp toggle,
+// auton::clawGrip() -- Scoring sends the arm UP by this much.
+//
+// RELATIVE, NEVER ABSOLUTE, and never downward: the goal is (wherever the arm is now) + this, clamped
+// to lift_preset::MAX. Clamps normally happen with the arm at the bottom, which is where "move up to
+// 5 degrees" and "move up 5 degrees" are the same thing; starting from higher up it is still a 5 deg
+// hop, and from a height where +5 would exceed MAX it simply does not move. There is no path through
+// this that can command a LOWER height than the arm is already at.
+//
+// IT IS A PRECISE MOVE, and that is not a style choice. A 5 deg goal with the ordinary
+// LIFT_TOLERANCE_DEG (5) -- or setTargetFast()'s LIFT_COARSE_TOLERANCE_DEG (10) -- is already INSIDE
+// its own arrival band the moment it is commanded, so setTarget() would latch "arrived" on the first
+// tick and the arm would never move at all. Lift::startClampRise() therefore asks for the tight
+// LIFT_PRECISE_TOLERANCE_DEG (1) band. The whole 5 deg is inside LIFT_APPROACH_ZONE_DEG, so the move
+// is one short APPROACH walk-in at up to LIFT_APPROACH_DEG_PER_S (28 deg/s, i.e. ~0.2 s) with no
+// full-voltage section to overshoot and nothing to oscillate -- the "quick and nice" the driver asked
+// for. Brain's LIFT line: `CLAMP+5`.
+//
+// WHERE IT IS SKIPPED (see Scoring::handleClampEvent()): at the R1 INTAKE handoff (the driver's own
+// exception -- there the autoclamp pushes DOWN instead, see AUTOCLAMP_INTAKE_PUSH_MS), during an L1
+// GRAB push, anywhere inside an L2 score cycle, while a lift move is still in flight or a Scoring
+// macro owns the lift (a commanded move always wins), and for any clamp that happened while the robot
+// was DISABLED -- periodic::reset() drops the event at the start of each enabled mode, so
+// competition_initialize()'s pre-match grip can never queue a rise that fires when auton starts.
+//   It does not clear the thing it just gripped: raise it.
+//   It lifts far enough to matter / fights the next move: lower it (1-2 deg still moves, see above).
+inline constexpr double CLAMP_RISE_DEG = 5.0;                // TUNE: arm degrees, RELATIVE and upward only
+
 // --- Clamped-mode R1 / R2 lift (see src/main.cpp and README "Driver guide") --
 // While the claw is CLAMPED on a pin, R1/R2 stop being intake/extake and become lift up/down.
 // Up is plain voltage; down goes through the banded descent above (so it seats at the bottom exactly
@@ -712,12 +743,14 @@ inline constexpr bool CLAW_CLOSED_IS_ADI_HIGH = true;        // TODO(team): conf
 // down, it's not real" -- and it is implemented by subsystems::AutoclampDetector, which is PURE (no
 // sensor, no clock, no cylinder: see its header for the full rule and for why fresh samples are
 // counted separately from elapsed time). Every threshold it uses is here.
-inline constexpr int8_t CLAW_DISTANCE_PORT = 11;             // confirmed 2026-10-02: mounted in the claw
-// ON BY DEFAULT IN DRIVER (opcontrol() enables it every time it starts), OFF in auton (the routine
-// turns it on with auton::autoclamp(true)), and OFF at power-on -- CLAW_AUTOCLAMP_AT_START stays
-// false so a preloaded pin cannot fire a cylinder in initialize() (CLAUDE.md safety rule 1). Y still
-// toggles it in a match.
+inline constexpr int8_t CLAW_DISTANCE_PORT = 21;             // confirmed 2026-10-03 by the user (was 11)
+// ON BY DEFAULT IN DRIVER (opcontrol() enables it every time it starts) *AND IN AUTON* (autonomous()
+// enables it from AUTOCLAMP_ON_IN_AUTON, 2026-10-03 -- it used to be hard-off there and every route had
+// to remember auton::autoclamp(true)), and OFF at power-on -- CLAW_AUTOCLAMP_AT_START stays false so a
+// preloaded pin cannot fire a cylinder in initialize() (CLAUDE.md safety rule 1). Y still toggles it in
+// a match, and auton::autoclamp(false) still turns it off per route.
 inline constexpr bool AUTOCLAMP_ON_IN_DRIVER = true;
+inline constexpr bool AUTOCLAMP_ON_IN_AUTON = true;          // the driver's call, 2026-10-03 ("should work in auto")
 inline constexpr bool CLAW_AUTOCLAMP_AT_START = false;       // power-on / initialize(): never armed
 // THE TRIGGER. 15 mm is the user's starting point. NOTE: the V5 Distance Sensor's specified MINIMUM
 // range is about 20 mm, so 15 sits below the distance it is specified to measure reliably -- it
@@ -765,6 +798,41 @@ inline constexpr int AUTOCLAMP_MIN_CONFIDENCE = 0;           // TUNE
 // Minimum time after a release before the autoclamp may arm again, on top of the clear-reading rule
 // above (belt and braces: it also covers the jaws physically swinging open past the sensor).
 inline constexpr int CLAW_RELEASE_LOCKOUT_MS = 750;          // TUNE
+
+// --- AT THE R1 INTAKE HANDOFF: fire instantly, then force the claw DOWN ------
+// THE DRIVER'S REQUEST, 2026-10-03: "auto clamp should work in intake r1 tho too, and should move down
+// a bit, forcing way down when it sees the object and trigger claw at the instant it sees the object."
+// So while the macro is at (or coming down into) the INTAKE handoff -- Scoring::isAtIntakeHandoff(),
+// which periodic::tick() feeds to Claw::setIntakeMode() every tick -- the autoclamp swaps the ordinary
+// 50 ms / 2-sample confirm for these, and the clamp is followed by a forced push DOWN instead of the
+// CLAMP_RISE_DEG hop (there is nothing to lift clear of at the handoff; the pin has to be pressed into
+// the jaws, exactly as L1's GRAB does it).
+//
+// INSTANT, AND WHAT THAT COSTS. 0 ms + 1 fresh sample means the FIRST valid in-range reading fires the
+// cylinder -- no debounce at all. That is the point (a pin arriving on the intake is there for a few
+// tens of milliseconds, and a missed grab is a lost cycle), but it does give up exactly the spike
+// rejection the rest of the AUTOCLAMP block exists for: one junk reading at <= AUTOCLAMP_RANGE_MM
+// closes the jaws on nothing. It is only acceptable HERE because the arm is parked at the handoff with
+// the jaws empty and a false clamp costs one R1/A press to undo, not a dropped pin. The pure detector is
+// unchanged: these are just different Config numbers handed to the same code (see
+// autoclamp_detector.hpp), so a bad clamp at the handoff is tuned here and nowhere else.
+//   It clamps on nothing at the handoff: raise AUTOCLAMP_INTAKE_CONFIRM_MS (0 -> 20) first, then
+//     AUTOCLAMP_INTAKE_MIN_SAMPLES (1 -> 2). At 50/2 it is identical to the ordinary rule again.
+//   It misses pins the intake hands over: it cannot be made faster than this -- check the DIST line's
+//     CLAW value actually falls to <= AUTOCLAMP_RANGE_MM as a pin arrives, and raise the range if not.
+inline constexpr int AUTOCLAMP_INTAKE_CONFIRM_MS = 0;        // TUNE: 0 = the first in-range reading fires
+inline constexpr int AUTOCLAMP_INTAKE_MIN_SAMPLES = 1;       // TUNE: ...over one fresh sample, i.e. no debounce
+// THE PUSH. The same open-loop downward force L1's GRAB uses (L1_GRAB_PUSH_PCT, 40% of volts, see "The
+// L1 GRAB" in the lift block) for this long, and then the arm HOLDS wherever it ended -- the driver's
+// "move down a bit". The jaws are already shut by the time it starts, so unlike L1's grab there is no
+// grip request and no CLAW_CLOSE_TIME_MS wait inside it. The intake rollers are STOPPED for the whole
+// push, exactly as they are for L1's grab (Lift::isGrabbing() is what periodic::tick() reads, and the
+// push is a GRAB -- brain's LIFT line: `GRAB`), so they cannot drag the pin back out of the jaws.
+// A following L1 from the handoff still works normally: it sees the claw already clamped, skips the
+// close, pushes again, and rises to level 1.
+//   The pin gets pushed out / the intake is levered off the floor: LOWER it (or L1_GRAB_PUSH_PCT).
+//   The pin isn't seated in the jaws by the time the push ends: raise it.
+inline constexpr int AUTOCLAMP_INTAKE_PUSH_MS = 300;         // TUNE: ms of forced push down after the clamp
 
 // ---------------------------------------------------------------------------
 // Field-facing distance sensors (brain screen, and moveB's feedback)

@@ -437,12 +437,31 @@ class Lift {
     /** Start the push. Never blocks. Ends by HOLDING wherever the push finished -- whoever wants the
      *  arm to rise afterwards (Scoring's L1 path) commands a height then; auton::grab() just stays. */
     void startGrab();
+    /**
+     * THE AUTOCLAMP'S PUSH AT THE R1 HANDOFF (config::AUTOCLAMP_INTAKE_PUSH_MS). The same GRAB push as
+     * above -- same force, same single owner, same `GRAB` on the brain, same "the intake is STOPPED
+     * while isGrabbing()" in periodic::tick(), same instant cancel from the D-pad -- with two
+     * differences, because the jaws are ALREADY SHUT by the time it starts: it asks for no grip (
+     * needsClawGrip() stays false, nothing to wait on) and it runs for pushMs rather than
+     * L1_GRAB_PUSH_MS. It also ends by HOLDING where it stopped, which is the driver's "move down a
+     * bit". Refused while homing, exactly like startGrab().
+     */
+    void startClampPush(int pushMs);
+    /**
+     * THE CLAMP-RISE (config::CLAMP_RISE_DEG). An ordinary position move to `degrees`, flagged so the
+     * brain's LIFT line says `CLAMP+5` while it runs. It is PRECISE on purpose and that is load-bearing,
+     * not cosmetic: a 5 deg goal is already inside LIFT_TOLERANCE_DEG (5) -- let alone
+     * setTargetFast()'s LIFT_COARSE_TOLERANCE_DEG (10) -- so an ordinary setTarget() would latch
+     * "arrived" on the first tick and the arm would never move at all. See "THE CLAMP-RISE" in
+     * config.hpp. Scoring is the only caller; it decides when a clamp earns one.
+     */
+    void startClampRise(double degrees);
     /** True while the push is running. */
     bool isGrabbing() const { return grab_; }
     /** TRUE WHEN THE JAWS MUST CLOSE, right now (L1_GRAB_CLOSE_AT_MS into the push). The owner of the
      *  claw (Scoring) polls this, clamps, and calls clawGripDone(). The arm keeps pressing down
      *  meanwhile, and will not stop pressing until the jaws have had CLAW_CLOSE_TIME_MS. */
-    bool needsClawGrip() const { return grab_ && gripWanted_ && !gripAcked_; }
+    bool needsClawGrip() const { return grab_ && grabNeedsGrip_ && gripWanted_ && !gripAcked_; }
     /** Acknowledge needsClawGrip(): the jaws have been commanded shut as of now. */
     void clawGripDone();
 
@@ -536,6 +555,9 @@ class Lift {
     void updateScore(std::uint32_t now, double dt, double position);
     /** One tick of the grab push. Writes the motors and traces. */
     void updateGrab(std::uint32_t now, double dt, double position);
+    /** The one implementation behind startGrab() and startClampPush(): push DOWN for pushMs, asking
+     *  Scoring to shut the jaws partway through only if needsGrip. */
+    void startPush(int pushMs, bool needsGrip);
     /** End of L2 press 1: rise L2_CLEAR_RISE_DEG from here and latch a HOLD there. */
     void endScoreClear(std::uint32_t now, double position);
     /** Stall guard window: true once the arm has made less than LIFT_STALL_DEG of progress for
@@ -597,6 +619,8 @@ class Lift {
     bool precise_ = false;  // tight tolerance (INTAKE)
     bool coarse_ = false;   // speed over precision, overshoot allowed (the front toggle rise)
     bool coarseRequest_ = false;  // one-shot: the next setTarget() is a coarse move
+    bool clampRise_ = false;      // this move is the CLAMP_RISE_DEG hop (for the brain's CLAMP+5)
+    bool clampRiseRequest_ = false;  // one-shot: the next setTarget() is that hop
     bool descent_ = false;  // a trip to the bottom: the banded DESCEND -> SEAT, not a position move
     Phase phase_ = Phase::HOLD;
     std::uint32_t phaseStart_ = 0;
@@ -663,8 +687,10 @@ class Lift {
     bool toggleWait_ = false;      // a fast descent is queued behind a FRONT_TOGGLE rise
     std::uint32_t toggleWaitStart_ = 0;
 
-    // the grab push
+    // the grab push (L1 / auton::grab(), and the autoclamp's handoff push)
     bool grab_ = false;
+    bool grabNeedsGrip_ = true;   // false for startClampPush(): the jaws are already shut
+    int grabPushMs_ = 0;          // how long THIS push lasts (L1_GRAB_PUSH_MS, or the caller's)
     std::uint32_t grabStart_ = 0;
     bool gripWanted_ = false;   // the lift is asking Scoring to shut the jaws
     bool gripAcked_ = false;    // Scoring acknowledged (clawGripDone())

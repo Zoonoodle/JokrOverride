@@ -35,6 +35,23 @@ constexpr AutoclampDetector::Config kCfg{
     /*minConfidence*/ 0,
 };
 
+// THE R1 INTAKE HANDOFF variant: the same config with AUTOCLAMP_INTAKE_CONFIRM_MS / _MIN_SAMPLES in
+// place of the ordinary confirm window, which is exactly what Claw::detectorConfig() hands the detector
+// while Scoring::isAtIntakeHandoff() is true. The detector's own code is identical in both modes -- the
+// "fire the instant it sees the object" behaviour is purely these two numbers, which is why it can be
+// proved here instead of on the robot.
+constexpr AutoclampDetector::Config kIntakeCfg{
+    /*rangeMm*/ 15,
+    /*confirmMs*/ 0,
+    /*minSamples*/ 1,
+    /*staleGraceMs*/ 60,
+    /*rearmMm*/ 30,
+    /*rearmClearMs*/ 150,
+    /*maxValidMm*/ 9999,
+    /*minValidMm*/ 1,
+    /*minConfidence*/ 0,
+};
+
 int failures = 0;
 
 void check(bool ok, const std::string& what) {
@@ -173,6 +190,53 @@ int main() {
         d.reset(false);
         check(runStream(d, {9, 9, 9, 9, 9, 9}, 3) > 0, "fires once");
         check(d.state() == AutoclampDetector::State::WAIT_CLEAR, "...then disarms itself");
+    }
+
+    // --- the R1 HANDOFF mode: the FIRST valid in-range reading fires, with no debounce at all -------
+    {
+        AutoclampDetector d;
+        d.reset(false);  // armed at the handoff, empty jaws
+        check(d.step(1000, 9, 64, kIntakeCfg, false),
+              "handoff mode fires on the FIRST in-range reading");
+    }
+    {
+        // ...and that really is the intake config doing it, not the detector: the SAME single reading
+        // under the ordinary config must not fire.
+        AutoclampDetector d;
+        d.reset(false);
+        check(!d.step(1000, 9, 64, kCfg, false), "...the ordinary config does not fire on one reading");
+    }
+    {
+        // What instant firing costs, stated as a test so it is not a surprise later: one junk in-range
+        // sample is enough. That is the accepted trade at the handoff (see AUTOCLAMP_INTAKE_CONFIRM_MS
+        // in config.hpp) -- a false clamp there costs one button press, a missed pin costs a cycle.
+        AutoclampDetector d;
+        d.reset(false);
+        check(runStream(d, {400, 400}, 3) < 0, "handoff mode ignores out-of-range readings");
+        AutoclampDetector e;
+        e.reset(false);
+        check(!e.step(1000, 0, 64, kIntakeCfg, false), "...and a 0 (cannot measure) still never fires");
+        AutoclampDetector f;
+        f.reset(false);
+        check(!f.step(1000, -1, 64, kIntakeCfg, false), "...nor PROS_ERR / unplugged");
+    }
+    {
+        // The re-arm rule is untouched by the fast confirm: a just-released pin is still not re-grabbed.
+        AutoclampDetector d;
+        d.reset(true);
+        bool fired = false;
+        std::uint32_t now = 1000;
+        for (int i = 0; i < 30; ++i) {
+            fired = fired || d.step(now, 8, 64, kIntakeCfg, false);
+            now += 10;
+        }
+        check(!fired, "handoff mode still cannot re-grab a just-released pin");
+    }
+    {
+        // ...and so is the inhibit (an L2 score owning the claw).
+        AutoclampDetector d;
+        d.reset(false);
+        check(!d.step(1000, 9, 64, kIntakeCfg, true), "handoff mode still respects the inhibit");
     }
 
     std::printf("%s\n", failures == 0 ? "all ok" : "FAILURES");

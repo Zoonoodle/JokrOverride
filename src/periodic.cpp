@@ -41,6 +41,12 @@ void reset() {
     sweepAfterGrab = false;
     autoIntakeOn = false;
     autoOuttakeOn = false;
+    // ...and drop any clamp nobody has reacted to yet. The one that matters is
+    // competition_initialize()'s pre-match grip of the preloaded pin: that clamp happens while the robot
+    // is DISABLED, with no tick running, so without this it would still be sitting there when auton
+    // starts and the arm would hop CLAMP_RISE_DEG on the first tick of the match (CLAUDE.md safety
+    // rule 1 -- the field switch must not make the arm move for a clamp that happened before it).
+    robot::claw.clearClampEvent();
 }
 
 void tick(const Inputs& in) {
@@ -141,6 +147,14 @@ void tick(const Inputs& in) {
     robot::claw.setInhibit(robot::scoring.isScoreDescent() || robot::lift.isScoring() ||
                            robot::lift.isScoreCycle());
 
+    // AT THE R1 INTAKE HANDOFF the autoclamp fires on the FIRST in-range reading rather than after the
+    // ordinary AUTOCLAMP_CONFIRM_MS debounce -- the driver wants the pin gripped "at the instant it sees
+    // the object", and Scoring then pushes the claw down onto it instead of hopping up. Passed every
+    // tick, like the inhibit above, so it can never be left latched on.
+    robot::claw.setIntakeMode(robot::scoring.isAtIntakeHandoff());
+
+    // Claw::update() first, then Scoring::update(): a clamp the autoclamp makes this tick is therefore
+    // reacted to (the rise, or the handoff push) in the SAME tick rather than the next one.
     robot::claw.update();
     robot::scoring.update();
 }

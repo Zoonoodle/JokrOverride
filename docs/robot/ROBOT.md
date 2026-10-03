@@ -71,13 +71,18 @@ photos)**.
   hand, and the lift reads the sensor with `Rotation::get_position()` (multi-turn), not
   `get_angle()` (wraps at 360°) -- at 4:1 the sensor turns more than a full revolution over
   the arm's ~105° of travel, so a wrapping read would make the lift think it jumped position.
-- **Claw distance sensor (autoclamp)** — `CLAW_DISTANCE_PORT = 11`, **mounted in the claw and
-  confirmed 2026-10-02** (the photos further down predate it, which is why their `DIST` line
-  reads `WRONG DEVICE`). It looks out between the jaws and sees both pins and cups. The rule:
+- **Claw distance sensor (autoclamp)** — `CLAW_DISTANCE_PORT = 21`, **mounted in the claw and
+  confirmed 2026-10-03** (it was on port 11 until then; the photos further down predate both,
+  which is why their `DIST` line reads `WRONG DEVICE`). It looks out between the jaws and sees
+  both pins and cups. The rule:
   anything at or inside `AUTOCLAMP_RANGE_MM` (15, TUNE) for `AUTOCLAMP_CONFIRM_MS` (50) over at
   least `AUTOCLAMP_MIN_SAMPLES` (2) fresh readings closes the jaws. Off at power-on
   (`CLAW_AUTOCLAMP_AT_START = false`), **on** throughout driver control
-  (`AUTOCLAMP_ON_IN_DRIVER`, Y toggles it), off in auton until a route asks for it. See README
+  (`AUTOCLAMP_ON_IN_DRIVER`, Y toggles it) **and on by default in auton too**
+  (`AUTOCLAMP_ON_IN_AUTON`, 2026-10-03). Two things follow a clamp: the arm hops up
+  `CLAMP_RISE_DEG` (5°) everywhere, and **at the R1 intake handoff** it fires instantly instead
+  (`AUTOCLAMP_INTAKE_CONFIRM_MS` 0) and forces the claw *down* for `AUTOCLAMP_INTAKE_PUSH_MS`
+  (300 ms) rather than lifting. See README
   "Autoclamp" -- and note the V5 Distance Sensor's specified minimum range is about 20 mm, so
   the 15 mm threshold is the first number to question if it never fires.
 
@@ -245,7 +250,7 @@ I still could not count the cylinders on the end effector itself from these angl
 |---|---|---|
 | Claw cylinder | `config::CLAW_PISTON_PORT`, `robot::claw` (`subsystems::Claw`) | ADI **D** |
 | Pivot cylinder | `config::PIVOT_PISTON_PORT` (owned by `subsystems::Scoring`) | ADI **C** |
-| Claw distance sensor | `config::CLAW_DISTANCE_PORT` (mounted in the claw, 2026-10-02) | `11` |
+| Claw distance sensor | `config::CLAW_DISTANCE_PORT` (mounted in the claw; moved to 21 on 2026-10-03, was 11) | `21` |
 | Left / right / rear distance sensors | `config::LEFT_/RIGHT_/BACK_DISTANCE_PORT`, `robot::leftDistance` etc. | `15` / `19` / `14` |
 
 > **The two cylinders were on each other's ports in code until 2026-10-01.** The port the code

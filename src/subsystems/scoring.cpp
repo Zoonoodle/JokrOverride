@@ -90,6 +90,65 @@ void Scoring::enterWhenSettled(State next) {
     enter(State::LIFT_SETTLE);
 }
 
+// ---------------------------------------------------------------------------
+// THE CLAMP REACTION: every clamp either hops the arm up a little, or (at the R1 handoff) forces it
+// down onto the pin. See "THE CLAMP-RISE" and AUTOCLAMP_INTAKE_PUSH_MS in config.hpp.
+// ---------------------------------------------------------------------------
+void Scoring::handleClampEvent() {
+    // ALWAYS consume, even when nothing is going to be done with it. A stored event is an event that
+    // fires late -- and the one that matters is competition_initialize()'s pre-match grip, which happens
+    // while the robot is DISABLED. periodic::reset() clears it at the start of each enabled mode too;
+    // this is the second half of the same guarantee.
+    const Claw::ClampSource source = claw_.takeClampEvent();
+    if (source == Claw::ClampSource::NONE) return;
+
+    // AT THE R1 HANDOFF the driver's rule is the opposite of everywhere else: do not lift clear, press
+    // DOWN onto the pin the intake has just handed over, and stay there. Only for a clamp the autoclamp
+    // made -- a manual A press at the handoff is left alone entirely (no hop, no push), because the
+    // driver may well be gripping something by hand and L1 is the button that pushes.
+    if (isAtIntakeHandoff()) {
+        if (source != Claw::ClampSource::AUTOCLAMP) return;
+        if (lift_.isGrabbing() || lift_.isScoring() || lift_.isScoreCycle()) return;  // already pushing
+        lift_.startClampPush(config::AUTOCLAMP_INTAKE_PUSH_MS);
+        // Scoring stays in INTAKE_POS throughout, so a following L1 is still recognised as "from the
+        // handoff" and runs the ordinary GRAB (which finds the jaws already shut, skips the close,
+        // pushes, then rises to level 1). commanded_ is dropped because the arm is no longer at the
+        // height this class asked for.
+        commanded_ = -1.0;
+        return;
+    }
+
+    // A COMMANDED MOVE ALWAYS WINS. The hop must never fight the L1 grab's own push, an L2 score cycle,
+    // a lift move that is still in flight (an auton route's `clawGrip(); liftToFrontToggle();` is exactly
+    // that), or a macro state that is about to command a height of its own.
+    if (lift_.isGrabbing() || lift_.isScoring() || lift_.isScoreCycle() || lift_.isScoredAbove()) return;
+    if (lift_.hasActiveTarget() && !lift_.isSettled() && !lift_.isBlocked() && !lift_.isFaulted()) return;
+    switch (state_) {
+        case State::CLAMPING:     // about to rise to a stack level
+        case State::STACKING:
+        case State::LIFT_SETTLE:
+        case State::GRABBING:
+        case State::RELEASING:
+        case State::SCORED:
+        case State::RETURNING:
+        case State::MOVING:
+            return;
+        case State::IDLE:
+        case State::INTAKE_POS:      // unreachable: isAtIntakeHandoff() took it above
+        case State::MATCHLOAD_POS:
+            break;
+    }
+
+    // UP, by CLAMP_RISE_DEG, from wherever the arm is right now -- never down, and never past MAX.
+    const double here = lift_.getPosition();
+    const double goal = std::min(here + config::CLAMP_RISE_DEG, preset::MAX);
+    // The arm is already at (or above) the software top: there is no room to hop into, and MAX is BELOW
+    // an arm the D-pad has pushed past it. Do nothing rather than turn the hop into a descent.
+    if (goal <= here + 0.1) return;
+    commanded_ = -1.0;  // this class is not tracking the height any more; the hop is the lift's move
+    lift_.startClampRise(goal);
+}
+
 void Scoring::enter(State next) {
     state_ = next;
     stateStart_ = pros::millis();
@@ -326,6 +385,11 @@ void Scoring::update() {
     // enter() already ran for them -- they just wait here, and the state machine picks up the instant
     // homing ends, which also means their elapsed timers have already run down by then.
     if (lift_.isHoming()) return;
+
+    // EVERY CLAMP, from any source, reacted to in exactly one place -- before the state machine, so a
+    // transition made this tick cannot be seen half-done. It always consumes the event (see
+    // handleClampEvent()), so nothing queues.
+    handleClampEvent();
 
     const std::uint32_t elapsed = pros::millis() - stateStart_;
     switch (state_) {

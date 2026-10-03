@@ -21,11 +21,17 @@ Claw::Claw()
     detect_.reset(true);
 }
 
-/** The AUTOCLAMP_* block in config.hpp, in the pure detector's own words. */
-AutoclampDetector::Config Claw::detectorConfig() {
+/** The AUTOCLAMP_* block in config.hpp, in the pure detector's own words. The confirm window is the
+ *  one part that is not fixed: at the R1 INTAKE handoff (setIntakeMode()) it becomes the instant-fire
+ *  AUTOCLAMP_INTAKE_CONFIRM_MS / _MIN_SAMPLES pair, because the driver wants a pin arriving on the
+ *  intake gripped the moment it is seen. Everything else, and the detector's own code, is unchanged. */
+AutoclampDetector::Config Claw::detectorConfig() const {
+    const int confirmMs = intakeMode_ ? config::AUTOCLAMP_INTAKE_CONFIRM_MS : config::AUTOCLAMP_CONFIRM_MS;
+    const int minSamples =
+        intakeMode_ ? config::AUTOCLAMP_INTAKE_MIN_SAMPLES : config::AUTOCLAMP_MIN_SAMPLES;
     return AutoclampDetector::Config{
-        config::AUTOCLAMP_RANGE_MM,       config::AUTOCLAMP_CONFIRM_MS,
-        config::AUTOCLAMP_MIN_SAMPLES,    config::AUTOCLAMP_STALE_GRACE_MS,
+        config::AUTOCLAMP_RANGE_MM,       confirmMs,
+        minSamples,                       config::AUTOCLAMP_STALE_GRACE_MS,
         config::AUTOCLAMP_REARM_MM,       config::AUTOCLAMP_REARM_CLEAR_MS,
         config::AUTOCLAMP_MAX_VALID_MM,   config::AUTOCLAMP_MIN_VALID_MM,
         config::AUTOCLAMP_MIN_CONFIDENCE,
@@ -60,12 +66,19 @@ void Claw::disarm() {
     state_ = State::OPEN;
 }
 
-void Claw::clamp() {
+void Claw::clamp() { clampFrom(ClampSource::MANUAL); }
+
+void Claw::clampFrom(ClampSource source) {
+    // Only a transition into CLAMPED is an EVENT. Clamping an already-clamped claw (L1's grab asking
+    // for jaws the autoclamp already shut, a re-tap of A) must not raise a second one, or the arm would
+    // get a second clamp-rise for one grip.
+    const bool wasClamped = state_ == State::CLAMPED;
     setJaws(true);
     // Whatever is in the jaws now is NOT a reason to clamp again later: the next open starts from
     // "wait for a clear reading" (see autoclamp_detector.hpp).
     detect_.reset(true);
     state_ = State::CLAMPED;
+    if (!wasClamped) clampEvent_ = source;
 }
 
 void Claw::release() {
@@ -98,7 +111,11 @@ void Claw::update() {
             // AUTOCLAMP_CONFIRM_MS, over at least AUTOCLAMP_MIN_SAMPLES fresh readings -> grip it. A
             // spike that comes and goes resets the window and can never fire. inhibit_ (an L2 score
             // sequence) keeps the window at zero.
-            if (detect_.step(now, mm, confidence, cfg, inhibit_)) clamp();
+            // AT THE R1 HANDOFF this window is AUTOCLAMP_INTAKE_CONFIRM_MS / _MIN_SAMPLES (see
+            // detectorConfig()), i.e. the first valid in-range reading fires. Everywhere else it is the
+            // ordinary debounce. Either way Scoring is told it was the AUTOCLAMP that shut the jaws, so
+            // it can push DOWN at the handoff and hop UP anywhere else.
+            if (detect_.step(now, mm, confidence, cfg, inhibit_)) clampFrom(ClampSource::AUTOCLAMP);
             break;
 
         case State::RELEASED: {

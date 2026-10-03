@@ -50,7 +50,7 @@ All ports live in `include/config.hpp`. Current values:
 | Lift motors | 20, 13 (reversed), on the 12T axle, geared 4:1 into the 48T lift-arm axle |
 | Lift rotation sensor | 16, on the 12T motor axle (same 4:1 as the motors) -- the lift PID runs off this sensor |
 | Intake (one motor) | 12 |
-| Claw distance sensor (autoclamp) | 11 (mounted in the claw, confirmed 2026-10-02) |
+| Claw distance sensor (autoclamp) | **21** (mounted in the claw, confirmed 2026-10-03 -- it was on 11 before that) |
 | Rear distance sensor (`auton::moveB`, brain `DIST BACK`) | 14 (confirmed 2026-10-03) |
 | Left distance sensor (start alignment, brain `DIST L`) | 15 (confirmed 2026-10-03) |
 | Right distance sensor (brain `DIST R`) | 19 (confirmed 2026-10-03) |
@@ -73,11 +73,11 @@ allowed to own the lift motors.
 | **D-pad Down** (hold) | lift **down**, full power (same) |
 | let go of Up/Down | lift motors HOLD where they are (no target resumes) |
 | **L1** | intake macro: step up a stack level. **From the `INTAKE` handoff (the R1 position) it does THE GRAB first:** the arm forces itself **down** onto the pin at `L1_GRAB_PUSH_PCT` (40% of volts, open-loop), the jaws close `L1_GRAB_CLOSE_AT_MS` (200 ms) into the push, and the push keeps pressing until **both** `L1_GRAB_PUSH_MS` (300 ms) and the jaws' own `CLAW_CLOSE_TIME_MS` (150 ms from the moment they were commanded) are satisfied -- about **350 ms** of pressing down -- so the arm can never pull up out of a claw that is still closing. Only then does it rise to level 1. The **intake is stopped for the whole push** (it would drag the pin out from under the jaws), and L1's floor sweep below starts from the **rise** instead. Brain `LIFT` line: `GRAB`; macro state `GRABBING`. If the claw is already clamped the push still happens (it seats the grip), the close is skipped, and it rises. `L1_GRAB_MAX_MS` is the safety cutoff. From anywhere else L1 is unchanged: (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached). If the claw is already `CLAMPED` (L2 just clamped it at the bottom), the first tap skips the clamp wait and rises immediately. **Auto-intake:** an L1 that starts a rise **from the floor** (at the bottom / seated, e.g. after an L2 score or a B stow, or parked at the `INTAKE` handoff after R1) also runs the intake rollers **in** from the press itself -- including during the claw-close wait -- until the arm climbs past `L1_AUTO_INTAKE_UNTIL_DEG` (20°), sweeping the floor while the arm is going up anyway.  Extra L1 taps during the same rise neither restart nor extend it, and an L1 from a stack level never starts it. It stops early on D-pad, B, L2, clamped-mode R1/R2, or a `BLOCKED`/`FAULT` lift, and after `L1_AUTO_INTAKE_MAX_MS` regardless |
-| **L2** | intake macro, **above the bottom**, holding a pin → **THE SENSING SCORER**. The jaws stay **shut**; the arm presses the pin **down onto the stack** at `L2_SCORE_SPEED_PCT` (60%), watches the rotation sensor for the landing -- at least **two** of the three `LAG`/`EFFORT`/`SPEED` signals must agree on the same tick (`AGREEMENT`, 2026-10-02; a lone signal can no longer fire by itself, see "Tuning the L2 scorer"), and now also won't mistake a **loaded** arm (pin + cup) slowly out-running gravity for something resting on it (`ARM ON MOTION` + `SPLIT STALL`, 2026-10-02). **Guaranteed release:** if nothing is detected once the arm has travelled `L2_AUTO_RELEASE_DEG` (32°) **down from where L2 was first pressed** (a *relative* travel budget, not an absolute reading) it releases anyway, right there (`REL(32)` on the brain) -- there is no more "pressed all the way down with nothing released". A start too low for that much travel before the floor (level 1, 31°) instead falls back to releasing at `L2_RELEASE_FLOOR_DEG` (`REL(floor)`), so level 1 still gets real sensing time rather than releasing on the first tick. Either way it then **releases the claw and keeps pushing down** so the jaws slide off → confirm the arm runs free again → **keep pressing a further `L2_POST_RELEASE_PUSH_MS`** (100 ms) so they slide fully clear → **rise `L2_CLEAR_RISE_DEG`** (20°) above wherever it stopped → **HOLD there, latched, indefinitely** (brain: `SCORED UP`). **PRESS 1 ENDS THERE -- there is no automatic descent to the bottom any more**, so the robot can drive away with the claw above the pins without any chance of knocking one over. **PRESS 2** (L2 again from that held position, or **B**) is the ending that used to be automatic: the fast run home at `L2_RETURN_SPEED_PCT`, `FINAL` forcing the last few degrees onto the hard stop, and `SEAT` at 0. If the claw stays caught on the pin it lifts `L2_UNSTICK_UP_DEG` (20°) and retries, up to `L2_MAX_UNSTICK_TRIES`, then stops and shows `SCORE STUCK` -- the 20° clear rise is only ever reached through the **freed** check, so it can never drag a pin the claw is still hooked on. Pivot stays **OUT** throughout; the D-pad cancels at any stage; L2 pressed mid-sequence is ignored. The level count resets at press 1. **While held above:** R1 still runs the rollers and sends the arm to the handoff, L1 still starts a new stack from level 1, and the autoclamp stays **inhibited until press 2 has seated** so the pin just released cannot be re-grabbed on the way down past it. **Auto-outtake:** whenever either press has the arm below `L2_OUTTAKE_BELOW_DEG` (40°) the intake rollers run **out** at `L2_OUTTAKE_PCT` (60%) on their own -- so on **press 1** through PRESS/REL/UNSTK/PUSH (it ends when press 1 reaches its hold), and on **press 2** through the run home, stopping as soon as the arm reaches `L2_OUTTAKE_STOP_DEG` (tied to `LIFT_FINAL_START_DEG`, 3°) where `FINAL`'s own authority takes over. `L2_OUTTAKE_MAX_MS` is the safety cutoff. **At the bottom** (seated, or within `LIFT_BOTTOM_GOAL_DEG` of it) and not mid-move: L2 is instead the **clamp trigger** -- not clamped → clamp, clamped → release -- the same toggle A uses, moving neither the lift, the pivot, nor the intake |
+| **L2** | intake macro, **above the bottom**, holding a pin → **THE SENSING SCORER**. The jaws stay **shut**; the arm presses the pin **down onto the stack** at `L2_SCORE_SPEED_PCT` (60%), watches the rotation sensor for the landing -- at least **two** of the three `LAG`/`EFFORT`/`SPEED` signals must agree on the same tick (`AGREEMENT`, 2026-10-02; a lone signal can no longer fire by itself, see "Tuning the L2 scorer"), and now also won't mistake a **loaded** arm (pin + cup) slowly out-running gravity for something resting on it (`ARM ON MOTION` + `SPLIT STALL`, 2026-10-02). **Guaranteed release:** if nothing is detected once the arm has travelled `L2_AUTO_RELEASE_DEG` (32°) **down from where L2 was first pressed** (a *relative* travel budget, not an absolute reading) it releases anyway, right there (`REL(32)` on the brain) -- there is no more "pressed all the way down with nothing released". A start too low for that much travel before the floor (level 1, 31°) instead falls back to releasing at `L2_RELEASE_FLOOR_DEG` (`REL(floor)`), so level 1 still gets real sensing time rather than releasing on the first tick. Either way it then **releases the claw and keeps pushing down** so the jaws slide off → confirm the arm runs free again → **keep pressing a further `L2_POST_RELEASE_PUSH_MS`** (100 ms) so they slide fully clear → **rise `L2_CLEAR_RISE_DEG`** (20°) above wherever it stopped → **HOLD there, latched, indefinitely** (brain: `SCORED UP`). **PRESS 1 ENDS THERE -- there is no automatic descent to the bottom any more**, so the robot can drive away with the claw above the pins without any chance of knocking one over. **PRESS 2** (L2 again from that held position, or **B**) is the ending that used to be automatic: the fast run home at `L2_RETURN_SPEED_PCT`, `FINAL` forcing the last few degrees onto the hard stop, and `SEAT` at 0. If the claw stays caught on the pin it lifts `L2_UNSTICK_UP_DEG` (20°) and retries, up to `L2_MAX_UNSTICK_TRIES`, then stops and shows `SCORE STUCK` -- the 20° clear rise is only ever reached through the **freed** check, so it can never drag a pin the claw is still hooked on. Pivot stays **OUT** throughout; the D-pad cancels at any stage; L2 pressed mid-sequence is ignored. The level count resets at press 1. **While held above:** R1 still runs the rollers and sends the arm to the handoff, L1 still starts a new stack from level 1, and the autoclamp stays **inhibited until press 2 has seated** so the pin just released cannot be re-grabbed on the way down past it. **Auto-outtake:** whenever either press has the arm below `L2_OUTTAKE_BELOW_DEG` (40°) the intake rollers run **out** at `L2_OUTTAKE_PCT` (60%) on their own -- so on **press 1** through PRESS/REL/UNSTK/PUSH (it ends when press 1 reaches its hold), and on **press 2** through the run home, stopping as soon as the arm reaches `L2_OUTTAKE_STOP_DEG` (tied to `LIFT_FINAL_START_DEG`, 3°) where `FINAL`'s own authority takes over. `L2_OUTTAKE_MAX_MS` is the safety cutoff. **At the bottom** (seated, or within `LIFT_BOTTOM_GOAL_DEG` of it) and not mid-move: L2 is instead the **clamp trigger** -- not clamped → clamp, clamped → release -- the same toggle A uses, moving neither the pivot nor the intake -- but a **clamp** there now also hops the arm up `CLAMP_RISE_DEG` (5°), exactly like A (brain: `CLAMP+5`) |
 | **B** | **stow**: pivot **OUT**, lift straight down to `DOWN` and seated, cancel the intake macro. Uses the same fast banded descent as L2's run home (`LIFT_DESCENT_TOP_PCT` / `_MID_PCT`, now 80% / 95%), minus any claw work |
-| **A** | claw clamp / open. The claw is physically **OPEN at power-on** -- it needs air to grip: the `CLAW` line shows `OPEN` and A closes it. `CLAW_CLOSED_IS_ADI_HIGH` (`true`) says which ADI level is closed; if A *opens* the jaws while the line says `CLAMPED`, flip it |
+| **A** | claw clamp / open, **and a clamp also hops the arm up `CLAMP_RISE_DEG` (5°)** -- brain `LIFT` line `CLAMP+5`; see "Autoclamp" for the full list of which clamps rise and which do not (at the R1 handoff A does neither). The claw is physically **OPEN at power-on** -- it needs air to grip: the `CLAW` line shows `OPEN` and A closes it. `CLAW_CLOSED_IS_ADI_HIGH` (`true`) says which ADI level is closed; if A *opens* the jaws while the line says `CLAMPED`, flip it |
 | **X** | pivot **OUT** / **BACK** (the brain's `CLAW` line shows `PIV OUT C[0]` / `PIV BACK C[1]`: word, port letter, raw ADI level) |
-| **Y** | autoclamp on / off (it is **on** from the moment driver control starts -- see "Autoclamp") |
+| **Y** | autoclamp on / off (it is **on** from the moment driver control starts, **and on by default in auton too** -- see "Autoclamp") |
 
 ### R1 / R2 have two modes
 Which one is in force is **latched the moment the button goes down**, from whether the claw is
@@ -218,8 +218,8 @@ auton::scoreAndWait();
 | `auton::gripAndWait(ms)` | grip, then wait out `CLAW_CLOSE_TIME_MS` so the arm never pulls out of closing jaws |
 | `auton::openAndWait(ms)` | open, then wait out `CLAW_OPEN_TIME_MS` |
 | `auton::clawClamped()` | is a pin held? |
-| `auton::waitUntilClamped(ms, stopChassis=false)` | **the autoclamp wait.** Blocks until the claw is actually clamped, then waits out the close time. `stopChassis = true` cancels the running LemLib motion at the instant of the clamp -- see "Autoclamp" |
-| `auton::autoclamp(bool)` / `autoclampOn()` | the autoclamp, which auton starts with **off** |
+| `auton::waitUntilClamped(ms, stopChassis=false)` | **OPTIONAL.** The autoclamp is asynchronous and needs no waiting at all; this is only for the "drive into a pin and stop the instant you have it" pattern. Blocks until the claw is actually clamped, then waits out the close time; `stopChassis = true` cancels the running LemLib motion at the instant of the clamp -- see "Autoclamp" |
+| `auton::autoclamp(bool)` / `autoclampOn()` | the autoclamp, which auton now starts with **on** (`config::AUTOCLAMP_ON_IN_AUTON`) -- call it with `false` in a route that does not want it |
 | `auton::pivotOut(wait=false)` / `pivotBack(wait=false)` / `pivotIsOut()` | the pivot's two positions (X); `wait = true` adds `PIVOT_TIME_MS` |
 
 ### Intake
@@ -300,7 +300,7 @@ Routes that ship today: `LIFT_TEST` (lift only, no drivetrain), `ODOM_TEST` (two
 `MATCH` and `SKILLS` (templates), `NONE`.
 
 `autonomous()` in `main.cpp` does the setup no route may forget, then makes exactly one call,
-`autons::run()`. The setup is: start the auton tick, autoclamp **off**, **request lift homing** (every
+`autons::run()`. The setup is: start the auton tick, autoclamp **on** (`AUTOCLAMP_ON_IN_AUTON`), **request lift homing** (every
 route, every time -- it blocks nothing and runs underneath the route), then wait for odometry/IMU
 calibration, bounded by `config::AUTON_CALIBRATE_TIMEOUT_MS` so an unplugged IMU cannot eat the
 autonomous period.
@@ -321,10 +321,63 @@ robot drives forward 24", then reverses back; it should finish on its mark and t
 should read ~`X 0 Y 0`. Homing runs at the same time, so expect the arm to go down as it drives.
 
 ## Autoclamp
-A distance sensor in the claw (port `CLAW_DISTANCE_PORT`, 11) looks out between the jaws and sees both
+A distance sensor in the claw (port `CLAW_DISTANCE_PORT`, **21**) looks out between the jaws and sees both
 pins and cups. **While the jaws are open and the autoclamp is enabled, anything at or inside
 `AUTOCLAMP_RANGE_MM` for `AUTOCLAMP_CONFIRM_MS` straight gets gripped.** The debounce is the whole
 point: a reading that appears, vanishes and comes back is not a pin.
+
+**It is asynchronous, everywhere.** The watching is done by `periodic::tick()` -- the driver loop in
+driver control, the auton tick in autonomous -- so nothing is ever called to "run" it and nothing ever
+blocks on it. `auton::waitUntilClamped()` still exists and still works, but it is **optional**: it is
+only for the "drive into a pin and stop the instant you have it" pattern, never a requirement.
+
+### Every clamp lifts the arm 5° (`CLAMP_RISE_DEG`)
+The instant the jaws shut, the arm hops **up** `CLAMP_RISE_DEG` (5°) so whatever was just gripped is
+lifted clear. The brain's `LIFT` line says `CLAMP+5` while it runs.
+
+| Clamp source | Rises? |
+|---|---|
+| **A** (driver, `Scoring::toggleClaw()`) | yes |
+| **L2 at the bottom** (the clamp toggle) | yes |
+| the **autoclamp**, anywhere but the R1 handoff | yes |
+| `auton::clawGrip()` / `clawToggle()` | yes |
+| the autoclamp **at the R1 INTAKE handoff** | **no -- it pushes DOWN instead** (see below) |
+| **A at the R1 handoff** | no (nothing at all: L1 is the button that pushes there) |
+| **L1**'s own grab (`CLAMPING` / `GRABBING`) | no -- the grab already pushes down and then rises to level 1 |
+| anything inside an **L2 score cycle** | no |
+| a clamp while a lift move is in flight, or a Scoring macro owns the lift | no -- **a commanded move always wins** |
+| `competition_initialize()`'s pre-match grip | no, and it cannot queue one: `periodic::reset()` drops the event at the start of each enabled mode |
+
+It is **relative and upward only**: the goal is `position + 5`, clamped to `lift_preset::MAX`, so from the
+bottom it is "up to 5°" and from higher up it is still a 5° hop; there is no path through it that can
+command a lower height. It is a **precise** move on purpose -- a 5° goal is already inside the ordinary
+`LIFT_TOLERANCE_DEG` (5), and inside `setTargetFast()`'s `LIFT_COARSE_TOLERANCE_DEG` (10), so either of
+those would latch "arrived" on the first tick and the arm would never move. The whole 5° fits inside
+`LIFT_APPROACH_ZONE_DEG`, so it is one short walk-in at up to `LIFT_APPROACH_DEG_PER_S` (28 °/s, ≈0.2 s)
+with no full-voltage section to overshoot. The next lift command, or D-pad / clamped-mode R1-R2, takes it
+over instantly, and it holds/PARKs at the new height like any other move rather than dropping back.
+
+### At the R1 INTAKE handoff: instant clamp, then force down
+While the macro is at (or coming down into) the handoff -- `Scoring::isAtIntakeHandoff()`, fed to
+`Claw::setIntakeMode()` every tick -- two things change:
+
+1. **No debounce.** The confirm window becomes `AUTOCLAMP_INTAKE_CONFIRM_MS` (0) over
+   `AUTOCLAMP_INTAKE_MIN_SAMPLES` (1), so the **first** valid in-range reading fires the cylinder. That is
+   deliberate (a pin arriving on the intake is only there for a few tens of ms) and it *does* give up the
+   spike rejection the rest of this section is about: one junk reading closes the jaws on nothing. It is
+   only acceptable here, where a false clamp costs one button press. Raise `AUTOCLAMP_INTAKE_CONFIRM_MS`
+   to 20 first if it misfires; at 50 / 2 it is the ordinary rule again. Invalid readings (0, `PROS_ERR`)
+   still never fire, the re-arm rule and the L2 inhibit are untouched, and all of that is proved in
+   `test/autoclamp_detector_test.cpp`.
+2. **A forced push down.** At the same instant the jaws shut, the arm presses **down** at
+   `L1_GRAB_PUSH_PCT` (40% of volts) for `AUTOCLAMP_INTAKE_PUSH_MS` (300 ms) and then **holds where it
+   ended** -- the driver's "move down a bit". It is the same `GRAB` mechanism L1 uses (brain `LIFT` line:
+   `GRAB`), so the **intake rollers stop for the whole push** exactly as they do for L1's grab, the D-pad
+   cancels it instantly, and one code path still owns the lift motors. There is no grip request and no
+   `CLAW_CLOSE_TIME_MS` wait inside it, because the jaws are already shut.
+
+A following **L1** from the handoff still works normally: the macro is still in `INTAKE_POS`, so L1 runs
+the ordinary grab, finds the claw already clamped, skips the close, pushes again, and rises to level 1.
 
 The rule lives in `subsystems::AutoclampDetector` -- a **pure** class (no sensor, no clock, no cylinder,
 like `ContactDetector`) with host-side tests in `test/autoclamp_detector_test.cpp`, so spike rejection
@@ -332,8 +385,9 @@ is proven on the Mac (`test/run.sh`) before anything is uploaded. `Claw::update(
 calls it once per 10 ms tick.
 
 **When it is on.** Driver: **on by default**, re-enabled every time `opcontrol()` starts
-(`AUTOCLAMP_ON_IN_DRIVER`), and **Y** still toggles it mid-match. Auton: **off by default** --
-`auton::autoclamp(true)` in the route turns it on where it is wanted. Power-on/`initialize()`: off
+(`AUTOCLAMP_ON_IN_DRIVER`), and **Y** still toggles it mid-match. Auton: **on by default too** since
+2026-10-03 (`AUTOCLAMP_ON_IN_AUTON`, applied by `autonomous()`) -- a route no longer has to ask for it,
+and `auton::autoclamp(false)` is the per-route switch that turns it off. Power-on/`initialize()`: off
 (`CLAW_AUTOCLAMP_AT_START = false`), so a preloaded pin cannot fire a cylinder before anyone enables
 anything. It also cannot fire during an L2 score: the claw is inhibited for the whole sequence.
 
@@ -346,8 +400,9 @@ kept **on top** of that as a floor, covering the jaws physically swinging open p
 
 **Watching it.** Brain `CLAW` line, the `AC:` field: `OFF` (disabled, or the jaws are shut by hand),
 `ARMED` (watching, nothing seen), `SEEING` (something in range, the confirm window is running), `CLEAR?`
-(disarmed after an open, waiting for a clear reading) or `HELD`. The raw millimetres are on the `DIST`
-field of line 8, with ` PIN` appended while the reading is inside the range.
+(disarmed after an open, waiting for a clear reading) or `HELD`. The raw millimetres are the **`CLAW`**
+value on the `DIST` line -- that is also how you confirm the sensor is really on port 21: wave a hand at
+the claw and watch it move.
 
 | Knob | What it does |
 |---|---|
@@ -359,6 +414,10 @@ field of line 8, with ` PIN` appended while the reading is inside the range.
 | `AUTOCLAMP_MAX_VALID_MM` (9999) / `AUTOCLAMP_MIN_VALID_MM` (1) | the sensor's "nothing there" (counts as clear) and "cannot measure" (counts as neither) |
 | `AUTOCLAMP_MIN_CONFIDENCE` (0 = ignore) | the sensor's own 0..63 confidence |
 | `AUTOCLAMP_ON_IN_DRIVER` (true) | the driver default |
+| `AUTOCLAMP_ON_IN_AUTON` (true) | the auton default (2026-10-03; was hard-off) |
+| `AUTOCLAMP_INTAKE_CONFIRM_MS` (0) / `AUTOCLAMP_INTAKE_MIN_SAMPLES` (1) | the confirm window **at the R1 handoff only**: fire on the first in-range reading |
+| `AUTOCLAMP_INTAKE_PUSH_MS` (300) | how long the forced push down after a handoff clamp lasts |
+| `CLAMP_RISE_DEG` (5, in the LIFT TUNING block) | how far up every other clamp hops the arm |
 
 **Why fresh samples are counted as well as milliseconds:** the V5 Distance Sensor refreshes on the
 order of 30 ms, which is slower than the 10 ms tick, so the same number comes back two or three times
@@ -381,16 +440,25 @@ this is the first number to question. With a pin held in the open jaws, watch `D
   present means the range is too tight. `SEEING` that never becomes a clamp means the reading is not
   staying inside the range long enough.
 
-**On-robot test, driver:** power on, enable driver control. `AC:ARMED` on the `CLAW` line, jaws open.
-Move a pin slowly into the jaws: `DIST` falls, `AC:` goes `SEEING`, and about 50 ms later the jaws shut
-and the line reads `CLAMPED D[1]  AC:HELD`. Press **A** to open: `AC:CLEAR?`. With the pin still sitting
+**On-robot test, driver:** power on, enable driver control. First wave a hand in front of the claw's
+sensor and check the `DIST` line's **`CLAW`** value moves -- that is the whole check that the sensor really
+is on port 21. Then: `AC:ARMED` on the `CLAW` line, jaws open.
+Move a pin slowly into the jaws: `DIST CLAW` falls, `AC:` goes `SEEING`, and about 50 ms later the jaws
+shut, the line reads `CLAMPED  AC:HELD`, and **the arm hops up 5°** (`LIFT` line: `CLAMP+5`, then a hold
+at ~5). Press **A** to open: `AC:CLEAR?`. With the pin still sitting
 there it must **not** re-grab. Take the pin away: `AC:ARMED` again. Wave the pin past the jaws quickly:
 nothing should happen. Press **Y**: `AC:OFF`, and now nothing clamps at all.
 
-**On-robot test, auton:** in `autons.cpp` use the `MATCH` template with `auton::autoclamp(true)`, an
-`{.async = true}` drive at a pin, and `auton::waitUntilClamped(2000, true)`. The robot should drive, stop
-**at** the clamp rather than pushing through it, and move on to the next call. With no pin in front of it
-the wait returns `false` after 2 s and the route can bail out.
+**On-robot test, the handoff:** press **R1** to send the arm to the INTAKE handoff (`CLAW` line: `PIV
+BACK`), then feed a pin in. The jaws must shut **immediately** -- no 50 ms wait -- and the `LIFT` line
+must read `GRAB` for ~300 ms as the arm forces down, then hold a little lower. There must be **no**
+`CLAMP+5` here. Press **L1**: the arm pushes once more and rises to level 1.
+
+**On-robot test, auton:** nothing has to be called -- the autoclamp is on by default in auton now, so a
+route that drives into a pin grips it on the way. `auton::waitUntilClamped(2000, true)` is **optional**
+and only for stopping the drive at the instant of the clamp: with it the robot drives, stops **at** the
+clamp rather than pushing through it, and moves on; with no pin in front of it the wait returns `false`
+after 2 s and the route can bail out.
 
 ## Lift direction check (do this first)
 The lift runs off the **rotation sensor** on port 16, mounted on the 12T motor axle (confirmed, geared 4:1 into the 48T lift-arm axle -- `LIFT_GEAR_RATIO` / `LIFT_ROTATION_RATIO` are both `4.0`). Everything in the code -- presets, PID target/error, the brain's `LIFT` lines -- works in **lift-arm degrees**; that 4:1 is what converts the sensor/motor side down to that one shared unit. If the sensor and the motors disagree on which way is up, the PID pushes the wrong way, the error grows, and the lift drives itself down. That's the "randomly spinning down" problem. To check:
@@ -897,7 +965,7 @@ START dx +0.4 in (L 1574/1570)
 | Line | Shows |
 |---|---|
 | POSE | odometry X / Y (in) and heading (deg), or `calibrating...` until the IMU is done |
-| LIFT | position → target (or `none`), the named preset (or `custom`), the phase -- `DRIVE`/`BRAKE`/`APPROACH`/`HOLD`/`PARK`/`PARK(t/o)`/`GRAB`/`PRESS`/`REL(...)`/`PUSH`/`SCORED UP`/`DESCEND`/`RETURN`/`FINAL`/`SEAT`/`SEAT(short)`/`REST` -- then `FAULT`/`SCORE STUCK`/`BLOCKED` if any, the homing state (`HOMING` / `HOMED` / `HOME FAIL @ n`), and `R:INTAKE`/`R:LIFT`/`R:wait` (which mode R1/R2 are in). If a lift button seems to do nothing, read this line first |
+| LIFT | position → target (or `none`), the named preset (or `custom`), the phase -- `DRIVE`/`BRAKE`/`APPROACH`/`HOLD`/`PARK`/`PARK(t/o)`/`GRAB`/`CLAMP+5`/`PRESS`/`REL(...)`/`PUSH`/`SCORED UP`/`DESCEND`/`RETURN`/`FINAL`/`SEAT`/`SEAT(short)`/`REST` -- then `FAULT`/`SCORE STUCK`/`BLOCKED` if any, the homing state (`HOMING` / `HOMED` / `HOME FAIL @ n`), and `R:INTAKE`/`R:LIFT`/`R:wait` (which mode R1/R2 are in). If a lift button seems to do nothing, read this line first |
 | CLAW | the jaws (`OPEN`/`ARMED`/`CLAMPED`/`RELEASED`), the autoclamp (`AC:OFF`/`ARMED`/`SEEING`/`CLEAR?`/`HELD` -- see "Autoclamp"), and the pivot (`PIV OUT`/`PIV BACK`) |
 | DIST | the three field-facing distance sensors and the one in the claw, in mm. `--` = nothing in range or an unusable reading. `BACK` is `moveB`'s entire feedback loop -- `--` there means it would drive blind |
 | START | before the match: the **live** left-wall alignment against the selected route's expected reading. After auton has run: the shift `auton::startPose()` applied, or `!! START align skipped`. Blank otherwise -- see "Start alignment" |

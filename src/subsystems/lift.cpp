@@ -74,6 +74,7 @@ void Lift::zero() {
     descendHeld_ = descendOwned_ = descendRequest_ = false;
     fastRequest_ = descentFast_ = toggleWait_ = false;
     coarse_ = coarseRequest_ = false;
+    clampRise_ = clampRiseRequest_ = false;
     seatHot_ = false;
     seatStillSince_ = 0;
     restWakes_ = 0;
@@ -273,6 +274,10 @@ void Lift::setTarget(double degrees, bool precise) {
     // ...and whether it is a COARSE move (fast, overshoot allowed -- the front toggle rise).
     const bool fromCoarse = coarseRequest_;
     coarseRequest_ = false;
+    // ...and whether it is the CLAMP_RISE_DEG hop (brain: CLAMP+5). Consumed either way, so an ignored
+    // or queued request can never label a later, unrelated move.
+    const bool fromClampRise = clampRiseRequest_;
+    clampRiseRequest_ = false;
     // Any deliberate new command cancels a fast descent that was queued behind a toggle rise.
     toggleWait_ = false;
     const double clamped = std::clamp(degrees, config::lift_preset::DOWN, config::lift_preset::MAX);
@@ -334,6 +339,7 @@ void Lift::setTarget(double degrees, bool precise) {
                         (phase_ == Phase::DRIVE || phase_ == Phase::BRAKE || phase_ == Phase::APPROACH);
     const bool newIsDescent = !wantPrecise && clamped <= config::LIFT_BOTTOM_GOAL_DEG;
     if (flying && wantPrecise == precise_ && !newIsDescent) {
+        clampRise_ = fromClampRise;
         goal_ = clamped;
         minDist_ = std::fabs(goal_ - getPosition());
         return;
@@ -343,6 +349,7 @@ void Lift::setTarget(double degrees, bool precise) {
     descendOwned_ = fromR2;
     descentFast_ = fromFast;
     coarse_ = fromCoarse;
+    clampRise_ = fromClampRise;
     // A deliberate new command clears a latched runaway fault or a stall: the guards' job is to stop
     // the motion that was happening, not to brick every button until someone wiggles the D-pad. A real
     // wiring fault or jam simply re-trips on the next DRIVE, so nothing is lost.
@@ -379,6 +386,13 @@ void Lift::setTargetFast(double degrees) {
     setTarget(degrees);
 }
 
+void Lift::startClampRise(double degrees) {
+    // PRECISE, and not negotiable: see the header and "THE CLAMP-RISE" in config.hpp -- a 5 deg goal is
+    // inside LIFT_TOLERANCE_DEG, so a non-precise move would latch "arrived" without moving at all.
+    clampRiseRequest_ = true;
+    setTarget(degrees, true);
+}
+
 void Lift::moveTo(double degrees, int timeoutMs, bool waitUntilSettled) {
     setTarget(degrees);
     if (!waitUntilSettled) return;
@@ -394,6 +408,7 @@ void Lift::moveTo(double degrees, int timeoutMs, bool waitUntilSettled) {
 void Lift::cancel() {
     wakeMotors();
     toggleWait_ = false;
+    clampRise_ = clampRiseRequest_ = false;
     fastRequest_ = false;  // never leave the motors coasting once nothing is commanding the lift
     active_ = false;
     blocked_ = false;
@@ -434,6 +449,13 @@ const char* Lift::phaseName() const {
     // A fast descent queued behind a toggle rise: the arm is still going UP, on its way to touching
     // the toggle height, and will turn around the moment it gets there.
     if (toggleWait_) return "TOGGLE ^";
+    // The CLAMP_RISE_DEG hop: short enough that DRIVE/BRAKE/APPROACH/HOLD would all flick past before
+    // they could be read, so say what the move IS for as long as it is running. PARK (and anything that
+    // follows) reports normally -- by then the hop is over and the arm is just settled at a height.
+    if (clampRise_ && (phase_ == Phase::DRIVE || phase_ == Phase::BRAKE || phase_ == Phase::APPROACH ||
+                       phase_ == Phase::HOLD)) {
+        return "CLAMP+5";
+    }
     switch (phase_) {
         case Phase::DRIVE: return "DRIVE";
         case Phase::BRAKE: return "BRAKE";
@@ -840,7 +862,11 @@ void Lift::clawReleaseDone() {
 // ---------------------------------------------------------------------------
 // THE GRAB: a constant downward push while the jaws close (see lift.hpp)
 // ---------------------------------------------------------------------------
-void Lift::startGrab() {
+void Lift::startGrab() { startPush(config::L1_GRAB_PUSH_MS, true); }
+
+void Lift::startClampPush(int pushMs) { startPush(pushMs, false); }
+
+void Lift::startPush(int pushMs, bool needsGrip) {
     // Homing owns the motors and is finding the true zero: do NOT push against it. The caller sees
     // isGrabbing() == false and falls back to the ordinary close-then-rise (see Scoring::update()).
     if (home_ == Home::RUNNING) return;
@@ -859,10 +885,13 @@ void Lift::startGrab() {
     faulted_ = false;
     blocked_ = false;
     grab_ = true;
+    grabNeedsGrip_ = needsGrip;  // false for the autoclamp's handoff push: the jaws are already shut
+    grabPushMs_ = pushMs;
     gripWanted_ = false;
     gripAcked_ = false;
     grabStart_ = now;
     velI_ = 0.0;
+    clampRise_ = false;  // a push is not a hop; don't leave CLAMP+5 on the brain
     phase_ = Phase::GRAB;
     phaseStart_ = now;
     stallStart_ = 0;
@@ -880,15 +909,20 @@ void Lift::updateGrab(std::uint32_t now, double dt, double position) {
     lastVRef_ = 0.0;
 
     // Ask for the jaws partway through the push, so they close around the pin while the claw is
-    // pressed down onto it rather than above it.
-    if (!gripWanted_ && t >= static_cast<std::uint32_t>(config::L1_GRAB_CLOSE_AT_MS)) gripWanted_ = true;
+    // pressed down onto it rather than above it. The autoclamp's handoff push skips this entirely
+    // (grabNeedsGrip_ == false): the jaws were already shut by the autoclamp before the push started,
+    // so there is nothing to request and nothing to wait on.
+    if (grabNeedsGrip_ && !gripWanted_ && t >= static_cast<std::uint32_t>(config::L1_GRAB_CLOSE_AT_MS)) {
+        gripWanted_ = true;
+    }
 
     // Stop pushing only when the push has had its time AND the jaws have had theirs. The arm must
     // never pull up out of a claw that is still physically closing -- the same interlock CLAMPING
     // enforces. L1_GRAB_MAX_MS is the safety net for "nobody ever acknowledged" (no Scoring tick).
-    const bool pushedLongEnough = t >= static_cast<std::uint32_t>(config::L1_GRAB_PUSH_MS);
-    const bool jawsShut = gripAcked_ &&
-                          now - gripAckedAt_ >= static_cast<std::uint32_t>(config::CLAW_CLOSE_TIME_MS);
+    const bool pushedLongEnough = t >= static_cast<std::uint32_t>(grabPushMs_);
+    const bool jawsShut = !grabNeedsGrip_ ||
+                          (gripAcked_ &&
+                           now - gripAckedAt_ >= static_cast<std::uint32_t>(config::CLAW_CLOSE_TIME_MS));
     const bool timedOut = t >= static_cast<std::uint32_t>(config::L1_GRAB_MAX_MS);
     if ((pushedLongEnough && jawsShut) || timedOut) {
         grab_ = false;

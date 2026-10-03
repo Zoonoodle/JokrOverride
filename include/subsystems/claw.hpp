@@ -30,8 +30,19 @@
  * the same arrangement as the lift's ContactDetector. This class reads the sensor once per tick,
  * hands it over, and owns the cylinder. Every threshold is in config.hpp's AUTOCLAMP_* block. In
  * short: something at or inside AUTOCLAMP_RANGE_MM, continuously for AUTOCLAMP_CONFIRM_MS, over at
- * least AUTOCLAMP_MIN_SAMPLES fresh readings -> clamp. On in driver by default, off in auton until a
- * route asks, off at power-on, and inhibited (setInhibit()) for the whole of an L2 score.
+ * least AUTOCLAMP_MIN_SAMPLES fresh readings -> clamp. On by default in driver AND in auton
+ * (AUTOCLAMP_ON_IN_DRIVER / AUTOCLAMP_ON_IN_AUTON, 2026-10-03 -- a route no longer has to ask for it),
+ * off at power-on, and inhibited (setInhibit()) for the whole of an L2 score.
+ *
+ * TWO THINGS THIS CLASS REPORTS TO THE REST OF THE ROBOT, both for Scoring:
+ *   setIntakeMode()    while the macro is at the R1 INTAKE handoff the confirm window is swapped for
+ *                      AUTOCLAMP_INTAKE_CONFIRM_MS / _MIN_SAMPLES, so the FIRST valid in-range reading
+ *                      fires -- "trigger claw at the instant it sees the object".
+ *   takeClampEvent()   a one-shot "the jaws just shut, and here is why" (MANUAL vs AUTOCLAMP), which
+ *                      Scoring turns into the CLAMP_RISE_DEG hop everywhere, or the
+ *                      AUTOCLAMP_INTAKE_PUSH_MS forced push down at the handoff. It is ALWAYS consumed
+ *                      and never queues: a clamp made while disabled is dropped by clearClampEvent().
+ * Neither of them touches a cylinder or the lift. This class still owns the one, Scoring the other.
  *
  * THE CLAW IS ON ADI config::CLAW_PISTON_PORT, which is 'D'. Until 2026-10-01 the code had the claw
  * and the pivot on each other's ports; the derivation of which level closes the jaws
@@ -56,6 +67,11 @@ class Claw {
   public:
     enum class State { OPEN, ARMED, CLAMPED, RELEASED };
 
+    /** WHY the jaws last shut, for the one consumer that has to tell those apart: Scoring's
+     *  clamp-rise / intake-push decision (see Scoring::handleClampEvent()). NONE = no unconsumed
+     *  clamp. */
+    enum class ClampSource { NONE, MANUAL, AUTOCLAMP };
+
     Claw();
 
     /** Turn autoclamp ON. The jaws open (if they weren't already) and the detector starts watching:
@@ -71,8 +87,27 @@ class Claw {
      *  sequence owns the claw, so a stack it is pressing into can never trigger a clamp. Pass it
      *  every tick (periodic::tick() does). */
     void setInhibit(bool inhibit) { inhibit_ = inhibit; }
+    /** THE R1 INTAKE HANDOFF MODE. While true the autoclamp uses config::AUTOCLAMP_INTAKE_CONFIRM_MS /
+     *  _MIN_SAMPLES instead of the ordinary confirm window, i.e. it fires on the FIRST valid in-range
+     *  reading -- the driver wants the pin gripped the instant it arrives at the handoff. Pass it every
+     *  tick (periodic::tick() does, from Scoring::isAtIntakeHandoff()). It changes nothing else: the
+     *  pure detector is the same code, just handed different numbers. */
+    void setIntakeMode(bool atIntakeHandoff) { intakeMode_ = atIntakeHandoff; }
     /** Driver override: close now, no sensor needed (-> CLAMPED). */
     void clamp();
+
+    /** TAKE the one-shot "the jaws just shut" event, and WHY they shut. Returns ClampSource::NONE if
+     *  there is nothing to take, and always clears it -- so an event can never queue up and fire late
+     *  (notably: a clamp made while the robot is DISABLED, e.g. competition_initialize()'s pre-match
+     *  grip, is dropped by clearClampEvent() at the start of each enabled mode rather than making the
+     *  arm move the moment auton starts). Exactly one consumer: Scoring::handleClampEvent(). */
+    ClampSource takeClampEvent() {
+        const ClampSource s = clampEvent_;
+        clampEvent_ = ClampSource::NONE;
+        return s;
+    }
+    /** Throw away any unconsumed clamp event (periodic::reset(), at the start of each enabled mode). */
+    void clearClampEvent() { clampEvent_ = ClampSource::NONE; }
     /** Open the jaws (CLAMPED -> RELEASED, starts the lockout). */
     void release();
     /** One button for the driver: open if clamped, clamp if open. */
@@ -107,8 +142,11 @@ class Claw {
   private:
     void setJaws(bool closed);
     static bool levelFor(bool closed);
-    /** The AUTOCLAMP_* block from config.hpp, packed for the pure detector. */
-    static AutoclampDetector::Config detectorConfig();
+    /** The AUTOCLAMP_* block from config.hpp, packed for the pure detector. NOT static any more: the
+     *  confirm window depends on intakeMode_ (see setIntakeMode()). */
+    AutoclampDetector::Config detectorConfig() const;
+    /** Shut the jaws and record WHY, for Scoring's clamp-rise / intake-push decision. */
+    void clampFrom(ClampSource source);
 
     pros::adi::DigitalOut piston_;
     pros::Distance sensor_;
@@ -116,6 +154,8 @@ class Claw {
     State state_ = State::OPEN;      // unpowered = open, see the class comment
     bool enabled_ = config::CLAW_AUTOCLAMP_AT_START;  // autoclamp on/off (Y, opcontrol, auton)
     bool inhibit_ = false;           // something else owns the claw this tick (an L2 score)
+    bool intakeMode_ = false;        // at the R1 handoff: the instant-fire confirm (see setIntakeMode())
+    ClampSource clampEvent_ = ClampSource::NONE;  // one-shot: the jaws just shut, and why
     bool level_ = false;             // the level the pin is actually driven to, for the brain screen
     std::uint32_t releasedAt_ = 0;   // when the jaws were last opened
 };

@@ -125,6 +125,34 @@ void Claw::update() {
     const int confidence = sensor_.get_confidence();
     const AutoclampDetector::Config cfg = detectorConfig();
 
+    // THE END OF AN L2 SCORE RE-ARMS THE AUTOCLAMP IMMEDIATELY, with no clear-reading wait.
+    // THE BUG THIS FIXES (the driver, 2026-10-03): "after doing l2 to score ... and then l2 back to
+    // default, auto clamp is no longer armed. we need auto clamp to be armed ALWAYS during driver."
+    // An L2 score opens the jaws mid-sequence, so the claw ends the score in RELEASED -- and RELEASED
+    // waits for a CLEAR reading before it will arm. That rule is right for a bare release (A at the
+    // bottom: the pin is still sitting in the jaws, and a timer-based re-arm would re-grab it every
+    // time), but it is WRONG here, and it is wrong for a reason that is already encoded elsewhere in
+    // this program: the score's own inhibit (Lift::isScoreCycle(), set every tick by periodic::tick())
+    // covers the entire dangerous window -- press, the hold above the stack, press 2's descent -- and
+    // only lifts once the arm is SEATED at the bottom. By then the pin is up at stack height and the
+    // claw is at the floor: there is physically nothing left in front of the jaws to re-grab. Making it
+    // sit in WAIT_CLEAR after that is pure downside, and with the clear threshold now at 90-105 mm it
+    // was frequently never satisfied at all, so the autoclamp simply stayed dead for the rest of the
+    // match.
+    // So: on the FALLING EDGE of the inhibit, a RELEASED claw arms fresh.
+    const bool inhibitEnded = wasInhibited_ && !inhibit_;
+    wasInhibited_ = inhibit_;
+    if (inhibitEnded && state_ == State::RELEASED && enabled_ &&
+        now - releasedAt_ >= static_cast<std::uint32_t>(config::CLAW_RELEASE_LOCKOUT_MS)) {
+        // The lockout check is what keeps the one awkward edge honest: the inhibit also drops when a
+        // score is CANCELLED part-way (the D-pad takes the lift, Lift::cancel() clears scoreCycle_). If
+        // that happens within CLAW_RELEASE_LOCKOUT_MS of the jaws opening, the pin really may still be
+        // in them, so fall through to the ordinary clear-reading wait instead. A whole score cycle is
+        // seconds long, so the normal path always passes this.
+        detect_.reset(false);  // armed with empty jaws: no clear-reading wait needed
+        state_ = State::ARMED;
+    }
+
     switch (state_) {
         case State::OPEN:
         case State::CLAMPED:

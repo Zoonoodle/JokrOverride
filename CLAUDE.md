@@ -89,6 +89,14 @@ Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
   10 cm of the sensor (the claw's own structure, a cup, a wall, the pin just put down) pinned it in
   WAIT_CLEAR for the match with only `AC:CLEAR?` on the brain to show it. **A threshold rule that can
   wait forever needs a bound.** Diagnosis table: README "If the autoclamp goes dead".
+  **AND THE END OF AN L2 SCORE RE-ARMS IT INSTANTLY**, with no clear-reading wait: on the falling edge of
+  the inhibit a RELEASED claw arms fresh (`Claw::update()`). A score opens the jaws mid-sequence so it
+  ends in RELEASED, but `isScoreCycle()`'s inhibit already covered press 1, the hold above the stack and
+  press 2's descent, and only lifts once the arm is SEATED — by then the pin is at stack height and the
+  claw is at the floor, so there is nothing in front of the jaws to re-grab and the clear-wait was pure
+  downside (it is what left the autoclamp dead after every score). Guarded by `CLAW_RELEASE_LOCKOUT_MS`
+  for the one awkward edge: a score CANCELLED part-way (D-pad takes the lift) drops the inhibit while the
+  pin may genuinely still be in the jaws, so within the lockout it falls back to the clear-reading wait.
   `CLAW_RELEASE_LOCKOUT_MS` is kept on top as a floor. It is inhibited for the
   whole L2 score. **ON by default in BOTH modes** — driver (`AUTOCLAMP_ON_IN_DRIVER`, re-enabled each
   `opcontrol()`, Y toggles) and **auton** (`AUTOCLAMP_ON_IN_AUTON`, applied by `autonomous()` since

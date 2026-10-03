@@ -170,6 +170,7 @@ class Claw {
     State state_ = State::OPEN;      // unpowered = open, see the class comment
     bool enabled_ = config::CLAW_AUTOCLAMP_AT_START;  // autoclamp on/off (Y, opcontrol, auton)
     bool inhibit_ = false;           // something else owns the claw this tick (an L2 score)
+    bool wasInhibited_ = false;      // last tick's inhibit_, to catch the falling edge (see update())
     bool intakeMode_ = false;        // at the R1 handoff: the instant-fire confirm (see setIntakeMode())
     bool autonMode_ = false;         // autonomous: a longer trigger range (see setAutonMode())
     ClampSource clampEvent_ = ClampSource::NONE;  // one-shot: the jaws just shut, and why

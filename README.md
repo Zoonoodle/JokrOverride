@@ -522,6 +522,7 @@ only pins. With a pin held in the open jaws, watch the `DIST` line's `CLAW` valu
 
 | `AC:` reads | What it means | Fix |
 |---|---|---|
+| `CLEAR?` right after an **L2 score** | fixed 2026-10-03: the end of a score now re-arms immediately. A score opens the jaws mid-sequence, so the claw ends it in `RELEASED` -- but the score's own inhibit already covered the whole dangerous window and only lifts once the arm is *seated at the bottom*, by which point the pin is at stack height and the claw is at the floor. There is nothing left to re-grab, so waiting for a clear reading was pure downside | -- |
 | `CLEAR?` and stays there | **the failure that took the feature out on 2026-10-03.** It is waiting for a clear reading it is never going to get, because something is permanently inside (range + `AUTOCLAMP_REARM_GAP_MM`) -- 90 mm in driver, 105 in auton. The claw's own structure, a cup, a wall, or the pin it just put down and has not driven away from | `AUTOCLAMP_REARM_MAX_MS` (2 s) now arms it anyway, so it recovers by itself. If it still sticks, check `DIST CLAW` for what is sitting in view and lower the range for that mode |
 | `OFF` in auton when you did not ask | the enable never reached the `Claw` (the bug fixed in `a72e522`) | check `AUTOCLAMP_ON_IN_AUTON`, and that nothing calls `auton::autoclamp(false)` |
 | `ARMED` with a pin right in the jaws | the sensor is not seeing it: wrong port, unplugged, or the range is too tight | wave a hand at the claw and watch `DIST CLAW` move -- if it reads `--` always, the sensor is not on `CLAW_DISTANCE_PORT` (21) |

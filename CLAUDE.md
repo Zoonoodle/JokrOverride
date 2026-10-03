@@ -93,10 +93,12 @@ Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
   AUTOCLAMP) on any transition into CLAMPED; the handler **always consumes it** so nothing can queue, and
   `periodic::reset()` drops it at the start of each enabled mode so `competition_initialize()`'s pre-match
   grip can never make the arm move when auton starts. Two outcomes:
-  - **`CLAMP_RISE_DEG` (5, TUNE) up**, via `Lift::startClampRise()` — brain `CLAMP+5`. RELATIVE and
-    upward only (`position + 5`, clamped to `MAX`). It is a **precise** move and that is load-bearing: a
-    5° goal is inside `LIFT_TOLERANCE_DEG` (5) and inside `setTargetFast()`'s `LIFT_COARSE_TOLERANCE_DEG`
-    (10), so a non-precise move would latch "arrived" on the first tick and never move. Fires for A, L2's
+  - **`CLAMP_RISE_DEG` (8, TUNE — measured up from 5 on 2026-10-03) up**, via `Lift::startClampRise()` —
+    brain `CLAMP UP` (no number: the constant is a TUNE and the goal is printed beside it). RELATIVE and
+    upward only (`position + 8`, clamped to `MAX`). It is a **precise** move and that is load-bearing:
+    `setTargetFast()`'s `LIFT_COARSE_TOLERANCE_DEG` (10) is wider than the whole hop, so a coarse move
+    would latch "arrived" on the first tick and never move, and `LIFT_TOLERANCE_DEG` (5) would call
+    anywhere from 3 to 13° arrived. Fires for A, L2's
     at-the-bottom clamp toggle, `auton::clawGrip()`, and the autoclamp anywhere but the handoff.
     **Skipped** at the R1 handoff, during an L1 GRAB, anywhere in an L2 score cycle, and whenever a lift
     move is in flight or a Scoring macro owns the lift — **a commanded move always wins**, which is what

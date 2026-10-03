@@ -274,7 +274,7 @@ void Lift::setTarget(double degrees, bool precise) {
     // ...and whether it is a COARSE move (fast, overshoot allowed -- the front toggle rise).
     const bool fromCoarse = coarseRequest_;
     coarseRequest_ = false;
-    // ...and whether it is the CLAMP_RISE_DEG hop (brain: CLAMP+5). Consumed either way, so an ignored
+    // ...and whether it is the CLAMP_RISE_DEG hop (brain: CLAMP UP). Consumed either way, so an ignored
     // or queued request can never label a later, unrelated move.
     const bool fromClampRise = clampRiseRequest_;
     clampRiseRequest_ = false;
@@ -452,9 +452,11 @@ const char* Lift::phaseName() const {
     // The CLAMP_RISE_DEG hop: short enough that DRIVE/BRAKE/APPROACH/HOLD would all flick past before
     // they could be read, so say what the move IS for as long as it is running. PARK (and anything that
     // follows) reports normally -- by then the hop is over and the arm is just settled at a height.
+    // The word carries no number on purpose: CLAMP_RISE_DEG is a TUNE constant (5 -> 8 already), and a
+    // baked-in "+5" would quietly start lying. The goal is printed next to it on the same line anyway.
     if (clampRise_ && (phase_ == Phase::DRIVE || phase_ == Phase::BRAKE || phase_ == Phase::APPROACH ||
                        phase_ == Phase::HOLD)) {
-        return "CLAMP+5";
+        return "CLAMP UP";
     }
     switch (phase_) {
         case Phase::DRIVE: return "DRIVE";
@@ -891,7 +893,7 @@ void Lift::startPush(int pushMs, bool needsGrip) {
     gripAcked_ = false;
     grabStart_ = now;
     velI_ = 0.0;
-    clampRise_ = false;  // a push is not a hop; don't leave CLAMP+5 on the brain
+    clampRise_ = false;  // a push is not a hop; don't leave CLAMP UP on the brain
     phase_ = Phase::GRAB;
     phaseStart_ = now;
     stallStart_ = 0;

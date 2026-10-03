@@ -452,10 +452,11 @@ class Lift {
     void startClampPush(int pushMs);
     /**
      * THE CLAMP-RISE (config::CLAMP_RISE_DEG). An ordinary position move to `degrees`, flagged so the
-     * brain's LIFT line says `CLAMP+5` while it runs. It is PRECISE on purpose and that is load-bearing,
-     * not cosmetic: a 5 deg goal is already inside LIFT_TOLERANCE_DEG (5) -- let alone
-     * setTargetFast()'s LIFT_COARSE_TOLERANCE_DEG (10) -- so an ordinary setTarget() would latch
-     * "arrived" on the first tick and the arm would never move at all. See "THE CLAMP-RISE" in
+     * brain's LIFT line says `CLAMP UP` while it runs (no number: CLAMP_RISE_DEG is a TUNE constant and
+     * the goal is printed beside it anyway). It is PRECISE on purpose and that is load-bearing, not
+     * cosmetic: setTargetFast()'s LIFT_COARSE_TOLERANCE_DEG (10) is wider than the whole hop, so a
+     * coarse move would latch "arrived" on the first tick and never move, and the ordinary
+     * LIFT_TOLERANCE_DEG (5) would call anywhere from 3 to 13 deg arrived. See "THE CLAMP-RISE" in
      * config.hpp. Scoring is the only caller; it decides when a clamp earns one.
      */
     void startClampRise(double degrees);
@@ -623,7 +624,7 @@ class Lift {
     bool precise_ = false;  // tight tolerance (INTAKE)
     bool coarse_ = false;   // speed over precision, overshoot allowed (the front toggle rise)
     bool coarseRequest_ = false;  // one-shot: the next setTarget() is a coarse move
-    bool clampRise_ = false;      // this move is the CLAMP_RISE_DEG hop (for the brain's CLAMP+5)
+    bool clampRise_ = false;      // this move is the CLAMP_RISE_DEG hop (for the brain's CLAMP UP)
     bool clampRiseRequest_ = false;  // one-shot: the next setTarget() is that hop
     bool descent_ = false;  // a trip to the bottom: the banded DESCEND -> SEAT, not a position move
     Phase phase_ = Phase::HOLD;

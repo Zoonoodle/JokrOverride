@@ -493,23 +493,30 @@ inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 // --- THE CLAMP-RISE: every clamp lifts the arm a little, at once ------------
 // THE DRIVER'S REQUEST, 2026-10-03: "when we clamp whether manual in driver or auto clamp in auto, we
 // need the lift to automatically always move up just very slightly, move up to 5 degrees quick and
-// nice." So the instant the jaws shut -- A, the autoclamp, L2's at-the-bottom clamp toggle,
-// auton::clawGrip() -- Scoring sends the arm UP by this much.
+// nice", then measured on the robot the same day: "after claw grabs in that down state, we need to
+// raise to 8 deg not 5". So the instant the jaws shut -- A, the autoclamp, L2's at-the-bottom clamp
+// toggle, auton::clawGrip() -- Scoring sends the arm UP by this much.
 //
 // RELATIVE, NEVER ABSOLUTE, and never downward: the goal is (wherever the arm is now) + this, clamped
-// to lift_preset::MAX. Clamps normally happen with the arm at the bottom, which is where "move up to
-// 5 degrees" and "move up 5 degrees" are the same thing; starting from higher up it is still a 5 deg
-// hop, and from a height where +5 would exceed MAX it simply does not move. There is no path through
-// this that can command a LOWER height than the arm is already at.
+// to lift_preset::MAX. Clamps normally happen with the arm at the bottom -- "that down state" -- which
+// is where "raise TO 8 deg" and "raise BY 8 deg" are the same thing; starting from higher up it is still
+// an 8 deg hop, and from a height where +8 would exceed MAX it simply does not move. There is no path
+// through this that can command a LOWER height than the arm is already at.
 //
-// IT IS A PRECISE MOVE, and that is not a style choice. A 5 deg goal with the ordinary
-// LIFT_TOLERANCE_DEG (5) -- or setTargetFast()'s LIFT_COARSE_TOLERANCE_DEG (10) -- is already INSIDE
-// its own arrival band the moment it is commanded, so setTarget() would latch "arrived" on the first
-// tick and the arm would never move at all. Lift::startClampRise() therefore asks for the tight
-// LIFT_PRECISE_TOLERANCE_DEG (1) band. The whole 5 deg is inside LIFT_APPROACH_ZONE_DEG, so the move
-// is one short APPROACH walk-in at up to LIFT_APPROACH_DEG_PER_S (28 deg/s, i.e. ~0.2 s) with no
-// full-voltage section to overshoot and nothing to oscillate -- the "quick and nice" the driver asked
-// for. Brain's LIFT line: `CLAMP+5`.
+// IT IS A PRECISE MOVE, and that is not a style choice: setTargetFast()'s LIFT_COARSE_TOLERANCE_DEG (10)
+// is WIDER than this whole hop, so a coarse move would be "already arrived" on the first tick and the
+// arm would never move at all. The ordinary LIFT_TOLERANCE_DEG (5) is narrower than 8 so it would at
+// least move, but it would call anywhere from 3 to 13 deg "arrived" -- which is most of the hop's worth
+// of slop. So Lift::startClampRise() asks for the tight LIFT_PRECISE_TOLERANCE_DEG (1) band.
+// (At the original 5 deg this was not a judgement call at all: 5 is INSIDE LIFT_TOLERANCE_DEG, so even
+// the ordinary band would have latched "arrived" without moving. Keep it precise if this is tuned back
+// down.)
+// WHAT THE MOVE LOOKS LIKE at 8 deg: 3 deg of braking curve (sqrt(2 * LIFT_DECEL_DEG_PER_S2 * 3) caps it
+// around 85 deg/s) and then the LIFT_APPROACH_ZONE_DEG walk-in -- roughly 0.15 s, no full-voltage
+// section, and the hold's LIFT_HOLD_KD absorbs the arrival. At 5 deg it was pure approach zone and
+// slightly gentler still; both are the "quick and nice" the driver asked for.
+// Brain's LIFT line: `CLAMP UP` -- deliberately NOT the number, which would be a lie the moment this
+// constant is tuned (it just was, 5 -> 8). The height is on the same line anyway, as `-> 8.0`.
 //
 // WHERE IT IS SKIPPED (see Scoring::handleClampEvent()): at the R1 INTAKE handoff (the driver's own
 // exception -- there the autoclamp pushes DOWN instead, see AUTOCLAMP_INTAKE_PUSH_MS), during an L1
@@ -519,7 +526,7 @@ inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 // competition_initialize()'s pre-match grip can never queue a rise that fires when auton starts.
 //   It does not clear the thing it just gripped: raise it.
 //   It lifts far enough to matter / fights the next move: lower it (1-2 deg still moves, see above).
-inline constexpr double CLAMP_RISE_DEG = 5.0;                // TUNE: arm degrees, RELATIVE and upward only
+inline constexpr double CLAMP_RISE_DEG = 8.0;                // TUNE: arm degrees, RELATIVE and upward only (was 5)
 
 // --- The D-pad manual override's speeds -------------------------------------
 // D-pad Up/Down are plain open-loop voltage straight into Lift::update(), ahead of everything else

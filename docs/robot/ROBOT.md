@@ -54,15 +54,19 @@ photos)**.
   `IMU_PORT` back to `0` is still the supported way to run on the tracking wheel alone:
   `robot::imu` becomes a null `std::unique_ptr`, LemLib gets a null IMU pointer, nothing
   calibrates and the brain shows `IMU  none (not installed)`.
-- **Rear distance sensor** — `BACK_DISTANCE_PORT = 4` (**TODO(team): confirm** -- 4 is the old
-  robot's port, carried over with `auton::moveB()`), exposed as `robot::backDistance` and shown
-  on the brain's `BACK` line. It is the entire feedback loop for `moveB`, which drives until
-  this sensor reads a target distance from whatever is behind the robot.
+- **Field-facing distance sensors** — three, all confirmed 2026-10-03: **left
+  `LEFT_DISTANCE_PORT = 15`**, **right `RIGHT_DISTANCE_PORT = 19`** and **rear
+  `BACK_DISTANCE_PORT = 14`**, exposed as `robot::leftDistance` / `rightDistance` /
+  `backDistance` and all shown on the brain's `DIST` line. The REAR one is the entire
+  feedback loop for `auton::moveB()`, which drives until it reads a target distance from
+  whatever is behind the robot. The LEFT one is the start-of-auton x correction
+  (`auton::startPose()`): the robot is set against the front wall each match, so only its
+  position ALONG that wall varies, and the left reading measures exactly that.
 - **Lift rotation sensor** — `LIFT_ROTATION_PORT = 16`. The lift PID runs off this sensor,
   not the motor encoders. **It is mounted on the motored 12T axle**, not on the 48T arm axle,
   so it turns 4× for every degree the arm moves:
   **arm degrees = sensor degrees ÷ 4**, i.e. `LIFT_ROTATION_RATIO = 4.0` (`config.hpp` is
-  fixed to this value now -- see the note under "Lift"). The brain's `ROT` line shows the
+  fixed to this value now -- see the note under "Lift"). The Brain Terminal's `LIFT_TRACE` output shows the
   converted arm degrees with the raw sensor degrees in brackets so the 4:1 can be checked by
   hand, and the lift reads the sensor with `Rotation::get_position()` (multi-turn), not
   `get_angle()` (wraps at 360°) -- at 4:1 the sensor turns more than a full revolution over
@@ -242,6 +246,7 @@ I still could not count the cylinders on the end effector itself from these angl
 | Claw cylinder | `config::CLAW_PISTON_PORT`, `robot::claw` (`subsystems::Claw`) | ADI **D** |
 | Pivot cylinder | `config::PIVOT_PISTON_PORT` (owned by `subsystems::Scoring`) | ADI **C** |
 | Claw distance sensor | `config::CLAW_DISTANCE_PORT` (mounted in the claw, 2026-10-02) | `11` |
+| Left / right / rear distance sensors | `config::LEFT_/RIGHT_/BACK_DISTANCE_PORT`, `robot::leftDistance` etc. | `15` / `19` / `14` |
 
 > **The two cylinders were on each other's ports in code until 2026-10-01.** The port the code
 > called the claw ('C') is physically the **pivot**, and the port it called the pivot ('D') is

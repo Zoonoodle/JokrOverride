@@ -23,6 +23,10 @@ bool autoOuttakeExpired = false;
 // An L1 that opened the auto-intake sweep while the GRAB push was running: the sweep waits and starts
 // from the RISE, never during the push (the rollers must not drag the pin out from under the jaws).
 bool sweepAfterGrab = false;
+// Are the macro windows actually driving the rollers this tick? Plain file-scope state now -- these
+// used to live in namespace screen for the brain's old DRV line, which is gone.
+bool autoIntakeOn = false;
+bool autoOuttakeOn = false;
 
 pros::Mutex gate;
 }  // namespace
@@ -35,8 +39,8 @@ void reset() {
     autoOuttakeStart = 0;
     autoOuttakeExpired = false;
     sweepAfterGrab = false;
-    screen::autoIntake = false;
-    screen::autoOuttake = false;
+    autoIntakeOn = false;
+    autoOuttakeOn = false;
 }
 
 void tick(const Inputs& in) {
@@ -76,7 +80,7 @@ void tick(const Inputs& in) {
         if (timedOut) autoOuttakeExpired = true;
         if (done || cancelled || timedOut) autoOuttakeStart = 0;
     }
-    screen::autoOuttake = autoOuttakeStart != 0;
+    autoOuttakeOn = autoOuttakeStart != 0;
 
     // --- L1 auto-intake: sweep the floor while the arm is rising off it anyway. An L1 press that
     // starts a rise FROM THE FLOOR -- arm at or below LIFT_BOTTOM_GOAL_DEG, seated, or parked at the
@@ -115,7 +119,7 @@ void tick(const Inputs& in) {
             pros::millis() - autoIntakeStart >= static_cast<std::uint32_t>(config::L1_AUTO_INTAKE_MAX_MS);
         if (done || cancelled || timedOut) autoIntakeStart = 0;
     }
-    screen::autoIntake = autoIntakeStart != 0;
+    autoIntakeOn = autoIntakeStart != 0;
 
     // The direct request always wins: R1/R2 in R:INTAKE mode are the roller buttons, and auton's
     // intakeIn()/intakeOut() land in the same place. Then L2's auto-outtake (so a score always ejects),
@@ -123,8 +127,8 @@ void tick(const Inputs& in) {
     // other a pin held and descending) -- then stop. ONE intake.set() call, the single writer decision.
     if (grabbing) robot::intake.set(Intake::Mode::STOP);  // the grab push beats every other input
     else if (in.intakeRequest != Intake::Mode::STOP) robot::intake.set(in.intakeRequest, in.intakePower);
-    else if (screen::autoOuttake) robot::intake.set(Intake::Mode::OUT, config::L2_OUTTAKE_PCT / 100.0);
-    else if (screen::autoIntake) robot::intake.set(Intake::Mode::IN);
+    else if (autoOuttakeOn) robot::intake.set(Intake::Mode::OUT, config::L2_OUTTAKE_PCT / 100.0);
+    else if (autoIntakeOn) robot::intake.set(Intake::Mode::IN);
     else robot::intake.set(Intake::Mode::STOP);
 
     // The autoclamp must never fire during an L2 score: the arm is pressing a pin onto a stack with

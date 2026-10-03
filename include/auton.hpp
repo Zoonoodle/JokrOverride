@@ -245,6 +245,66 @@ int level();
 const char* macroState();
 
 // ---------------------------------------------------------------------------
+// Start-of-auton alignment, and the raw distance sensors
+// ---------------------------------------------------------------------------
+/** The side sensors' current readings, mm. Negative = nothing usable (out of range, 0, PROS_ERR, or
+ *  below the confidence floor). The rear one is auton::backDistanceMm(), below. */
+double leftDistanceMm();
+double rightDistanceMm();
+/** Average the LEFT sensor for ms, rejecting invalid samples (see config::START_ALIGN_*). Returns a
+ *  negative number if nothing valid came back. Blocks the calling task for ms. */
+double readLeftAveraged(int ms);
+
+/**
+ * THE START-OF-AUTON X CORRECTION. First line of every route.
+ *
+ * The robot is set against the front wall, so the distance from the front and the heading are
+ * repeatable; how far ALONG that wall it ends up is not. This measures that one unknown with the left
+ * sensor and folds it into the starting pose:
+ *
+ *     dx_in = (measured left mm - expectedLeftMm) / 25.4
+ *
+ * READING FURTHER than expected = the robot is shifted +x (to the robot's right); CLOSER = -x. That is
+ * the driver's own sign convention and it matches LemLib's frame at heading 0, where the robot's right
+ * is +x. The shift is applied along the ROBOT'S RIGHT AXIS -- (cos theta, -sin theta) * dx -- so it
+ * stays physically correct if a route ever starts at another heading; at theta = 0 that is simply
+ * x + dx. Because the heading is fixed and known, the change in the reading IS the lateral shift: no
+ * sensor-mounting offset enters the maths at all.
+ *
+ * WHERE THE READING COMES FROM. While the robot sits disabled before the match, the left sensor is
+ * averaged continuously (see startAlignSample()); startPose() uses that long, settled average and
+ * spends no auton time on it, confirming it with one short fresh sample in case the robot was moved.
+ * With no disabled history -- autonomous launched straight from the brain menu -- it falls back to
+ * sampling for config::START_ALIGN_SAMPLE_MS.
+ *
+ * IT CAN REFUSE. If nothing valid is read, or the correction would be bigger than
+ * config::START_ALIGN_MAX_IN, the nominal (x, y, theta) is used unchanged and the brain says
+ * `!! START align skipped`. A sensor that is looking at a goal instead of the wall must never be able
+ * to teleport the pose. Returns true if the correction was applied.
+ *
+ * It also handles the one ordering trap: chassis.calibrate() RESETS the pose, so this waits for
+ * calibration (bounded) and re-applies the pose once more if calibration lands late.
+ *
+ *     auton::startPose(0, 0, 0, MATCH_START_LEFT_MM);
+ */
+bool startPose(double x, double y, double thetaDeg, double expectedLeftMm);
+/** The shift startPose() applied, inches (0 if it was skipped or never ran). */
+double startShiftIn();
+/** The averaged left reading startPose() used, mm (negative if it had none). */
+double startLeftMm();
+/** True if the last startPose() applied its correction; false if it was skipped or hasn't run. */
+bool startAligned();
+/** True once startPose() has run at all this program run (so the brain can show its result). */
+bool startPoseRan();
+
+/** Sample the left sensor into the rolling pre-match history. Call repeatedly from disabled(); it
+ *  returns at once, so the caller owns the loop. Costs one sensor read. */
+void startAlignSample();
+/** The settled pre-match average, mm, or a negative number if the history is empty, unsettled or
+ *  stale. The brain's START line shows this live while disabled. */
+double startAlignPreview();
+
+// ---------------------------------------------------------------------------
 // moveB — drive until the REAR distance sensor reads a target distance
 // ---------------------------------------------------------------------------
 /**

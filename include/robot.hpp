@@ -21,7 +21,10 @@ extern lemlib::Chassis chassis;
 extern pros::MotorGroup leftDrive;
 extern pros::MotorGroup rightDrive;
 extern pros::Rotation verticalEncoder;
-// Rear-facing distance sensor: the feedback for auton::moveB(), and shown on the brain's BACK line.
+// The three field-facing distance sensors, all shown on the brain's DIST line. The rear one is also
+// the feedback for auton::moveB(). (The claw's own sensor is inside subsystems::Claw.)
+extern pros::Distance leftDistance;
+extern pros::Distance rightDistance;
 extern pros::Distance backDistance;
 // Null when config::IMU_PORT == 0 (no IMU on the robot yet) -- always check before dereferencing.
 extern std::unique_ptr<pros::Imu> imu;

@@ -5,6 +5,7 @@
 #include "robot.hpp"
 #include "screen.hpp"
 
+#include "pros/distance.hpp"
 #include "pros/error.h"
 #include "pros/rtos.hpp"
 
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <algorithm>
 #include <mutex>
 
 namespace auton {
@@ -427,6 +429,183 @@ void resetLevel() {
 
 int level() { return robot::scoring.getLevel(); }
 const char* macroState() { return robot::scoring.stateName(); }
+
+// ---------------------------------------------------------------------------
+// Start-of-auton alignment (see auton.hpp for the full description)
+// ---------------------------------------------------------------------------
+namespace {
+
+/** One validated reading, mm, or -1. The same rule the team's old accumulateReading() used: reject
+ *  anything past START_ALIGN_MAX_MM or under START_ALIGN_MIN_CONFIDENCE. PROS_ERR (negative), the
+ *  sensor's "nothing there" 9999 and a 0 (cannot measure) all fall out of that test on their own. */
+double validMm(pros::Distance& sensor) {
+    const std::int32_t mm = sensor.get();
+    if (mm <= 0 || mm > config::START_ALIGN_MAX_MM) return -1.0;
+    const std::int32_t conf = sensor.get_confidence();
+    if (conf < config::START_ALIGN_MIN_CONFIDENCE) return -1.0;
+    return static_cast<double>(mm);
+}
+
+// The pre-match rolling history, filled by startAlignSample() from disabled() and read by the auton
+// task and the brain screen -- hence the mutex.
+constexpr int kHistorySize = 64;  // START_ALIGN_HISTORY_MS / 20 ms, with room to spare
+struct Sample {
+    std::uint32_t ms;
+    double mm;
+};
+Sample history[kHistorySize];
+int historyCount = 0;
+int historyNext = 0;
+pros::Mutex historyGate;
+
+// What the last startPose() did, for the brain's START line.
+std::atomic<bool> poseRan{false};
+std::atomic<bool> poseAligned{false};
+std::atomic<int> poseShiftThou{0};  // thousandths of an inch, so it fits an atomic int
+std::atomic<int> poseLeftMm{-1};
+
+/** The settled average of the history, or -1. "Settled" = enough samples, recent enough, and tight
+ *  enough that nothing was moving while they were taken (a hand still placing the robot, or someone
+ *  walking through the beam, spreads the window and disqualifies it). */
+double historyAverage() {
+    std::lock_guard<pros::Mutex> guard(historyGate);
+    if (historyCount < 5) return -1.0;
+    const std::uint32_t now = pros::millis();
+    double sum = 0.0, lo = 1e9, hi = -1e9;
+    int n = 0;
+    for (int i = 0; i < historyCount; ++i) {
+        const Sample& sm = history[i];
+        if (now - sm.ms > static_cast<std::uint32_t>(config::START_ALIGN_HISTORY_MS)) continue;
+        sum += sm.mm;
+        lo = std::min(lo, sm.mm);
+        hi = std::max(hi, sm.mm);
+        ++n;
+    }
+    if (n < 5) return -1.0;
+    if (hi - lo > config::START_ALIGN_HISTORY_SPREAD_MM) return -1.0;  // not settled: something moved
+    return sum / n;
+}
+
+}  // namespace
+
+double leftDistanceMm() { return validMm(robot::leftDistance); }
+double rightDistanceMm() { return validMm(robot::rightDistance); }
+
+double readLeftAveraged(int ms) {
+    const std::uint32_t start = pros::millis();
+    double sum = 0.0;
+    int n = 0;
+    do {
+        const double mm = validMm(robot::leftDistance);
+        if (mm > 0.0) {
+            sum += mm;
+            ++n;
+        }
+        pros::delay(10);
+    } while (ms > 0 && pros::millis() - start < static_cast<std::uint32_t>(ms));
+    return n > 0 ? sum / n : -1.0;
+}
+
+void startAlignSample() {
+    const double mm = validMm(robot::leftDistance);
+    if (mm <= 0.0) return;
+    std::lock_guard<pros::Mutex> guard(historyGate);
+    history[historyNext] = Sample{pros::millis(), mm};
+    historyNext = (historyNext + 1) % kHistorySize;
+    if (historyCount < kHistorySize) ++historyCount;
+}
+
+double startAlignPreview() {
+    {
+        std::lock_guard<pros::Mutex> guard(historyGate);
+        if (historyCount == 0) return -1.0;
+        const int last = (historyNext + kHistorySize - 1) % kHistorySize;
+        if (pros::millis() - history[last].ms > static_cast<std::uint32_t>(config::START_ALIGN_HISTORY_STALE_MS)) {
+            return -1.0;  // nobody has sampled for a while: this is not this match's setup
+        }
+    }
+    return historyAverage();
+}
+
+double startShiftIn() { return poseShiftThou.load() / 1000.0; }
+double startLeftMm() { return poseLeftMm.load(); }
+bool startAligned() { return poseAligned.load(); }
+bool startPoseRan() { return poseRan.load(); }
+
+bool startPose(double x, double y, double thetaDeg, double expectedLeftMm) {
+    // 1. CALIBRATION FIRST. chassis.calibrate() resets the pose, so applying one before it finishes
+    //    would simply be erased. autonomous() already waits (bounded) before the route runs; this is
+    //    the backstop for the case where that wait timed out.
+    const std::uint32_t waitStart = pros::millis();
+    while (!screen::calibrated &&
+           pros::millis() - waitStart < static_cast<std::uint32_t>(config::START_ALIGN_CALIBRATE_WAIT_MS)) {
+        pros::delay(10);
+    }
+    const bool calibratedInTime = screen::calibrated;
+
+    // 2. THE READING. Prefer the long, settled average taken while the robot sat disabled -- it costs
+    //    no auton time and is a far better average than a route could afford -- but confirm it with a
+    //    short fresh sample, because the robot may have been moved since. If they disagree, the fresh
+    //    one is the newer truth and wins.
+    const double preview = startAlignPreview();
+    const double confirm = readLeftAveraged(preview > 0.0 ? config::START_ALIGN_CONFIRM_MS
+                                                          : config::START_ALIGN_SAMPLE_MS);
+    double measured = -1.0;
+    if (preview > 0.0 && confirm > 0.0) {
+        measured = std::fabs(preview - confirm) <= config::START_ALIGN_CONFIRM_TOL_MM ? preview : confirm;
+    } else if (confirm > 0.0) {
+        measured = confirm;
+    } else if (preview > 0.0) {
+        measured = preview;  // the sensor just went invalid; the pre-match average is all there is
+    }
+
+    // 3. THE CORRECTION, and the guard. Further than expected = shifted +x (to the robot's right),
+    //    closer = -x. Anything bigger than START_ALIGN_MAX_IN is the sensor looking at a goal or the
+    //    wrong wall, not a hand-placement error, so it is dropped rather than trusted.
+    double dxIn = 0.0;
+    bool applied = false;
+    if (measured > 0.0 && expectedLeftMm > 0.0) {
+        const double candidate = (measured - expectedLeftMm) / 25.4;
+        if (std::fabs(candidate) <= config::START_ALIGN_MAX_IN) {
+            dxIn = candidate;
+            applied = true;
+        }
+    }
+
+    // 4. Apply it along the ROBOT'S RIGHT AXIS. In LemLib's frame theta is clockwise from +y, so the
+    //    robot's right unit vector is (cos theta, -sin theta); at theta = 0 this is exactly x + dx,
+    //    which is the driver's own description. Writing it this way keeps it physically right if a
+    //    route ever starts facing another way.
+    const double rad = thetaDeg * M_PI / 180.0;
+    const double px = x + dxIn * std::cos(rad);
+    const double py = y - dxIn * std::sin(rad);
+    robot::chassis.setPose(px, py, thetaDeg);
+
+    poseRan.store(true);
+    poseAligned.store(applied);
+    poseShiftThou.store(static_cast<int>(dxIn * 1000.0));
+    poseLeftMm.store(measured > 0.0 ? static_cast<int>(measured) : -1);
+
+    // 5. If calibration had NOT finished when we got here, it will reset the pose when it does. Put it
+    //    back, once, from a short-lived task so the route is not held up.
+    if (!calibratedInTime) {
+        static std::unique_ptr<pros::Task> reapply;
+        reapply = std::make_unique<pros::Task>(
+            [px, py, thetaDeg] {
+                const std::uint32_t start = pros::millis();
+                while (!screen::calibrated &&
+                       pros::millis() - start < static_cast<std::uint32_t>(config::START_ALIGN_REAPPLY_WINDOW_MS)) {
+                    pros::delay(10);
+                }
+                if (screen::calibrated) {
+                    pros::delay(20);  // let calibrate()'s own reset land first
+                    robot::chassis.setPose(px, py, thetaDeg);
+                }
+            },
+            TASK_PRIORITY_DEFAULT, TASK_STACK_DEPTH_DEFAULT, "start-pose-reapply");
+    }
+    return applied;
+}
 
 // ---------------------------------------------------------------------------
 // moveB — the rear-distance-sensor PD drive, ported 1:1 (see auton.hpp)

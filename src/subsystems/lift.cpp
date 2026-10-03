@@ -62,8 +62,7 @@ void Lift::zero() {
     // get_angle() here and every later get_position() read the same consistent way.
     if (rotation_) {
         const std::int32_t angleCentideg = foldCentideg(rotation_->get_angle());
-        startupAngleDeg_ = angleCentideg / 100.0;  // kept for the brain screen only
-        rotation_->set_position(angleCentideg);    // seed the counter -- NOT reset_position()
+        rotation_->set_position(angleCentideg);  // seed the counter -- NOT reset_position()
     }
     active_ = false;
     goal_ = 0.0;
@@ -107,18 +106,10 @@ double Lift::getSensorPosition() const {
     return rotation_->get_position() / 100.0 / config::LIFT_ROTATION_RATIO;
 }
 
-double Lift::getRawAngle() const { return rotation_ ? rotation_->get_angle() / 100.0 : 0.0; }
-
 double Lift::getTemperature() const {
     double hottest = 0.0;
     for (double t : motors_.get_temperature_all()) hottest = std::max(hottest, t);
     return hottest;
-}
-
-double Lift::getCurrentDraw() const {
-    double highest = 0.0;
-    for (std::int32_t c : motors_.get_current_draw_all()) highest = std::max(highest, static_cast<double>(c));
-    return highest;
 }
 
 double Lift::getPosition() const { return rotation_ ? getSensorPosition() : getMotorPosition(); }

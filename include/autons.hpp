@@ -29,5 +29,8 @@ void run();
 /** Which route run() will execute -- for the brain screen / a log line. */
 Route selected();
 const char* selectedName();
+/** The SELECTED route's expected left-wall reading, mm (0 if that route does not align). The brain
+ *  shows the live pre-match alignment against this while the robot sits disabled. */
+double expectedLeftMm();
 
 }  // namespace autons

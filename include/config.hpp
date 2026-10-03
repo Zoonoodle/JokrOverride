@@ -690,6 +690,58 @@ inline constexpr int AUTOCLAMP_MIN_CONFIDENCE = 0;           // TUNE
 inline constexpr int CLAW_RELEASE_LOCKOUT_MS = 750;          // TUNE
 
 // ---------------------------------------------------------------------------
+// Field-facing distance sensors (brain screen, and moveB's feedback)
+// ---------------------------------------------------------------------------
+// Three of them, all confirmed on the robot 2026-10-03: one each side and one looking backward. The
+// REAR one is the entire feedback loop for auton::moveB() (its own constants are in the moveB block
+// further down). The left and right ones are read by the brain's DIST line only -- nothing in the
+// control code uses them yet; they are there to be aimed at a wall or a stack while tuning a route.
+// The fourth distance sensor on this robot is the one inside the claw (CLAW_DISTANCE_PORT, 11) and it
+// belongs to the autoclamp, not here.
+inline constexpr int8_t LEFT_DISTANCE_PORT = 15;             // confirmed 2026-10-03
+inline constexpr int8_t RIGHT_DISTANCE_PORT = 19;            // confirmed 2026-10-03
+
+// --- START-OF-AUTON ALIGNMENT (auton::startPose(), see README "Start alignment") ---
+// The robot is set against the front wall every time, so the distance from the front and the heading
+// are repeatable -- but how far along that wall it ends up is not. The LEFT sensor measures that:
+// reading FURTHER than expected means the robot is shifted +x (toward the robot's right), CLOSER
+// means -x, and because the heading is fixed the difference in the reading IS the lateral shift --
+// no sensor-offset geometry is involved. Each route carries its own expected reading, next to the
+// route in src/autons.cpp (it is a field position, not a robot constant). These are the shared rules.
+//
+// VALIDITY, mirroring the team's old accumulateReading(): a sample counts only if it is under
+// START_ALIGN_MAX_MM and at least START_ALIGN_MIN_CONFIDENCE. 0, 9999 and PROS_ERR are rejected by
+// the same test. If NOTHING valid comes back, the correction is skipped entirely.
+inline constexpr int START_ALIGN_MAX_MM = 2000;              // TUNE: further than this is not our wall
+inline constexpr int START_ALIGN_MIN_CONFIDENCE = 38;        // TUNE: 60% of the sensor's 0..63 scale
+// SANITY GUARD. A shift bigger than this is not a hand-placement error, it is the sensor seeing a
+// goal, a robot, or the wrong wall -- so the correction is dropped and the nominal pose is used. It
+// must never be able to teleport the pose.
+//   Legitimate setups keep getting skipped: raise it, but only after checking the DIST line.
+inline constexpr double START_ALIGN_MAX_IN = 4.0;            // TUNE: inches
+// IN-AUTON sampling window, used only when there is no usable disabled-mode history (e.g. autonomous
+// launched straight from the brain menu). This time is spent at the start of the route.
+inline constexpr int START_ALIGN_SAMPLE_MS = 300;            // TUNE
+// DISABLED-MODE history. While the robot sits disabled before the match, the left sensor is sampled
+// continuously and the last START_ALIGN_HISTORY_MS are kept. startPose() uses that average -- zero
+// auton time spent, and a far longer average than a route could afford -- but only if the window is
+// SETTLED: max minus min under START_ALIGN_HISTORY_SPREAD_MM, so a hand still placing the robot (or a
+// person walking past the beam) does not count as a measurement.
+inline constexpr int START_ALIGN_HISTORY_MS = 500;           // TUNE
+inline constexpr int START_ALIGN_HISTORY_SPREAD_MM = 40;     // TUNE: a settled window is this tight
+inline constexpr int START_ALIGN_HISTORY_STALE_MS = 2000;    // older than this = not this match's setup
+// ...plus a short fresh sample at the start of auton to confirm the robot has not been moved since.
+// If the confirm disagrees with the history by more than START_ALIGN_CONFIRM_TOL_MM, the CONFIRM wins
+// (it is the newer truth) and that is what gets used.
+inline constexpr int START_ALIGN_CONFIRM_MS = 80;            // TUNE
+inline constexpr int START_ALIGN_CONFIRM_TOL_MM = 150;       // TUNE
+// chassis.calibrate() RESETS THE POSE, so a calibration that finishes after startPose() would wipe
+// the correction. startPose() waits this long for calibration before applying anything, and if it is
+// still not done it applies the pose and re-applies it once calibration really finishes.
+inline constexpr int START_ALIGN_CALIBRATE_WAIT_MS = 2500;   // TUNE
+inline constexpr int START_ALIGN_REAPPLY_WINDOW_MS = 4000;   // how long that one-shot re-apply waits
+
+// ---------------------------------------------------------------------------
 // Intake (ONE motor)
 // ---------------------------------------------------------------------------
 // Negative = reversed. If R1 spits cups out instead of pulling them in, flip the sign.
@@ -1044,7 +1096,7 @@ inline constexpr int AUTON_CALIBRATE_TIMEOUT_MS = 3000;
 // here, and EVERY ONE NEEDS RETUNING: the old robot had 3.25" traction wheels, this one has 2.75"
 // omnis, so the same power produces a different speed and the same error produces a different
 // overshoot.
-inline constexpr int8_t BACK_DISTANCE_PORT = 4;              // TODO(team): confirm -- 4 is the OLD robot's port
+inline constexpr int8_t BACK_DISTANCE_PORT = 14;             // confirmed 2026-10-03
 inline constexpr double MOVEB_KP = 0.28;                     // TUNE: power per mm of error
 inline constexpr double MOVEB_KD = 0.68;                     // TUNE: power per mm of error change per tick
 inline constexpr double MOVEB_TOLERANCE_MM = 5.0;            // TUNE: inside this counts as there

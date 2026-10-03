@@ -1,39 +1,45 @@
 #pragma once
 /**
- * Brain screen — live sensor readout while the program runs (disabled, auton and driver).
- * Unplugged or wrong devices show which port to check instead of garbage numbers.
+ * Brain screen — four lines, and nothing else unless something is broken.
  *
- * Drawn with pros::screen (not the 8-line pros::lcd console) so there's room for a full lift
- * tuning section (position, target, error, output, P/I/D terms, active preset, settled/blocked/
- * fault, gains, temp and current) alongside the existing pose/IMU/odom/distance readouts, plus an
- * ANGLE line showing the rotation sensor's live raw absolute angle and the one-time startup seed
- * (see Lift::zero()) so the sensor's own calibrated zero can be checked by eye.
+ *   POSE  X 0.0  Y 0.0  T 0.0
+ *   LIFT  31.0 -> 31.0  STACK 1  PARK  HOMED  R:INTAKE
+ *   CLAW  CLAMPED  AC:HELD  PIV OUT
+ *   DIST  L 152  R 148  BACK 300  CLAW 12 mm
+ *
+ * That is the whole readout (the driver's own choice, 2026-10-03: "display left right and back
+ * distance sensor values to brain please, remove all temp and that random stuff"). The old tuning
+ * block -- ROT, ANGLE, err/vel/out, the velocity reference, the learned gravity voltage, the L2
+ * contact signals, the TUNE constants echo, motor temperatures and currents, the DRV heartbeat -- is
+ * gone. Nothing is lost that mattered: every one of those numbers is in the LIFT_TRACE terminal
+ * output at 20 ms resolution (VS Code -> PROS -> Brain Terminal; see README "Capturing a trace"),
+ * which is a better place to read a moving number than a screen refreshed every 50 ms anyway.
+ *
+ * WARNING LINES appear only when a device is missing or is the wrong type -- one line per problem,
+ * at most kMaxWarnings of them, under the four lines above:
+ *
+ *   !! IMU not connected (port 18)
+ *
+ * Everything the four lines show comes from the subsystems themselves; this header only carries the
+ * few flags the driver loop has to hand over.
  */
 
 #include <cstdint>
 
 namespace screen {
-/** Written by opcontrol every loop so the brain shows the driver loop is alive and what it sees. */
-struct DriverDebug {
-    std::uint32_t loops = 0;  // 0 = opcontrol has not started
-    int forward = 0, turn = 0;
-    bool up = false, down = false;  // D-pad Up/Down, the lift's manual override
-};
-extern DriverDebug driverDebug;
+
 /** What R1/R2 are doing right now, written by opcontrol every loop so the brain can show it:
  *  INTAKE = roller in/out (nothing clamped), LIFT = lift up/down (a pin is clamped), INERT = the
- *  clamp state changed while the button was held, so they do nothing until it is released. */
+ *  clamp state changed while the button was held, so they do nothing until it is released. The
+ *  safety rules in CLAUDE.md reference this token, so it stays on the screen. */
 enum class RMode { IDLE, INTAKE, LIFT, INERT };
 extern RMode rMode;
-/** True while L1's auto-intake is sweeping during a rise off the floor (see config's
- *  L1_AUTO_INTAKE_UNTIL_DEG). Written by opcontrol every loop; shown as INT:AUTO on the DRV line. */
-extern bool autoIntake;
-/** True while an L2 score descent is auto-outtaking near the bottom (see config's
- *  L2_OUTTAKE_BELOW_DEG). Written by opcontrol every loop; shown as INT:OUT on the DRV line. */
-extern bool autoOuttake;
-/** True once chassis.calibrate() has finished (it runs in the background). */
+
+/** True once chassis.calibrate() has finished (it runs in the background). autonomous() waits on it,
+ *  bounded; the POSE line says `calibrating...` until then. */
 extern bool calibrated;
 
 /** Start the background task that redraws the brain screen every 50 ms. Call once from initialize(). */
 void start();
+
 }  // namespace screen

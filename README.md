@@ -51,7 +51,9 @@ All ports live in `include/config.hpp`. Current values:
 | Lift rotation sensor | 16, on the 12T motor axle (same 4:1 as the motors) -- the lift PID runs off this sensor |
 | Intake (one motor) | 12 |
 | Claw distance sensor (autoclamp) | 11 (mounted in the claw, confirmed 2026-10-02) |
-| Rear distance sensor (`auton::moveB`) | 4 -- **TODO(team): confirm**, this is the OLD robot's port |
+| Rear distance sensor (`auton::moveB`, brain `DIST BACK`) | 14 (confirmed 2026-10-03) |
+| Left distance sensor (start alignment, brain `DIST L`) | 15 (confirmed 2026-10-03) |
+| Right distance sensor (brain `DIST R`) | 19 (confirmed 2026-10-03) |
 | Claw cylinder | ADI **D** (was coded as C until 2026-10-01 -- the two cylinders were crossed) |
 | Pivot cylinder | ADI **C** (was coded as D) |
 
@@ -70,10 +72,10 @@ allowed to own the lift motors.
 | **D-pad Up** (hold) | lift **up**, full power (manual, cancels any preset/macro target) |
 | **D-pad Down** (hold) | lift **down**, full power (same) |
 | let go of Up/Down | lift motors HOLD where they are (no target resumes) |
-| **L1** | intake macro: step up a stack level. **From the `INTAKE` handoff (the R1 position) it does THE GRAB first:** the arm forces itself **down** onto the pin at `L1_GRAB_PUSH_PCT` (40% of volts, open-loop), the jaws close `L1_GRAB_CLOSE_AT_MS` (200 ms) into the push, and the push keeps pressing until **both** `L1_GRAB_PUSH_MS` (300 ms) and the jaws' own `CLAW_CLOSE_TIME_MS` (150 ms from the moment they were commanded) are satisfied -- about **350 ms** of pressing down -- so the arm can never pull up out of a claw that is still closing. Only then does it rise to level 1. The **intake is stopped for the whole push** (it would drag the pin out from under the jaws), and L1's floor sweep below starts from the **rise** instead. Brain `LIFT` line: `GRAB`; macro state `GRABBING`. If the claw is already clamped the push still happens (it seats the grip), the close is skipped, and it rises. `L1_GRAB_MAX_MS` is the safety cutoff. From anywhere else L1 is unchanged: (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached). If the claw is already `CLAMPED` (L2 just clamped it at the bottom), the first tap skips the clamp wait and rises immediately. **Auto-intake:** an L1 that starts a rise **from the floor** (at the bottom / seated, e.g. after an L2 score or a B stow, or parked at the `INTAKE` handoff after R1) also runs the intake rollers **in** from the press itself -- including during the claw-close wait -- until the arm climbs past `L1_AUTO_INTAKE_UNTIL_DEG` (20°), sweeping the floor while the arm is going up anyway. The brain's `DRV` line shows `INT:AUTO` while it runs. Extra L1 taps during the same rise neither restart nor extend it, and an L1 from a stack level never starts it. It stops early on D-pad, B, L2, clamped-mode R1/R2, or a `BLOCKED`/`FAULT` lift, and after `L1_AUTO_INTAKE_MAX_MS` regardless |
-| **L2** | intake macro, **above the bottom**, holding a pin → **THE SENSING SCORER**. The jaws stay **shut**; the arm presses the pin **down onto the stack** at `L2_SCORE_SPEED_PCT` (60%), watches the rotation sensor for the landing -- at least **two** of the three `LAG`/`EFFORT`/`SPEED` signals must agree on the same tick (`AGREEMENT`, 2026-10-02; a lone signal can no longer fire by itself, see "Tuning the L2 scorer"), and now also won't mistake a **loaded** arm (pin + cup) slowly out-running gravity for something resting on it (`ARM ON MOTION` + `SPLIT STALL`, 2026-10-02). **Guaranteed release:** if nothing is detected once the arm has travelled `L2_AUTO_RELEASE_DEG` (32°) **down from where L2 was first pressed** (a *relative* travel budget, not an absolute reading) it releases anyway, right there (`REL(32)` on the brain) -- there is no more "pressed all the way down with nothing released". A start too low for that much travel before the floor (level 1, 31°) instead falls back to releasing at `L2_RELEASE_FLOOR_DEG` (`REL(floor)`), so level 1 still gets real sensing time rather than releasing on the first tick. Either way it then **releases the claw and keeps pushing down** so the jaws slide off → confirm the arm runs free again → **keep pressing a further `L2_POST_RELEASE_PUSH_MS`** (100 ms) so they slide fully clear → **rise `L2_CLEAR_RISE_DEG`** (20°) above wherever it stopped → **HOLD there, latched, indefinitely** (brain: `SCORED UP`). **PRESS 1 ENDS THERE -- there is no automatic descent to the bottom any more**, so the robot can drive away with the claw above the pins without any chance of knocking one over. **PRESS 2** (L2 again from that held position, or **B**) is the ending that used to be automatic: the fast run home at `L2_RETURN_SPEED_PCT`, `FINAL` forcing the last few degrees onto the hard stop, and `SEAT` at 0. If the claw stays caught on the pin it lifts `L2_UNSTICK_UP_DEG` (20°) and retries, up to `L2_MAX_UNSTICK_TRIES`, then stops and shows `SCORE STUCK` -- the 20° clear rise is only ever reached through the **freed** check, so it can never drag a pin the claw is still hooked on. Pivot stays **OUT** throughout; the D-pad cancels at any stage; L2 pressed mid-sequence is ignored. The level count resets at press 1. **While held above:** R1 still runs the rollers and sends the arm to the handoff, L1 still starts a new stack from level 1, and the autoclamp stays **inhibited until press 2 has seated** so the pin just released cannot be re-grabbed on the way down past it. **Auto-outtake:** whenever either press has the arm below `L2_OUTTAKE_BELOW_DEG` (40°) the intake rollers run **out** at `L2_OUTTAKE_PCT` (60%) on their own -- so on **press 1** through PRESS/REL/UNSTK/PUSH (it ends when press 1 reaches its hold), and on **press 2** through the run home, stopping as soon as the arm reaches `L2_OUTTAKE_STOP_DEG` (tied to `LIFT_FINAL_START_DEG`, 3°) where `FINAL`'s own authority takes over. The brain's `DRV` line shows `INT:OUT` while it runs; `L2_OUTTAKE_MAX_MS` is the safety cutoff. **At the bottom** (seated, or within `LIFT_BOTTOM_GOAL_DEG` of it) and not mid-move: L2 is instead the **clamp trigger** -- not clamped → clamp, clamped → release -- the same toggle A uses, moving neither the lift, the pivot, nor the intake |
+| **L1** | intake macro: step up a stack level. **From the `INTAKE` handoff (the R1 position) it does THE GRAB first:** the arm forces itself **down** onto the pin at `L1_GRAB_PUSH_PCT` (40% of volts, open-loop), the jaws close `L1_GRAB_CLOSE_AT_MS` (200 ms) into the push, and the push keeps pressing until **both** `L1_GRAB_PUSH_MS` (300 ms) and the jaws' own `CLAW_CLOSE_TIME_MS` (150 ms from the moment they were commanded) are satisfied -- about **350 ms** of pressing down -- so the arm can never pull up out of a claw that is still closing. Only then does it rise to level 1. The **intake is stopped for the whole push** (it would drag the pin out from under the jaws), and L1's floor sweep below starts from the **rise** instead. Brain `LIFT` line: `GRAB`; macro state `GRABBING`. If the claw is already clamped the push still happens (it seats the grip), the close is skipped, and it rises. `L1_GRAB_MAX_MS` is the safety cutoff. From anywhere else L1 is unchanged: (1st tap clamps + goes to level 1; each tap after goes up one level, staying at level 5 once reached). If the claw is already `CLAMPED` (L2 just clamped it at the bottom), the first tap skips the clamp wait and rises immediately. **Auto-intake:** an L1 that starts a rise **from the floor** (at the bottom / seated, e.g. after an L2 score or a B stow, or parked at the `INTAKE` handoff after R1) also runs the intake rollers **in** from the press itself -- including during the claw-close wait -- until the arm climbs past `L1_AUTO_INTAKE_UNTIL_DEG` (20°), sweeping the floor while the arm is going up anyway.  Extra L1 taps during the same rise neither restart nor extend it, and an L1 from a stack level never starts it. It stops early on D-pad, B, L2, clamped-mode R1/R2, or a `BLOCKED`/`FAULT` lift, and after `L1_AUTO_INTAKE_MAX_MS` regardless |
+| **L2** | intake macro, **above the bottom**, holding a pin → **THE SENSING SCORER**. The jaws stay **shut**; the arm presses the pin **down onto the stack** at `L2_SCORE_SPEED_PCT` (60%), watches the rotation sensor for the landing -- at least **two** of the three `LAG`/`EFFORT`/`SPEED` signals must agree on the same tick (`AGREEMENT`, 2026-10-02; a lone signal can no longer fire by itself, see "Tuning the L2 scorer"), and now also won't mistake a **loaded** arm (pin + cup) slowly out-running gravity for something resting on it (`ARM ON MOTION` + `SPLIT STALL`, 2026-10-02). **Guaranteed release:** if nothing is detected once the arm has travelled `L2_AUTO_RELEASE_DEG` (32°) **down from where L2 was first pressed** (a *relative* travel budget, not an absolute reading) it releases anyway, right there (`REL(32)` on the brain) -- there is no more "pressed all the way down with nothing released". A start too low for that much travel before the floor (level 1, 31°) instead falls back to releasing at `L2_RELEASE_FLOOR_DEG` (`REL(floor)`), so level 1 still gets real sensing time rather than releasing on the first tick. Either way it then **releases the claw and keeps pushing down** so the jaws slide off → confirm the arm runs free again → **keep pressing a further `L2_POST_RELEASE_PUSH_MS`** (100 ms) so they slide fully clear → **rise `L2_CLEAR_RISE_DEG`** (20°) above wherever it stopped → **HOLD there, latched, indefinitely** (brain: `SCORED UP`). **PRESS 1 ENDS THERE -- there is no automatic descent to the bottom any more**, so the robot can drive away with the claw above the pins without any chance of knocking one over. **PRESS 2** (L2 again from that held position, or **B**) is the ending that used to be automatic: the fast run home at `L2_RETURN_SPEED_PCT`, `FINAL` forcing the last few degrees onto the hard stop, and `SEAT` at 0. If the claw stays caught on the pin it lifts `L2_UNSTICK_UP_DEG` (20°) and retries, up to `L2_MAX_UNSTICK_TRIES`, then stops and shows `SCORE STUCK` -- the 20° clear rise is only ever reached through the **freed** check, so it can never drag a pin the claw is still hooked on. Pivot stays **OUT** throughout; the D-pad cancels at any stage; L2 pressed mid-sequence is ignored. The level count resets at press 1. **While held above:** R1 still runs the rollers and sends the arm to the handoff, L1 still starts a new stack from level 1, and the autoclamp stays **inhibited until press 2 has seated** so the pin just released cannot be re-grabbed on the way down past it. **Auto-outtake:** whenever either press has the arm below `L2_OUTTAKE_BELOW_DEG` (40°) the intake rollers run **out** at `L2_OUTTAKE_PCT` (60%) on their own -- so on **press 1** through PRESS/REL/UNSTK/PUSH (it ends when press 1 reaches its hold), and on **press 2** through the run home, stopping as soon as the arm reaches `L2_OUTTAKE_STOP_DEG` (tied to `LIFT_FINAL_START_DEG`, 3°) where `FINAL`'s own authority takes over. `L2_OUTTAKE_MAX_MS` is the safety cutoff. **At the bottom** (seated, or within `LIFT_BOTTOM_GOAL_DEG` of it) and not mid-move: L2 is instead the **clamp trigger** -- not clamped → clamp, clamped → release -- the same toggle A uses, moving neither the lift, the pivot, nor the intake |
 | **B** | **stow**: pivot **OUT**, lift straight down to `DOWN` and seated, cancel the intake macro. Uses the same fast banded descent as L2's run home (`LIFT_DESCENT_TOP_PCT` / `_MID_PCT`, now 80% / 95%), minus any claw work |
-| **A** | claw clamp / open. The claw is physically **OPEN at power-on** -- it needs air to grip: the `CLAW` line shows `OPEN D[0]` and A closes it. `CLAW_CLOSED_IS_ADI_HIGH` (`true`) says which ADI level is closed; if A *opens* the jaws while the line says `CLAMPED`, flip it |
+| **A** | claw clamp / open. The claw is physically **OPEN at power-on** -- it needs air to grip: the `CLAW` line shows `OPEN` and A closes it. `CLAW_CLOSED_IS_ADI_HIGH` (`true`) says which ADI level is closed; if A *opens* the jaws while the line says `CLAMPED`, flip it |
 | **X** | pivot **OUT** / **BACK** (the brain's `CLAW` line shows `PIV OUT C[0]` / `PIV BACK C[1]`: word, port letter, raw ADI level) |
 | **Y** | autoclamp on / off (it is **on** from the moment driver control starts -- see "Autoclamp") |
 
@@ -120,13 +122,13 @@ doesn't touch the claw or pivot, either -- those stay exactly where they physica
 button right now -- available for autonomous, or a future button.
 
 **The 30-second A/X polarity check -- do this first on any new build.** Power on, don't enable, and
-read the brain's `CLAW` line. It must say `CLAW OPEN D[0]  PIV OUT C[0]`, and the mechanisms must
+read the brain's `CLAW` line. It must say `CLAW  OPEN  AC:... PIV OUT`, and the mechanisms must
 physically match: jaws open, pivot swung out. Then:
 - press **A**: the **jaws** must close. The line must read `CLAMPED D[1]`. If the *pivot* moved
   instead, the two ports are crossed again -- swap `CLAW_PISTON_PORT` / `PIVOT_PISTON_PORT`. If the
   jaws *opened* (they were already open, so nothing visible happens, then A again shuts nothing), flip
   `CLAW_CLOSED_IS_ADI_HIGH`.
-- press **A** again: the jaws open, line back to `RELEASED D[0]` or `OPEN D[0]`.
+- press **A** again: the jaws open, line back to `RELEASED` or `OPEN`.
 - press **X**: the **pivot** must pull BACK (in toward the intake). The line must read `BACK C[1]`. If
   it swung further out, flip `PIVOT_OUT_IS_ADI_HIGH`.
 - press **X** again: the pivot swings OUT, line back to `OUT C[0]`.
@@ -135,7 +137,7 @@ physically match: jaws open, pivot swung out. Then:
 the macro is mid-move (`STACKING`/`MOVING`) -- the macro also drives the pivot as part of its
 interlocks, and the two aren't coordinated with each other.
 
-**Brain `DRV` line:** `not started` means driver control never ran (not enabled, or the program crashed; look for a red error on the brain). Otherwise it shows a loop counter going up plus the stick values and the manual-override Up/Down it reads. If the counter climbs and `Up 1` shows but the lift doesn't move, the problem is wiring or motor direction, not code.
+**Is the driver loop alive?** The `LIFT` line's `R:` field changes the moment R1 or R2 is held, and the `CLAW` line reacts to A and X. If none of them move, driver control never started (not enabled, or the program crashed -- look for a red error on the brain). If they do move but the lift does not, the problem is wiring or motor direction, not code.
 
 ## Autonomous API
 Everything autonomous can do lives in **`include/auton.hpp`** (the API) and is written into routes in
@@ -278,7 +280,7 @@ autonomous period.
 **`LIFT_TEST` on the robot** (lift, claw and intake only -- nothing drives):
 1. Put the arm anywhere reasonable, power on, enable autonomous (competition switch, or the brain's
    program-run menu).
-2. The arm drives **down** to its hard stop. Brain `ANGLE` line: `HOMING`, then `HOMED @ <angle>`.
+2. The arm drives **down** to its hard stop. Brain `LIFT` line: `HOMING`, then `HOMED`.
 3. For 2 s: `LIFT 0.0 -> 0.0  DOWN  SEAT  SETTLED`. It must not creep up.
 4. Up to stack level 1: `LIFT ... -> 31.0  STACK 1  DRIVE` then `HOLD` for 2 s, within ~5 deg of 31.
 5. Up to stack level 3: ends `HOLD` near 74.6 for 2 s.
@@ -364,7 +366,7 @@ the wait returns `false` after 2 s and the route can bail out.
 
 ## Lift direction check (do this first)
 The lift runs off the **rotation sensor** on port 16, mounted on the 12T motor axle (confirmed, geared 4:1 into the 48T lift-arm axle -- `LIFT_GEAR_RATIO` / `LIFT_ROTATION_RATIO` are both `4.0`). Everything in the code -- presets, PID target/error, the brain's `LIFT` lines -- works in **lift-arm degrees**; that 4:1 is what converts the sensor/motor side down to that one shared unit. If the sensor and the motors disagree on which way is up, the PID pushes the wrong way, the error grows, and the lift drives itself down. That's the "randomly spinning down" problem. To check:
-1. Start the program with the lift fully down, and **don't enable**. The brain's `ROT` line shows the rotation sensor and motor encoders side by side, already converted to lift-arm degrees, with the raw sensor/motor degrees in brackets.
+1. Start the program with the lift fully down, and **don't enable**. The brain's `LIFT` line shows the arm position in lift-arm degrees; open the Brain Terminal too (`LIFT_TRACE`) if you want the raw numbers.
 2. Lift the arm up by hand. **Both (unbracketed) readings must go positive**, and should read about the same as each other. The bracketed raw sensor reading should be about 4x the bracketed raw motor reading (the 4:1) -- if it isn't, `LIFT_GEAR_RATIO`/`LIFT_ROTATION_RATIO` don't match the real gearing, fix those first.
    - the motor reading goes negative → the lift motors are reversed. Flip the signs in `LIFT_PORTS`.
    - the rotation reading goes negative → set `LIFT_ROTATION_REVERSED = true`.
@@ -597,15 +599,15 @@ assumes the one above is settled. **Start from the values in `config.hpp` -- the
    `FINAL` no longer early-exits the moment it looks settled -- it forces the whole window on purpose,
    then judges once by position: within `LIFT_SEAT_ZERO_DEG` (1°) of 0 is plain `SEAT`, anything more is
    `SEAT(short)`. Push the arm up by hand during `SEAT`: it should press straight back down.
-   - `LIFT` reads `SEAT(short)` / stops a few degrees short every time → first confirm `ANGLE` reads
-     `HOMED` (an un-homed seed makes "0" a lie), then raise `LIFT_FINAL_MAX_MV` (5000 → 6500), then
-     `LIFT_FINAL_FORCE_MS` (1500 → 2000). If a cup in the intake is the actual obstruction, check it is
-     still outtaking (`INT:OUT` on `DRV`) up to `L2_OUTTAKE_STOP_DEG` -- see `L2_OUTTAKE_*` below.
+   - `LIFT` reads `SEAT(short)` / stops a few degrees short every time → first confirm the `LIFT` line
+     says `HOMED` (an un-homed seed makes "0" a lie), then raise `LIFT_FINAL_MAX_MV` (5000 → 6500), then
+     `LIFT_FINAL_FORCE_MS` (1500 → 2000). If a cup in the intake is the actual obstruction, check the
+     rollers are still ejecting up to `L2_OUTTAKE_STOP_DEG` -- see `L2_OUTTAKE_*` below.
    - `FINAL` thumps into the frame → lower `LIFT_FINAL_DEG_PER_S` (12 → 8)
    - still bounces up off the stop once truly `SEAT`ed → more negative `LIFT_SEAT_MV` (−1500 → −1800)
    - `SEAT` appears while the arm is still a few degrees up (not `SEAT(short)` -- a real false arrival)
      → lower `LIFT_SEAT_ZERO_DEG`
-   - lift motors warming on the `TEMP` line while parked at the bottom → see `REST` below; the seat
+   - lift motors warming while parked at the bottom (check them by hand) → see `REST` below; the seat
      only lasts `LIFT_REST_AFTER_MS` now, so this should no longer happen
 8b. **`REST`: loose motors at the bottom.** `LIFT_REST_AFTER_MS` (300 ms) after the seated arm has gone
    still, the phase becomes `REST`: brake mode **coast**, 0 V, no PID and no seat push, so the motors
@@ -748,7 +750,7 @@ show `pos` holding within a degree with no sign change in `vel`. Any oscillation
 | The last couple of degrees take too long | raise `LIFT_APPROACH_KP_PER_S`, then `LIFT_APPROACH_DEG_PER_S` |
 | The approach band (entering below `LIFT_DESCENT_SLOW_ZONE_DEG`) thumps or overshoots into `FINAL` hot | raise `LIFT_DESCENT_RAMP_DEG_PER_S2` further, or raise `LIFT_DESCENT_SLOW_ZONE_DEG` for more room to brake |
 | L2's descent is too slow overall | raise `LIFT_DESCENT_MID_PCT`, lower `LIFT_DESCENT_SLOW_ZONE_DEG`, or raise `LIFT_DESCENT_SLOW_PCT` |
-| `LIFT` reads `SEAT(short)` / stops a few degrees short of 0 | check `ANGLE` reads `HOMED` first, then raise `LIFT_FINAL_MAX_MV`, then `LIFT_FINAL_FORCE_MS` -- see "Seating" in step 8 above |
+| `LIFT` reads `SEAT(short)` / stops a few degrees short of 0 | check the `LIFT` line says `HOMED` first, then raise `LIFT_FINAL_MAX_MV`, then `LIFT_FINAL_FORCE_MS` -- see "Seating" in step 8 above |
 | `FINAL` (the `Z` phase) thumps into the frame | lower `LIFT_FINAL_DEG_PER_S` |
 | The arm bounces back up off the bottom after a true `SEAT` | more negative `LIFT_SEAT_MV` |
 | Lift motors warm while parked at the bottom | less negative `LIFT_SEAT_MV`; `SEAT(hot)` on the brain means `LIFT_SEAT_TEMP_LIMIT_C` already cut it |
@@ -791,7 +793,7 @@ seed and shows `HOME FAIL`. A `LIFT_HOME_TIMEOUT_MS` timeout does the same. No r
 answering gives `HOME SKIPPED` and no motion at all. The stall and runaway guards are not reached
 while homing, because driving into a hard stop is homing's whole job.
 
-**Watch the brain's `ANGLE` line:** `HOMING` -> `HOMED @ 0.4`, or `HOME FAIL @ 37.2`. The number is
+**Watch the brain's `LIFT` line:** `HOMING` -> `HOMED`, or `HOME FAIL @ 37.2`. The number is
 the absolute angle it saw at the stop — the one the plausibility window was checked against.
 
 | Symptom | Change |
@@ -803,7 +805,7 @@ the absolute angle it saw at the stop — the one the plausibility window was ch
 | Too slow / times out | raise `LIFT_HOME_MV` magnitude (more negative) or `LIFT_HOME_TIMEOUT_MS` |
 
 ## Tuning the claw positions
-All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.hpp`) -- the **unbracketed** number on the brain's `LIFT` and `ROT` lines. (The bracketed figure on the `ROT` line is raw *sensor* degrees, 4× bigger; don't put those in here.) 0 is the hard stop at the bottom. The 5 `STACK_LEVELS` were **measured on the robot 2026-10-01** by driving to each scoring height and reading the `LIFT` line: **31.0 / 59.0 / 74.6 / 87.3 / 106.9**, with `MAX` = 111.9 as the software stop. They replace the older photo-derived set (26.6 / 54.4 / 72.8 / 116.3 / 128.3), which was taken before homing existed and carried that session's zero offset. `MATCHLOAD` is still a placeholder, and `INTAKE` (1.1) almost certainly needs re-measuring. To (re)measure any of them:
+All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.hpp`) -- the number on the brain's `LIFT` line. 0 is the hard stop at the bottom. The 5 `STACK_LEVELS` were **measured on the robot 2026-10-01** by driving to each scoring height and reading the `LIFT` line: **31.0 / 59.0 / 74.6 / 87.3 / 106.9**, with `MAX` = 111.9 as the software stop. They replace the older photo-derived set (26.6 / 54.4 / 72.8 / 116.3 / 128.3), which was taken before homing existed and carried that session's zero offset. `MATCHLOAD` is still a placeholder, and `INTAKE` (1.1) almost certainly needs re-measuring. To (re)measure any of them:
 1. Start the program with the lift fully down.
 2. Use **D-pad Up/Down** to put the claw exactly where you want it, then read the brain's `LIFT` line for the current position.
 3. Type that number into the preset:
@@ -817,23 +819,85 @@ All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.h
 **Lift gains** are a separate procedure -- see "Tuning the lift" above.
 
 ## Brain screen
-Shows live readings the whole time the program runs (disabled, auton and driver), drawn with
-`pros::screen` (not the 8-line `pros::lcd` console) so there's room for the full lift tuning section
-below alongside the existing sensor readouts. A sensor that isn't plugged in shows `not connected
-(port N)`, and the wrong device on a port shows `WRONG DEVICE on port`, instead of junk numbers.
+Four lines, and nothing else unless something is broken (the driver's own layout, 2026-10-03):
+
+```
+POSE  X 0.0  Y 0.0  T 0.0
+LIFT  31.0 -> 31.0  STACK 1  PARK  HOMED  R:INTAKE
+CLAW  CLAMPED  AC:HELD  PIV OUT
+DIST  L 152  R 148  BACK 300  CLAW 12 mm
+START dx +0.4 in (L 1574/1570)
+```
 
 | Line | Shows |
 |---|---|
-| POSE | odometry X / Y (in) and theta (deg), from the tracking wheel + IMU |
-| IMU | `none (not installed)` (no IMU on the robot yet), or heading and total rotation, or `calibrating... keep still` |
-| ODOM | tracking wheel rotation sensor, in degrees |
-| ROT | lift rotation sensor vs motor encoders. Both must go + when the lift goes up |
-| ANGLE | the rotation sensor's live raw absolute angle, the startup seed, and the homing state (`HOMING` / `HOMED @ n` / `HOME FAIL @ n`) |
-| CLAW | claw state (`OPEN`/`ARMED`/`CLAMPED`/`RELEASED`) and pivot `PIV OUT` / `PIV BACK`, **each with its ADI port letter and raw level** (`CLAW OPEN D[0]  PIV OUT C[0]` at power-on) so A / X each confirm one polarity constant; then intake-macro state, stack level, and `R:INTAKE`/`R:LIFT`/`R:wait` -- which mode R1/R2 are in |
-| LIFT (position line) | position → target (or `none`), the active named preset (or `custom`), the phase (`DRIVE`/`BRAKE`/`APPROACH`/`HOLD`/`DESCEND`/`RETURN`/`FINAL`/`SEAT`/`SEAT(short)`/`PRESS`/`REL`/`UNSTK`, where `REL` carries which signal fired, `REL(32)` for the relative-travel guaranteed release, or `REL(floor)` for a start too low for that travel to complete), and `FAULT`/`SCORE STUCK`/`BLOCKED`/`SETTLED` (no more `NO CONTACT` -- a release is always guaranteed one way or another) |
-| LIFT (err/vel/out line) | error in lift degrees, measured arm speed in deg/s, and what was sent to the motors in mV |
-| LIFT (ref line) | the speed reference the velocity loop is tracking this tick (0 in `HOLD`/`SEAT`) and the hold loop's learned gravity voltage in mV -- **or, during an L2 score, all three contact signals live**: `L2 lag <deg> eff <mV> v/b <%>`. Then `DIST`: claw distance sensor mm and `PIN` when inside `AUTOCLAMP_RANGE_MM` |
-| TUNE | `LIFT_DECEL_DEG_PER_S2`, the approach zone / speed, `LIFT_HOLD_KD` and `LIFT_TOLERANCE_DEG` read straight from `config.hpp`, so you can see which build is on the brain while iterating |
-| LIFT (temp/current line) | lift motor temp (°C) and current draw (mA) |
-| TEMP | hottest left drive / right drive / lift motor and the intake motor (C). Motors lose power around 55 C. |
-| DRV | driver-loop heartbeat: `not started`, or a loop counter plus stick values and the manual-override Up/Down, plus `INT:OUT` while L2's auto-outtake is ejecting near the bottom, else `INT:AUTO` while L1's auto-intake is sweeping (the two never overlap) |
+| POSE | odometry X / Y (in) and heading (deg), or `calibrating...` until the IMU is done |
+| LIFT | position → target (or `none`), the named preset (or `custom`), the phase -- `DRIVE`/`BRAKE`/`APPROACH`/`HOLD`/`PARK`/`PARK(t/o)`/`GRAB`/`PRESS`/`REL(...)`/`PUSH`/`SCORED UP`/`DESCEND`/`RETURN`/`FINAL`/`SEAT`/`SEAT(short)`/`REST` -- then `FAULT`/`SCORE STUCK`/`BLOCKED` if any, the homing state (`HOMING` / `HOMED` / `HOME FAIL @ n`), and `R:INTAKE`/`R:LIFT`/`R:wait` (which mode R1/R2 are in). If a lift button seems to do nothing, read this line first |
+| CLAW | the jaws (`OPEN`/`ARMED`/`CLAMPED`/`RELEASED`), the autoclamp (`AC:OFF`/`ARMED`/`SEEING`/`CLEAR?`/`HELD` -- see "Autoclamp"), and the pivot (`PIV OUT`/`PIV BACK`) |
+| DIST | the three field-facing distance sensors and the one in the claw, in mm. `--` = nothing in range or an unusable reading. `BACK` is `moveB`'s entire feedback loop -- `--` there means it would drive blind |
+| START | before the match: the **live** left-wall alignment against the selected route's expected reading. After auton has run: the shift `auton::startPose()` applied, or `!! START align skipped`. Blank otherwise -- see "Start alignment" |
+| `!! ...` | **only when something is wrong**: a missing or wrong-type device on any port (drive, lift, intake, both rotation sensors, the IMU, all four distance sensors), one line each, at most 3. A healthy robot shows none |
+
+**Everything else moved to the Brain Terminal.** The old ROT / ANGLE / err-vel-out / velocity-reference /
+learned-gravity / L2-contact-signals / TUNE / motor-temperature / DRV lines are gone. Every one of
+those numbers is in the `LIFT_TRACE` output at 20 ms resolution (VS Code → PROS → **Brain Terminal**,
+see "Capturing a trace"), which is a better place to read a moving number than a screen refreshed
+every 50 ms. Watch the terminal, not the screen, when tuning.
+
+## Start alignment
+The robot is set against the front wall every match, so the distance from the front and the heading
+repeat -- but **how far along that wall it ends up does not**. One call at the top of a route measures
+that single unknown with the **left** distance sensor and folds it into the starting pose:
+
+```cpp
+auton::startPose(MATCH_START_X, MATCH_START_Y, MATCH_START_THETA, MATCH_START_LEFT_MM);
+```
+
+* `dx_in = (measured left mm − expected left mm) / 25.4`.
+* **Further than expected → the robot is shifted +x; closer → −x.** Because the heading is fixed and
+  known, the change in the reading *is* the lateral shift -- no sensor-mounting geometry is involved.
+* The shift is applied along the **robot's right axis**, `(cos θ, −sin θ) × dx`, so it stays physically
+  correct if a route ever starts facing another way. At θ = 0 that is exactly `x + dx`, which is how
+  the driver describes it, and it matches LemLib's frame (at heading 0 the robot's right is +x).
+* It **replaces** `chassis.setPose()` in a route -- don't call both.
+
+**Where the reading comes from.** While the robot sits disabled before the match, `disabled()` averages
+the left sensor continuously and keeps the last `START_ALIGN_HISTORY_MS` (500 ms). `startPose()` uses
+that -- a long average, costing no auton time -- but only if the window is **settled**
+(`START_ALIGN_HISTORY_SPREAD_MM`, 40 mm), so a hand still placing the robot or someone walking through
+the beam does not count as a measurement. It then takes one short fresh sample
+(`START_ALIGN_CONFIRM_MS`, 80 ms) to confirm the robot has not moved since; if the two disagree by more
+than `START_ALIGN_CONFIRM_TOL_MM` the fresh one wins. With no disabled history at all (auton launched
+straight from the brain menu) it falls back to sampling for `START_ALIGN_SAMPLE_MS` (300 ms).
+
+**It can refuse.** A sample only counts if it is under `START_ALIGN_MAX_MM` (2000) and at least
+`START_ALIGN_MIN_CONFIDENCE` (38/63 ≈ 60%) -- the same rule the team's old `accumulateReading()` used --
+which also throws out 0, 9999 and `PROS_ERR`. If nothing valid comes back, **or the correction would be
+bigger than `START_ALIGN_MAX_IN` (4 in)**, the nominal pose is used unchanged and the brain says
+`!! START align skipped`. A sensor looking at a goal instead of the wall must never teleport the pose.
+
+**Calibration ordering.** `chassis.calibrate()` resets the pose, so `startPose()` waits for it
+(`START_ALIGN_CALIBRATE_WAIT_MS`), and if calibration is *still* unfinished it applies the pose anyway
+and re-applies it once, from a short-lived task, the moment calibration lands
+(`START_ALIGN_REAPPLY_WINDOW_MS`).
+
+**Measuring the expected value for a route:**
+1. Set the robot in its real starting spot, square against the front wall, and power it on.
+2. Read `DIST  L ...` on the brain. Leave it there a few seconds; the `START` line also shows the
+   settled average live.
+3. Put that number into the route's own constant at the top of `src/autons.cpp` --
+   `MATCH_START_LEFT_MM` is `1570` (measured 2026-10-03). They live with the routes, not in
+   `config.hpp`, because they are field positions, not robot constants.
+4. Test it: shift the robot 1 inch to its **right** and run auton. `POSE` should come up at
+   `X ≈ +1` (and the `START` line should read `dx +1.0 in`). Shift it 1 inch left and it should read
+   `−1.0`.
+
+**Range note.** At ~1.5 m the V5 Distance Sensor's absolute accuracy is only about ±5 % (±75 mm, ~3 in)
+and its beam cone is wide, but *repeatability against the same flat wall* is far better -- and
+repeatability is all this needs, because the expected value is measured with the same sensor against
+the same wall. Expect roughly ±10–20 mm of per-reading noise at that range, which the 500 ms average
+reduces to a couple of millimetres. The 4 in guard is sized for that, not for the absolute spec.
+
+`auton::leftDistanceMm()`, `auton::rightDistanceMm()`, `auton::backDistanceMm()` and
+`auton::readLeftAveraged(ms)` are available to routes for anything else.
+

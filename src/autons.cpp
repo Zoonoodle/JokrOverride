@@ -42,6 +42,25 @@ namespace {
 /** How long each hold in liftTest() lasts, so the brain's LIFT line can be read at every step. */
 constexpr int kTestHoldMs = 2000;
 
+// ===========================================================================
+// WHERE EACH ROUTE STARTS, and what its left sensor should read there.
+// ===========================================================================
+// The robot is set against the front wall every time, so the distance from the front and the heading
+// repeat; how far ALONG that wall it ends up does not. auton::startPose() measures that one unknown
+// with the LEFT sensor and folds it into the starting pose -- further than expected = shifted +x,
+// closer = -x. See README "Start alignment" for how to measure these numbers (set the robot in its
+// spot, read `DIST L` on the brain a few times, type what you see here).
+// These are FIELD positions, not robot constants, which is why they live next to the routes.
+constexpr double MATCH_START_X = 0.0;        // TODO(team): map the real starting point
+constexpr double MATCH_START_Y = 0.0;        // TODO(team): map the real starting point
+constexpr double MATCH_START_THETA = 0.0;    // TODO(team): the heading it is set at
+constexpr double MATCH_START_LEFT_MM = 1570.0;  // measured on the robot 2026-10-03
+
+constexpr double SKILLS_START_X = 0.0;       // TODO(team): map the real starting point
+constexpr double SKILLS_START_Y = 0.0;       // TODO(team)
+constexpr double SKILLS_START_THETA = 0.0;   // TODO(team)
+constexpr double SKILLS_START_LEFT_MM = 0.0; // TODO(team): measure, 0 = no start alignment
+
 // ---------------------------------------------------------------------------
 // LIFT_TEST — lift only. No drivetrain motion at all.
 // ---------------------------------------------------------------------------
@@ -81,8 +100,15 @@ void odomTest() {
 // ---------------------------------------------------------------------------
 // Every call named in the comments below is real and compiles -- uncomment and adjust.
 void matchRoute() {
-    // Where the robot starts, in LemLib's frame (inches, degrees). Set it before any move.
-    // chassis.setPose(0, 0, 0);
+    // WHERE THE ROBOT STARTS -- and the one thing about it that is not repeatable. startPose() sets
+    // the pose AND corrects x for however far along the front wall the robot actually ended up, read
+    // off the left distance sensor (further than expected = +x, closer = -x). It refuses to apply a
+    // correction bigger than config::START_ALIGN_MAX_IN, so a sensor looking at a goal cannot teleport
+    // the pose; the brain's START line says what it did. This replaces chassis.setPose() -- do not
+    // call both.
+    auton::startPose(MATCH_START_X, MATCH_START_Y, MATCH_START_THETA, MATCH_START_LEFT_MM);
+
+    
 
     // Drive into a pin and stop the moment the claw grabs it. .async = true hands the move to
     // LemLib's own task, so this one can watch the claw; waitUntilClamped's second argument cancels
@@ -120,6 +146,7 @@ void matchRoute() {
 // SKILLS — the 60 s skills route. TEMPLATE.
 // ---------------------------------------------------------------------------
 void skillsRoute() {
+    // auton::startPose(SKILLS_START_X, SKILLS_START_Y, SKILLS_START_THETA, SKILLS_START_LEFT_MM);
     // Same tools as matchRoute(); usually a loop of: drive to a pin, waitUntilClamped, stepUp,
     // score, moveB back to a wall to re-square, repeat.
 }
@@ -127,6 +154,14 @@ void skillsRoute() {
 }  // namespace
 
 Route selected() { return SELECTED; }
+
+double expectedLeftMm() {
+    switch (SELECTED) {
+        case Route::MATCH: return MATCH_START_LEFT_MM;
+        case Route::SKILLS: return SKILLS_START_LEFT_MM;
+        default: return 0.0;  // the test routes do not align
+    }
+}
 
 const char* selectedName() {
     switch (SELECTED) {

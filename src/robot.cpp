@@ -55,9 +55,13 @@ static lemlib::ExpoDriveCurve steerCurve(5, 15, 1.023);
 
 lemlib::Chassis chassis(drivetrain, lateral, angular, sensors, &throttleCurve, &steerCurve);
 
-// ---- Rear distance sensor (auton::moveB) ----
-// Looks backward, and is the whole feedback loop for moveB(): drive until it reads a target mm from
-// whatever is behind the robot. Constructed ONCE, here, like every other device.
+// ---- Distance sensors (brain DIST line; the rear one also drives auton::moveB) ----
+// One each side and one looking backward. The REAR one is the whole feedback loop for moveB(): drive
+// until it reads a target mm from whatever is behind the robot. The left and right ones are read by
+// the brain screen only, for lining the robot up while tuning a route. Each constructed ONCE, here,
+// like every other device. (The claw's own sensor belongs to subsystems::Claw.)
+pros::Distance leftDistance(config::LEFT_DISTANCE_PORT);
+pros::Distance rightDistance(config::RIGHT_DISTANCE_PORT);
 pros::Distance backDistance(config::BACK_DISTANCE_PORT);
 
 // ---- Mechanisms ----

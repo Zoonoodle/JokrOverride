@@ -151,6 +151,16 @@ void disabled() {
     // include/periodic.hpp). It does not touch the lift: whatever height auton left the arm holding,
     // or the hard stop it left it seated on, stays held by the lift's own task.
     auton::end();
+
+    // PRE-MATCH ALIGNMENT PREVIEW. While the robot sits disabled on the tiles, keep averaging the left
+    // distance sensor: auton::startPose() then uses that long, settled average instead of spending
+    // auton time on one, and the brain's START line shows the drive team the alignment live BEFORE the
+    // match starts. PROS kills this task the moment the robot is enabled, and is_disabled() ends the
+    // loop cleanly if it does not. Nothing here moves anything.
+    while (pros::competition::is_disabled()) {
+        auton::startAlignSample();
+        pros::delay(20);
+    }
 }
 
 void competition_initialize() {}
@@ -299,9 +309,6 @@ void opcontrol() {
         // Claw::update() and Scoring::update(). The auton tick runs this exact call (see
         // include/periodic.hpp), and auton::end() above guarantees it is not running now. ---
         periodic::tick(in);
-
-        // --- Brain "DRV" line: proves this loop is running and what it reads ---
-        screen::driverDebug = {screen::driverDebug.loops + 1, forward, turn, up, down};
 
         pros::delay(10);
     }

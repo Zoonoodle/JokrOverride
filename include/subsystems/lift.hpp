@@ -363,13 +363,6 @@ class Lift {
     double getMotorPosition() const;
     /** Lift degrees from the rotation sensor only (0 if none fitted). */
     double getSensorPosition() const;
-    /** Raw rotation sensor angle, in SENSOR degrees (not divided by LIFT_ROTATION_RATIO), 0..360,
-     *  absolute -- this is Rotation::get_angle() read live, every call (0 if no sensor fitted). For
-     *  the brain screen: lets you check the sensor's own calibrated absolute zero by eye. */
-    double getRawAngle() const;
-    /** The signed sensor-degree angle zero() seeded the position counter from at startup (see its
-     *  comment) -- captured once, not live. 0 if zero() hasn't run yet or no sensor is fitted. */
-    double getStartupAngle() const { return startupAngleDeg_; }
     /** Arm velocity, deg/s (+ = up), as update() measured it this tick. Runs in every mode. */
     double getVelocity() const { return velocity_; }
 
@@ -385,25 +378,10 @@ class Lift {
     /** True if the runaway guard tripped. */
     bool isFaulted() const { return faulted_; }
 
-    /** Hottest lift motor, deg C. */
+    /** Hottest lift motor, deg C. The seat's own temperature guard uses this; it is no longer on the
+     *  brain screen (every live number moved to the LIFT_TRACE terminal output -- see screen.hpp). */
     double getTemperature() const;
-    /** Highest lift motor current draw, mA. */
-    double getCurrentDraw() const;
 
-    // -----------------------------------------------------------------------
-    // Tuning telemetry (brain screen only, see src/screen.cpp). Cheap reads:
-    // everything below just returns a value update() already computed this tick.
-    // -----------------------------------------------------------------------
-    /** goal - position, lift degrees (0 with no active target). */
-    double getError() const { return lastError_; }
-    /** What update() last sent to the motors, mV (0 when it braked). */
-    double getOutput() const { return lastOutput_; }
-    /** The signed speed reference the velocity loop is tracking this tick, deg/s (+ = up). 0 in HOLD
-     *  and SEAT, which are not speed-controlled. */
-    double getSpeedRef() const { return lastVRef_; }
-    /** The hold loop's learned gravity voltage, mV -- what it currently reckons this arm costs to hold
-     *  where it is. Carried between moves. */
-    double getGravityMv() const { return gravityMv_; }
     /** True while the arm is pressed down onto its hard stop (phase SEAT) -- including a SEAT(short)
      *  that ended FINAL's forcing window above true 0 (see isSeatShort()). It is still "done trying"
      *  either way, which is what callers that just want "stop waiting" (e.g. main.cpp's L2 auto-
@@ -471,14 +449,9 @@ class Lift {
     /** The score sequence gave up: the claw is still caught after L2_MAX_UNSTICK_TRIES. The lift is
      *  holding where it stopped and will not push again. Cleared by the next command. */
     bool isScoreStuck() const { return scoreStuck_; }
-    /** What the contact detector currently sees, for the brain screen and the trace: the measured /
-     *  BASELINE speed ratio, the accumulated position shortfall in arm degrees, and the extra downward
-     *  push over the free-descent baseline in mV. Only meaningful during PRESS. */
-    double getSpeedRatio() const { return contact_.speedRatio(); }
-    double getContactLagDeg() const { return contact_.lagDeg(); }
-    double getContactEffortMv() const { return contact_.effortMv(); }
-    /** Which signal actually fired the release ("lag" / "eff" / "spd" / "stall", "" if none yet). */
-    const char* contactTriggerName() const { return ContactDetector::triggerName(contactTrigger_); }
+    // What the contact detector sees tick by tick -- the speed ratio, the accumulated shortfall and the
+    // extra downward push -- is in the LIFT_TRACE terminal output's last four columns (see the trace
+    // legend in startTask()), which is where a 20 ms signal belongs. It is no longer on the screen.
 
     /**
      * Driver manual override: -1..1 of LIFT_MAX_MV, plain motor power, no feedforward. The D-pad uses
@@ -587,8 +560,6 @@ class Lift {
 
     pros::MotorGroup motors_;
     std::unique_ptr<pros::Rotation> rotation_;  // null when no rotation sensor is fitted
-
-    double startupAngleDeg_ = 0.0;  // signed sensor-degree angle zero() seeded position from, see zero()
 
     // velocity estimate, every tick, every mode
     double velocity_ = 0.0;      // arm deg/s, + = up

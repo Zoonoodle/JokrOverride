@@ -1049,6 +1049,13 @@ inline constexpr int L2_POST_RELEASE_PUSH_MS = 100;          // TUNE
 //   Still catches a pin on the way out: raise it.
 //   The arm is in the way of the next pickup: lower it.
 inline constexpr double L2_CLEAR_RISE_DEG = 20.0;            // TUNE: arm degrees, RELATIVE
+// A score or a grab asked for while a lift MOVE IS STILL IN FLIGHT waits for the arm to arrive first,
+// then starts (Scoring::State::LIFT_SETTLE). That is what lets an auton route fire the lift and the
+// drivetrain off together -- `auton::liftTo(level); ...drive...; auton::scoreAndWait();` -- without the
+// press starting from a moving arm, and it fixes the same hazard for a driver who taps L2 mid-rise.
+// Bounded, so a lift that never arrives cannot hang the macro: the lift's own LIFT_MOVE_TIMEOUT_MS
+// parks it (which counts as settled) well before this, so this is only the backstop behind that.
+inline constexpr int SCORING_SETTLE_WAIT_MS = 3000;          // TUNE
 // The run home on PRESS 2, once the claw is free: % of free speed for the top and middle bands of the
 // ordinary descent (the slow final zone and the SEAT are unchanged, so it still cannot slam or bounce).
 //   "Don't hesitate to be going down faster than we currently are going when we are done scoring."

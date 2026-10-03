@@ -103,6 +103,8 @@ class Scoring {
   public:
     enum class State {
         IDLE, INTAKE_POS, MATCHLOAD_POS,
+        LIFT_SETTLE,  // an action was asked for while a lift move was still flying: wait for it to
+                      // arrive, then do the action (see pendingAfterSettle_)
         GRABBING,   // L1 from the handoff / auton grab: the lift is forcing down, the jaws close
         CLAMPING, STACKING,
         RELEASING,  // L2 press 1: press / sense / release / post-push / rise
@@ -183,8 +185,16 @@ class Scoring {
     }
     /** True while the arm is parked above a finished score, waiting for the second L2. */
     bool isScoredUp() const { return state_ == State::SCORED; }
-    /** True while the grab push is running (the intake must not spin -- see periodic::tick()). */
-    bool isGrabbing() const { return state_ == State::GRABBING; }
+    /** True while the grab push is running OR waiting for an in-flight lift move to arrive first. */
+    bool isGrabbing() const {
+        return state_ == State::GRABBING ||
+               (state_ == State::LIFT_SETTLE && pendingAfterSettle_ == State::GRABBING);
+    }
+    /** True while an L2 score has been asked for but is still waiting for the lift to arrive. The
+     *  score has NOT started yet -- nothing is pressing -- but it will. */
+    bool isScorePending() const {
+        return state_ == State::LIFT_SETTLE && pendingAfterSettle_ == State::RELEASING;
+    }
     const char* stateName() const;
 
   private:
@@ -199,6 +209,11 @@ class Scoring {
      *  something down or to travel empty; the old code called disarm() in those places, which
      *  silently switched the autoclamp off for the rest of the match. */
     void openClaw();
+    /** Start `next` now if the lift is settled, otherwise wait for the in-flight move to arrive first
+     *  (State::LIFT_SETTLE), bounded by config::SCORING_SETTLE_WAIT_MS. This is what makes a route
+     *  able to command the lift and the drivetrain together and then score, without the press ever
+     *  starting from a moving arm. */
+    void enterWhenSettled(State next);
     void moveTo(State destination);
     void command(double degrees, bool precise = false);
     /** True while the arm is inside the handoff zone, INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG. */
@@ -222,6 +237,7 @@ class Scoring {
                                            // scoreOrMatchload()'s INTAKE_POS destination
     bool grabRise_ = false;               // GRABBING: rise to a stack level afterwards (L1), or stay
                                            // exactly where the push ended (auton::grab())
+    State pendingAfterSettle_ = State::IDLE;  // what LIFT_SETTLE is waiting to start
     std::uint32_t stateStart_ = 0;
     std::uint32_t pivotMovedAt_ = 0;
 };

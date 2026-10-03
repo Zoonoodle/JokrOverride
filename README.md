@@ -146,6 +146,32 @@ driver button uses -- `stepUp()` is L1, `score()` is L2, `goToIntake()` is R1's 
 B, `clawGrip()`/`clawOpen()` are A -- so auton and driver can never drift apart, and tuning one tunes
 both. The named heights are the same `config::lift_preset` constants the buttons use.
 
+### Blocking vs non-blocking
+**Commands return immediately; `*AndWait` blocks.** That is how the lift and the drivetrain move at
+the same time:
+
+```cpp
+chassis.moveToPoint(-17.5, -24, 1500, {.forwards = false});
+auton::liftTo(auton::Level::TWO);   // rises WHILE the robot drives
+chassis.waitUntilDone();
+auton::waitLift();                  // ...and only now insist it has arrived
+auton::scoreAndWait();
+```
+
+* To wait **later**, put `auton::waitLift(ms)` right before the step that needs the arm there --
+  command early, wait late.
+* **The LemLib gotcha:** `chassis.move…` is async, but asking for a *second* move while the first is
+  still running **blocks the route thread** until the first finishes. So a lift command written after
+  two chassis moves does not start until the first one ends. Put the lift command *between* them, or
+  use `chassis.waitUntil(inches)` to let the drive get partway first.
+* You do **not** have to wait before scoring or grabbing. `score()`, `grab()` and L1's handoff grab
+  wait for an in-flight lift move to *arrive* before they start pressing (Scoring's `LIFT_SETTLE`
+  state, bounded by `SCORING_SETTLE_WAIT_MS`, shown as `WAIT LIFT` on the brain). A press started from
+  a moving arm would feed the contact detector the move's own deceleration and measure
+  `L2_AUTO_RELEASE_DEG`'s travel from the wrong place, so the macro refuses to start early.
+* `startPose()`, `moveB()`, `intakeInFor/OutFor()` and `wait()` block by their nature. Everything else
+  not named `*AndWait` returns at once.
+
 Two halves: **commands never block** and return immediately; **waits always take a timeout and always
 return whether it actually happened** (`false` = timed out, or the lift reported BLOCKED / FAULT /
 SCORE STUCK). So a routine can check instead of hoping, can drive while the arm moves, and can never

@@ -253,7 +253,7 @@ bool grabAndWait(int timeoutMs) {
     grab();
     const std::uint32_t start = pros::millis();
     // The push, then the arm settling into the hold it ends in.
-    while (robot::lift.isGrabbing() || !robot::lift.isSettled()) {
+    while (robot::scoring.isGrabbing() || robot::lift.isGrabbing() || !robot::lift.isSettled()) {
         if (robot::lift.isFaulted()) return false;
         if (timeoutMs <= 0 || pros::millis() - start >= static_cast<std::uint32_t>(timeoutMs)) break;
         pros::delay(10);
@@ -371,7 +371,7 @@ bool waitScore(int timeoutMs) {
     // Press 1 is over once the sequence has stopped AND, if it ended in the clear rise, that rise has
     // settled into its hold. (An L2 at the bottom is just a claw toggle: every test is false at once
     // and this returns true immediately, as it always did.)
-    while (robot::scoring.isScoreDescent() || robot::lift.isScoring() ||
+    while (robot::scoring.isScorePending() || robot::scoring.isScoreDescent() || robot::lift.isScoring() ||
            (robot::lift.isScoredAbove() && !robot::lift.isSettled())) {
         if (robot::lift.isScoreStuck() || robot::lift.isFaulted()) return false;
         if (timeoutMs <= 0 || pros::millis() - start >= static_cast<std::uint32_t>(timeoutMs)) return false;

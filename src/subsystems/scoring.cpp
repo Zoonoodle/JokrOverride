@@ -76,6 +76,20 @@ void Scoring::moveTo(State destination) {
     enter(State::MOVING);
 }
 
+void Scoring::enterWhenSettled(State next) {
+    // A lift move that is still flying must not be interrupted by a press or a push: Lift::startScore()
+    // would capture scoreStartPos_ from a MOVING arm (so L2_AUTO_RELEASE_DEG's travel budget starts
+    // from the wrong place), the contact detector would be fed the move's own deceleration, and an arm
+    // still coasting upward can trip the press-phase runaway guard outright. So wait for it to arrive.
+    // No target active at all = nothing to wait for.
+    if (!lift_.hasActiveTarget() || lift_.isSettled() || lift_.isBlocked() || lift_.isFaulted()) {
+        enter(next);
+        return;
+    }
+    pendingAfterSettle_ = next;
+    enter(State::LIFT_SETTLE);
+}
+
 void Scoring::enter(State next) {
     state_ = next;
     stateStart_ = pros::millis();
@@ -90,6 +104,8 @@ void Scoring::enter(State next) {
             // normally already swung it BACK on the way down into the handoff zone; this makes sure.
             setPivot(next == State::INTAKE_POS ? false : !config::PIVOT_BACK_AT_MATCHLOAD);
             break;
+        case State::LIFT_SETTLE:
+            break;  // update() watches the lift and starts pendingAfterSettle_ when it arrives
         case State::GRABBING:
             // THE GRAB. The lift forces the claw down onto the pin at L1_GRAB_PUSH_PCT and tells us
             // when to shut the jaws (Lift::needsClawGrip(), polled in update()); the intake is stopped
@@ -157,9 +173,9 @@ void Scoring::stow() {
 }
 
 void Scoring::grabHere() {
-    if (state_ == State::GRABBING || state_ == State::RELEASING) return;
+    if (state_ == State::GRABBING || state_ == State::RELEASING || state_ == State::LIFT_SETTLE) return;
     grabRise_ = false;  // stay where the push ends
-    enter(State::GRABBING);
+    enterWhenSettled(State::GRABBING);
 }
 
 void Scoring::goToIntake() {
@@ -171,7 +187,7 @@ void Scoring::goToIntake() {
     // has opened the claw up at a stack level, R1 should be able to send the arm back down to the
     // handoff instead of silently doing nothing until they remember to press B.
     if (state_ == State::CLAMPING || state_ == State::RELEASING || state_ == State::GRABBING ||
-        state_ == State::RETURNING) {
+        state_ == State::RETURNING || state_ == State::LIFT_SETTLE) {
         return;
     }
     if (state_ == State::INTAKE_POS) {
@@ -192,6 +208,7 @@ void Scoring::stepUp() {
         case State::STACKING: level_ = std::min(level_ + 1, preset::STACK_LEVEL_COUNT); break;
         case State::RELEASING:
         case State::GRABBING:
+        case State::LIFT_SETTLE:
         case State::RETURNING: break;  // mid-sequence, ignore
         case State::INTAKE_POS:
             // THE GRAB (2026-10-02, the driver's own design). L1 from the intake handoff no longer
@@ -200,7 +217,7 @@ void Scoring::stepUp() {
             // push. Everything about the push is config::L1_GRAB_*; see "THE GRAB" in lift.hpp.
             level_ = 1;
             grabRise_ = true;
-            enter(State::GRABBING);
+            enterWhenSettled(State::GRABBING);
             break;
         default:
             level_ = 1;
@@ -229,7 +246,7 @@ void Scoring::score() {
     // INTAKE/MATCHLOAD (MOVING), or press 2's descent is in flight (RETURNING). Ignore L2 until
     // whichever of those finishes.
     if (state_ == State::RELEASING || state_ == State::CLAMPING || state_ == State::MOVING ||
-        state_ == State::GRABBING || state_ == State::RETURNING) {
+        state_ == State::GRABBING || state_ == State::RETURNING || state_ == State::LIFT_SETTLE) {
         return;
     }
 
@@ -255,7 +272,9 @@ void Scoring::score() {
     // here any more (see scoreOrMatchload()) -- just do nothing.
     if (!(claw_.isClamped() || state_ == State::STACKING)) return;
     scoreToHome_ = true;
-    enter(State::RELEASING);
+    // If a lift move is still in flight -- an auton route that fired liftTo() off alongside a chassis
+    // move, or a driver tapping L2 during a rise -- wait for the arm to get there before pressing.
+    enterWhenSettled(State::RELEASING);
 }
 
 void Scoring::scoreOrMatchload() {
@@ -314,6 +333,18 @@ void Scoring::update() {
         case State::INTAKE_POS:
         case State::MATCHLOAD_POS:
             break;  // waiting for the driver (autoclamp, if on, runs in claw.update())
+
+        case State::LIFT_SETTLE:
+            // Waiting for an in-flight lift move to arrive before starting the action that was asked
+            // for. Bounded: the lift's own LIFT_MOVE_TIMEOUT_MS parks a move that is getting nowhere
+            // (and PARK counts as settled), so this timeout is only the backstop behind that. Going
+            // ahead anyway on BLOCKED/FAULT matches what the lift itself does -- stop waiting, act on
+            // where the arm actually is.
+            if (lift_.isSettled() || lift_.isBlocked() || lift_.isFaulted() ||
+                elapsed >= static_cast<std::uint32_t>(config::SCORING_SETTLE_WAIT_MS)) {
+                enter(pendingAfterSettle_);
+            }
+            break;
 
         case State::GRABBING:
             // The lift is pressing the claw down onto the pin. Shut the jaws the moment it asks
@@ -429,6 +460,7 @@ const char* Scoring::stateName() const {
         case State::MATCHLOAD_POS: return "MATCHLOAD";
         case State::CLAMPING: return "CLAMPING";
         case State::STACKING: return "STACKING";
+        case State::LIFT_SETTLE: return "WAIT LIFT";
         case State::GRABBING: return "GRABBING";
         case State::RELEASING: return "RELEASING";
         case State::SCORED: return "SCORED UP";

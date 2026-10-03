@@ -14,6 +14,33 @@
  * L1, score() is L2, goToIntake() is R1's new-press, stow() is B, clawGrip()/clawOpen() are A --
  * so auton and driver can never drift apart, and tuning one tunes both.
  *
+ * BLOCKING VS NON-BLOCKING -- read this before writing a route.
+ *   - A COMMAND returns immediately. `auton::liftTo(Level::TWO);` starts the arm moving and hands
+ *     control straight back, so the very next line can drive. That is how the lift and the
+ *     drivetrain run at the same time.
+ *   - An `*AndWait` call blocks THIS task until the thing has happened (or its timeout). Use it when
+ *     the next step physically depends on the result.
+ *   - To wait LATER instead, put `auton::waitLift(ms)` immediately before the step that needs the arm
+ *     to be there. That is the whole trick: command early, wait late.
+ *
+ *     chassis.moveToPoint(-17.5, -24, 1500, {.forwards = false});
+ *     auton::liftTo(Level::TWO);     // rises WHILE the robot drives
+ *     chassis.waitUntilDone();
+ *     auton::waitLift();             // ...and only now insist it has arrived
+ *     auton::scoreAndWait();
+ *
+ *   - THE LEMLIB GOTCHA: `chassis.move...` calls are async, but asking for a SECOND one while the
+ *     first is still running BLOCKS THIS TASK until the first finishes. So a lift command written
+ *     after two chassis moves does not start until the first move ends. Put the lift command between
+ *     them, or use `chassis.waitUntil(inches)` to let the drive get partway before firing the lift.
+ *   - You do not have to wait before scoring or grabbing: `score()`, `grab()` and L1's handoff grab
+ *     all wait for an in-flight lift move to ARRIVE before they start pressing (Scoring's LIFT_SETTLE
+ *     state, bounded by config::SCORING_SETTLE_WAIT_MS). Starting a press from a moving arm would
+ *     feed the contact detector the move's own deceleration and measure the release-travel budget
+ *     from the wrong place, so the macro simply refuses to start early.
+ *   - `startPose()`, `moveB()`, `intakeInFor/OutFor()` and `wait()` block by their nature; everything
+ *     else that is not named `*AndWait` returns at once.
+ *
  * TWO HALVES, ON PURPOSE.
  *   Commands (liftTo, score, intakeIn, ...) never block. They return the instant the request is in.
  *   Waits (waitLift, waitScore, waitClamped, ...) block the CALLING task only, ALWAYS take a

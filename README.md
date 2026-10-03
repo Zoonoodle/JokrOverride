@@ -334,14 +334,25 @@ point: a reading that appears, vanishes and comes back is not a pin.
 
 | Where | Range | Clear-to-rearm (range + `AUTOCLAMP_REARM_GAP_MM`) |
 |---|---|---|
-| driver control | `AUTOCLAMP_RANGE_DRIVER_MM` = **55 mm** | 85 mm |
-| autonomous | `AUTOCLAMP_RANGE_AUTON_MM` = **65 mm** | 95 mm |
+| driver control | `AUTOCLAMP_RANGE_DRIVER_MM` = **60 mm** | 90 mm |
+| autonomous | `AUTOCLAMP_RANGE_AUTON_MM` = **75 mm** | 105 mm |
 | the R1 intake handoff (either mode) | `AUTOCLAMP_INTAKE_RANGE_MM` = **75 mm** | 105 mm |
+
+**Sensitivity is the range, and essentially only the range.** `AUTOCLAMP_MIN_SAMPLES` (2) is the binding
+constraint on how fast this can possibly fire: the sensor refreshes about every 30 ms, so two *fresh*
+in-range readings cannot happen in under ~30 ms however small `AUTOCLAMP_CONFIRM_MS` (50) gets. Lowering
+the confirm window on its own therefore buys almost nothing -- it just moves the limit onto the sample
+count -- and lowering `AUTOCLAMP_MIN_SAMPLES` to 1 removes spike rejection altogether, which is only an
+acceptable trade at the handoff where a false clamp costs one button press. In auton a false clamp is
+worse than a late one (the route carries on having gripped a wall), so **tune sensitivity in
+millimetres.**
 
 Auton gets more reach than driver because **nothing is aiming the claw** in a route: it drives to a
 surveyed spot and the pin is wherever placement and odometry drift left it, so the claw has to commit
 from further out or drive past. In driver control a human is aiming, so the shorter range is the safer
-default. The handoff is further still because there the intake pushes the pin *across* the jaws. Which
+default. The handoff is further still *in driver control* (75 vs 60); since auton was raised to 75 on
+2026-10-03 it no longer adds reach there, and what still makes the handoff special in auton is its
+instant-fire confirm (0 ms / 1 sample). Which
 one is in force is passed to `Claw` every tick (`periodic::Inputs::auton`, `Scoring::isAtIntakeHandoff()`)
 and never latched, so a field switch cannot leave it on the wrong one.
 
@@ -459,7 +470,7 @@ the claw and watch it move.
 
 | Knob | What it does |
 |---|---|
-| `AUTOCLAMP_RANGE_DRIVER_MM` (**55**) / `AUTOCLAMP_RANGE_AUTON_MM` (**65**) | at or inside this = something in the jaws, per mode |
+| `AUTOCLAMP_RANGE_DRIVER_MM` (**60**) / `AUTOCLAMP_RANGE_AUTON_MM` (**75**) | at or inside this = something in the jaws, per mode. **This is the sensitivity knob** |
 | `AUTOCLAMP_CONFIRM_MS` (50) | ...continuously for this long |
 | `AUTOCLAMP_MIN_SAMPLES` (2) | ...over at least this many fresh readings |
 | `AUTOCLAMP_STALE_GRACE_MS` (60) | an unchanged reading counts as a new sample again after this long (~2 sensor refreshes) |
@@ -508,7 +519,7 @@ only pins. With a pin held in the open jaws, watch the `DIST` line's `CLAW` valu
 **On-robot test, driver:** power on, enable driver control. First wave a hand in front of the claw's
 sensor and check the `DIST` line's **`CLAW`** value moves -- that is the whole check that the sensor really
 is on port 21. Then: `AC:ARMED` on the `CLAW` line, jaws open.
-Move a pin slowly into the jaws: `DIST CLAW` falls below **55** (driver control's range), `AC:` goes `SEEING`, and about 50 ms later the jaws
+Move a pin slowly into the jaws: `DIST CLAW` falls below **60** (driver control's range), `AC:` goes `SEEING`, and about 50 ms later the jaws
 shut, the line reads `CLAMPED  AC:HELD`, and **the arm hops up 8°** (`LIFT` line: `CLAMP UP`, then a hold
 at ~8). Press **A** to open: `AC:CLEAR?`. With the pin still sitting
 there it must **not** re-grab. Take the pin away: `AC:ARMED` again. Wave the pin past the jaws quickly:

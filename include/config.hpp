@@ -901,8 +901,17 @@ inline constexpr bool CLAW_AUTOCLAMP_AT_START = false;       // power-on / initi
 //                                               whatever is in front of it, not only pins.
 // THE CLEAR THRESHOLD FOLLOWS THE RANGE AUTOMATICALLY -- see AUTOCLAMP_REARM_GAP_MM, which exists
 // precisely so that changing a range here cannot break the ordering the autoclamp depends on.
-inline constexpr int AUTOCLAMP_RANGE_DRIVER_MM = 55;         // TUNE: driver control (measured 2026-10-03)
-inline constexpr int AUTOCLAMP_RANGE_AUTON_MM = 65;          // TUNE: autonomous (measured 2026-10-03)
+// SENSITIVITY IS THE RANGE, AND ESSENTIALLY ONLY THE RANGE -- worth knowing before reaching for the
+// confirm window instead. AUTOCLAMP_MIN_SAMPLES (2) is the BINDING constraint on how fast this can
+// possibly fire: the V5 Distance Sensor refreshes about every 30 ms, so two FRESH in-range readings
+// cannot happen in less than ~30 ms however small AUTOCLAMP_CONFIRM_MS (50) is. Dropping the confirm
+// window therefore buys almost nothing on its own -- it just moves the limit onto the sample count --
+// and dropping AUTOCLAMP_MIN_SAMPLES to 1 removes spike rejection entirely, which is only an acceptable
+// trade at the handoff (see AUTOCLAMP_INTAKE_*), where a false clamp costs one button press. In auton a
+// false clamp is worse than a late one: the route carries on having gripped a wall. So "more sensitive"
+// is tuned here, in millimetres.
+inline constexpr int AUTOCLAMP_RANGE_DRIVER_MM = 60;         // TUNE: driver control (the driver's number, 2026-10-03; was 55)
+inline constexpr int AUTOCLAMP_RANGE_AUTON_MM = 75;          // TUNE: autonomous -- "a bit more sensitive" (was 65)
 inline constexpr int AUTOCLAMP_CONFIRM_MS = 50;              // TUNE: ...continuously for this long
 // ...over at least this many FRESH readings. The sensor refreshes on the order of 30 ms, i.e. slower
 // than the 10 ms tick, so the same measurement comes back two or three times in a row; without this,
@@ -983,6 +992,10 @@ inline constexpr int AUTOCLAMP_INTAKE_MIN_SAMPLES = 1;       // TUNE: ...over on
 // It is the same 75 in BOTH modes: unlike the driver/auton split above, what makes the handoff want more
 // reach is the mechanism (the pin crossing the jaws on the rollers), not who is aiming. Its clear
 // threshold comes from AUTOCLAMP_REARM_GAP_MM like every other range's.
+// NOTE (2026-10-03): the auton range was raised to 75 too, so this no longer adds any REACH in auton --
+// what still makes the handoff special there is the instant-fire confirm above (0 ms / 1 sample against
+// 50 ms / 2 samples). It does still add reach in driver control (75 against 60). Keep it as its own
+// constant: the two are tuned for different things and must be able to move apart again.
 inline constexpr int AUTOCLAMP_INTAKE_RANGE_MM = 75;         // TUNE: the trigger range at the handoff only
 // THE PUSH. The same open-loop downward force L1's GRAB uses (L1_GRAB_PUSH_PCT, 40% of volts, see "The
 // L1 GRAB" in the lift block) for this long, and then the arm HOLDS wherever it ended -- the driver's

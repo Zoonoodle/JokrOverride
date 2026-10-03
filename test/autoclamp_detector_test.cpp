@@ -23,14 +23,14 @@ namespace {
 
 // The real config values (config.hpp's AUTOCLAMP_* block), restated so this test needs no PROS
 // headers. If they are changed there, change them here and re-run.
-// DRIVER CONTROL: config::AUTOCLAMP_RANGE_DRIVER_MM (55) + AUTOCLAMP_REARM_GAP_MM (30). kCfg is the
+// DRIVER CONTROL: config::AUTOCLAMP_RANGE_DRIVER_MM (60) + AUTOCLAMP_REARM_GAP_MM (30). kCfg is the
 // default for every general-purpose case below.
 constexpr AutoclampDetector::Config kCfg{
-    /*rangeMm*/ 55,
+    /*rangeMm*/ 60,
     /*confirmMs*/ 50,
     /*minSamples*/ 2,
     /*staleGraceMs*/ 60,
-    /*rearmMm*/ 85,
+    /*rearmMm*/ 90,
     /*rearmClearMs*/ 150,
     /*maxValidMm*/ 9999,
     /*minValidMm*/ 1,
@@ -42,14 +42,14 @@ constexpr AutoclampDetector::Config kCfg{
 // while Scoring::isAtIntakeHandoff() is true. The detector's own code is identical in both modes -- the
 // "fire the instant it sees the object" behaviour is purely these two numbers, which is why it can be
 // proved here instead of on the robot.
-// AUTONOMOUS: the same rule, more reach (AUTOCLAMP_RANGE_AUTON_MM 65 + the 30 mm gap). Nothing is aiming
+// AUTONOMOUS: the same rule, more reach (AUTOCLAMP_RANGE_AUTON_MM 75 + the 30 mm gap). Nothing is aiming
 // the claw in a route, so it has to commit from further out than a driver's would.
 constexpr AutoclampDetector::Config kAutonCfg{
-    /*rangeMm*/ 65,
+    /*rangeMm*/ 75,
     /*confirmMs*/ 50,
     /*minSamples*/ 2,
     /*staleGraceMs*/ 60,
-    /*rearmMm*/ 95,
+    /*rearmMm*/ 105,
     /*rearmClearMs*/ 150,
     /*maxValidMm*/ 9999,
     /*minValidMm*/ 1,
@@ -172,9 +172,9 @@ int main() {
         // chattering at one distance.
         AutoclampDetector d;
         d.reset(true);
-        runStream(d, {70, 70, 70, 70, 70, 70, 70, 70, 70, 70}, 3);
+        runStream(d, {75, 75, 75, 75, 75, 75, 75, 75, 75, 75}, 3);
         check(d.state() == AutoclampDetector::State::WAIT_CLEAR,
-              "a reading inside the 55-85 mm hysteresis gap does not re-arm");
+              "a reading inside the 60-90 mm hysteresis gap does not re-arm");
     }
 
     // --- "nothing in range" counts as clear ---------------------------------------------------
@@ -246,7 +246,7 @@ int main() {
             refired = refired || d.step(now, 40 + (i % 2), 64, kCfg, false);
             now += 10;
         }
-        check(!refired, "...the shipped 55/85 pair does not");
+        check(!refired, "...the shipped 60/90 pair does not");
         check(d.state() == AutoclampDetector::State::WAIT_CLEAR, "...and stays WAIT_CLEAR");
     }
     {
@@ -258,43 +258,44 @@ int main() {
               "the handoff's 75-105 mm gap does not re-arm either");
     }
     {
-        // THE THREE RANGES, as the one thing a reading at the wrong distance would silently get wrong.
-        // 60 mm is a PIN at the handoff (<= 75) and in auton (<= 65), and NOT one in driver control
-        // (> 55). That ladder is the whole point of having three numbers, so pin every rung down.
+        // THE RANGES, as the one thing a reading at the wrong distance would silently get wrong.
+        // 65 mm is a PIN at the handoff and in auton (both <= 75), and NOT one in driver control (> 60).
+        // That ladder is the point of having separate numbers, so pin every rung down.
         AutoclampDetector d;
         d.reset(false);
-        check(d.step(1000, 60, 64, kIntakeCfg, false), "60 mm fires at the handoff (range 75)");
+        check(d.step(1000, 65, 64, kIntakeCfg, false), "65 mm fires at the handoff (range 75)");
         AutoclampDetector e;
         e.reset(false);
-        check(runStream(e, {60, 61, 60, 61, 60, 61, 60, 61}, 3, 1000, kAutonCfg) > 0,
-              "60 mm fires in auton too (range 65)");
+        check(runStream(e, {65, 66, 65, 66, 65, 66, 65, 66}, 3, 1000, kAutonCfg) > 0,
+              "65 mm fires in auton too (range 75)");
         AutoclampDetector f;
         f.reset(false);
-        check(runStream(f, {60, 61, 60, 61, 60, 61, 60, 61}, 3) < 0,
-              "...but NOT in driver control (range 55)");
-        // ...and 50 mm is a pin in all three, so the ladder is about 55-65, not about everything.
+        check(runStream(f, {65, 66, 65, 66, 65, 66, 65, 66}, 3) < 0,
+              "...but NOT in driver control (range 60)");
+        // ...and 50 mm is a pin in all three, so the ladder is about 60-75, not about everything.
         AutoclampDetector g;
         g.reset(false);
         check(runStream(g, {50, 51, 50, 51, 50, 51, 50, 51}, 3) > 0, "50 mm fires in driver control");
     }
     {
         // Each mode's clear threshold tracks ITS OWN range (range + AUTOCLAMP_REARM_GAP_MM), which is
-        // what stops a reading that is "clear" in one mode being a pin in another. 70 mm is inside
-        // driver's 55-85 gap (checked above) and ALSO inside auton's 65-95 gap.
+        // what stops a reading that is "clear" in one mode being a pin in another. 90 mm is inside
+        // auton's 75-105 gap.
         AutoclampDetector d;
         d.reset(true);
-        runStream(d, {70, 70, 70, 70, 70, 70, 70, 70, 70, 70}, 3, 1000, kAutonCfg);
+        runStream(d, {90, 90, 90, 90, 90, 90, 90, 90, 90, 90}, 3, 1000, kAutonCfg);
         check(d.state() == AutoclampDetector::State::WAIT_CLEAR,
-              "auton's 65-95 mm gap does not re-arm either");
-        // 100 mm IS clear in auton (> 95) but not at the handoff (< 105).
+              "auton's 75-105 mm gap does not re-arm either");
+        // 100 mm IS clear in driver control (> 90) but NOT in auton (< 105) -- the same reading means
+        // different things in the two modes, which is exactly why the threshold is derived per mode.
         AutoclampDetector e;
         e.reset(true);
-        runStream(e, {100, 100, 100, 100, 100, 100, 100}, 3, 1000, kAutonCfg);
-        check(e.state() == AutoclampDetector::State::ARMED, "100 mm re-arms in auton");
+        runStream(e, {100, 100, 100, 100, 100, 100, 100}, 3);
+        check(e.state() == AutoclampDetector::State::ARMED, "100 mm re-arms in driver control");
         AutoclampDetector f;
         f.reset(true);
-        runStream(f, {100, 100, 100, 100, 100, 100, 100}, 3, 1000, kIntakeCfg);
-        check(f.state() == AutoclampDetector::State::WAIT_CLEAR, "...but not at the handoff (needs 105)");
+        runStream(f, {100, 100, 100, 100, 100, 100, 100}, 3, 1000, kAutonCfg);
+        check(f.state() == AutoclampDetector::State::WAIT_CLEAR, "...but not in auton (needs 105)");
     }
 
     // --- the R1 HANDOFF mode: the FIRST valid in-range reading fires, with no debounce at all -------

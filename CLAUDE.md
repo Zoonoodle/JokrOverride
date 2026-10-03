@@ -62,10 +62,13 @@ Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
   confirmed 2026-10-03 by the user — it was `11` before that) and sees both pins and cups. While the jaws are open and the autoclamp is
   enabled, anything at or inside the trigger range for `AUTOCLAMP_CONFIRM_MS` (50) over
   at least `AUTOCLAMP_MIN_SAMPLES` (2) **fresh** readings closes the jaws. **The range differs by mode**,
-  all three measured 2026-10-03: `AUTOCLAMP_RANGE_DRIVER_MM` **55**, `AUTOCLAMP_RANGE_AUTON_MM` **65**,
+  all set by the driver 2026-10-03: `AUTOCLAMP_RANGE_DRIVER_MM` **60**, `AUTOCLAMP_RANGE_AUTON_MM` **75**,
   `AUTOCLAMP_INTAKE_RANGE_MM` **75** at the R1 handoff in either mode. Auton reaches further because
-  nothing is aiming the claw there; the handoff further still because the intake pushes the pin *across*
-  the jaws. Which is in force is PASSED every tick (`periodic::Inputs::auton` →
+  nothing is aiming the claw there; the handoff further still in DRIVER control (75 vs 60) — in auton it
+  now adds no reach, only its instant-fire confirm. **The range IS the sensitivity knob**:
+  `AUTOCLAMP_MIN_SAMPLES` (2) binds how fast it can fire at ~30 ms (one sensor refresh) regardless of
+  `AUTOCLAMP_CONFIRM_MS`, and dropping that to 1 removes spike rejection — fine at the handoff, not in
+  auton where a false clamp means the route carries on gripping a wall. Which is in force is PASSED every tick (`periodic::Inputs::auton` →
   `Claw::setAutonMode()`, `Scoring::isAtIntakeHandoff()` → `setIntakeMode()`), never latched, so a field
   switch cannot leave it wrong — see `Claw::activeRangeMm()`. The rule is a pure class
   (`subsystems::AutoclampDetector`, host-tested); `Claw::update()` owns the cylinder. Fresh samples are

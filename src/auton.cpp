@@ -103,6 +103,7 @@ void begin() {
                 in.abort = pendingAbort.exchange(false);
                 in.manualLift = false;      // there is no D-pad in auton
                 in.liftButtonMode = false;  // nor clamped-mode R1/R2
+                in.auton = true;            // the autoclamp's auton trigger range (65 mm, not 55)
                 periodic::tick(in);
                 pros::delay(config::AUTON_TICK_MS);
             }
@@ -120,10 +121,16 @@ void end() {
     while (!tickExited.load() && pros::millis() - start < 200) pros::delay(5);
     if (!tickExited.load()) tickTask->remove();  // backstop only; a tick that never returns is a bug
     tickTask.reset();
-    // Leave the lift exactly as it is (its own task keeps holding/seating it -- CLAUDE.md rule 2 and
-    // "every state holds"), but do not hand the driver a spinning roller.
+    // Leave the lift's TARGET exactly as it is (its own task keeps holding/seating it -- CLAUDE.md
+    // rule 2 and "every state holds"), but do not hand the driver a spinning roller...
     intakeRequest.store(static_cast<int>(Intake::Mode::STOP));
     robot::intake.set(Intake::Mode::STOP);
+    // ...and do not hand them an arm still leaning on the floor either. liftPush() is LATCHED plain
+    // voltage, so a route that forgot to stop it -- or one the field switch cut off partway -- would
+    // otherwise keep pressing down for the rest of the match. Releasing it brake-holds where the arm is
+    // (Lift::update()'s manual path), which is the same thing letting go of the D-pad does; it does not
+    // resume an old target and it does not move the arm.
+    robot::lift.driverPower(0.0);
 }
 
 bool running() { return tickTask != nullptr && !tickExited.load(); }
@@ -186,6 +193,28 @@ void liftStop() {
     AUTON_LOCK;
     robot::scoring.reset();
     robot::lift.cancel();
+}
+
+void liftPush(double percent) {
+    AUTON_LOCK;
+    // The macro must let go first: this is manual voltage, and Scoring would otherwise keep re-issuing
+    // the height it thinks the arm should be at. (Lift::driverPower() cancels the TARGET on its own; it
+    // cannot cancel the state machine that keeps setting one.)
+    robot::scoring.reset();
+    if (percent < 0.0) percent = -percent;   // "-40%" is a direction, not a sign the caller has to get right
+    if (percent > 100.0) percent = 100.0;
+    robot::lift.driverPower(-percent / 100.0);  // negative = down, the same path the D-pad feeds
+}
+
+void liftPushStop() {
+    AUTON_LOCK;
+    robot::lift.driverPower(0.0);  // brake-holds right here; no old target resumes
+}
+
+void liftPushFor(int ms, double percent) {
+    liftPush(percent);
+    wait(ms);
+    liftPushStop();
 }
 
 bool waitLift(int timeoutMs) {

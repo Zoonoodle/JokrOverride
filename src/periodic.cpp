@@ -152,6 +152,10 @@ void tick(const Inputs& in) {
     // the object", and Scoring then pushes the claw down onto it instead of hopping up. Passed every
     // tick, like the inhibit above, so it can never be left latched on.
     robot::claw.setIntakeMode(robot::scoring.isAtIntakeHandoff());
+    // ...and which mode we are in, because the trigger range differs: 65 mm in auton, 55 in driver (the
+    // driver's measured numbers -- a human aiming the claw wants the shorter reach, a route that drives
+    // to a surveyed spot needs to commit from further out). Same deal: passed, never latched.
+    robot::claw.setAutonMode(in.auton);
 
     // Claw::update() first, then Scoring::update(): a clamp the autoclamp makes this tick is therefore
     // reacted to (the rise, or the handoff push) in the SAME tick rather than the next one.

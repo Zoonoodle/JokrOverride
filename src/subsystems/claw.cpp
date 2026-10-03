@@ -32,17 +32,26 @@ Claw::Claw()
  *  between them read as clear AND in range -- the autoclamp re-arms and instantly re-grabs what it just
  *  released, forever. That is why there is a separate AUTOCLAMP_INTAKE_REARM_MM rather than one shared
  *  clear threshold: 80 is correct above a 50 mm range and WRONG above a 75 mm one. */
+int Claw::activeRangeMm() const {
+    // The handoff's longer reach wins over both modes: what makes it want more range is the mechanism
+    // (the intake pushing the pin ACROSS the jaws), not who is aiming.
+    if (intakeMode_) return config::AUTOCLAMP_INTAKE_RANGE_MM;
+    return autonMode_ ? config::AUTOCLAMP_RANGE_AUTON_MM : config::AUTOCLAMP_RANGE_DRIVER_MM;
+}
+
 AutoclampDetector::Config Claw::detectorConfig() const {
-    const int rangeMm = intakeMode_ ? config::AUTOCLAMP_INTAKE_RANGE_MM : config::AUTOCLAMP_RANGE_MM;
-    const int rearmMm = intakeMode_ ? config::AUTOCLAMP_INTAKE_REARM_MM : config::AUTOCLAMP_REARM_MM;
+    const int rangeMm = activeRangeMm();
+    // DERIVED, never a separate number: clear = range + the hysteresis gap. See AUTOCLAMP_REARM_GAP_MM
+    // in config.hpp -- with three different ranges in play, the only way to keep "clear is always
+    // further out than a pin" true is to compute it, which is why the absolute rearm constants are gone.
+    const int rearmMm = rangeMm + config::AUTOCLAMP_REARM_GAP_MM;
     const int confirmMs = intakeMode_ ? config::AUTOCLAMP_INTAKE_CONFIRM_MS : config::AUTOCLAMP_CONFIRM_MS;
     const int minSamples =
         intakeMode_ ? config::AUTOCLAMP_INTAKE_MIN_SAMPLES : config::AUTOCLAMP_MIN_SAMPLES;
-    static_assert(config::AUTOCLAMP_REARM_MM > config::AUTOCLAMP_RANGE_MM,
-                  "AUTOCLAMP_REARM_MM must stay ABOVE AUTOCLAMP_RANGE_MM -- see the note above: equal or "
-                  "below makes the autoclamp re-grab whatever it just released, forever.");
-    static_assert(config::AUTOCLAMP_INTAKE_REARM_MM > config::AUTOCLAMP_INTAKE_RANGE_MM,
-                  "AUTOCLAMP_INTAKE_REARM_MM must stay ABOVE AUTOCLAMP_INTAKE_RANGE_MM, same reason.");
+    static_assert(config::AUTOCLAMP_REARM_GAP_MM > 0,
+                  "AUTOCLAMP_REARM_GAP_MM must be positive: at 0 or below, the clear threshold is at or "
+                  "inside the trigger range, and the autoclamp re-grabs whatever it just released, "
+                  "forever (test/autoclamp_detector_test.cpp has the case).");
     return AutoclampDetector::Config{
         rangeMm,                          confirmMs,
         minSamples,                       config::AUTOCLAMP_STALE_GRACE_MS,
@@ -60,9 +69,9 @@ void Claw::setJaws(bool closed) {
 bool Claw::seesPin() {
     const int mm = sensor_.get_distance();
     // Raw look, no debounce: valid reading, something really there, inside WHICHEVER range is in force
-    // (the handoff's longer reach while intakeMode_ is set -- see detectorConfig()).
-    const int rangeMm = intakeMode_ ? config::AUTOCLAMP_INTAKE_RANGE_MM : config::AUTOCLAMP_RANGE_MM;
-    return mm >= config::AUTOCLAMP_MIN_VALID_MM && mm < config::AUTOCLAMP_MAX_VALID_MM && mm <= rangeMm;
+    // (driver / auton / the handoff's longer reach -- see activeRangeMm()).
+    return mm >= config::AUTOCLAMP_MIN_VALID_MM && mm < config::AUTOCLAMP_MAX_VALID_MM &&
+           mm <= activeRangeMm();
 }
 
 void Claw::arm() {

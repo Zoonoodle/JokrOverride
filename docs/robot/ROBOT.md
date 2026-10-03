@@ -75,8 +75,8 @@ photos)**.
   confirmed 2026-10-03** (it was on port 11 until then; the photos further down predate both,
   which is why their `DIST` line reads `WRONG DEVICE`). It looks out between the jaws and sees
   both pins and cups. The rule:
-  anything at or inside `AUTOCLAMP_RANGE_MM` (**50**, measured on the robot 2026-10-03; 75 at the R1
-  handoff) for `AUTOCLAMP_CONFIRM_MS` (50) over at
+  anything at or inside the trigger range -- **55 mm in driver control, 65 in autonomous, 75 at the R1
+  handoff**, all measured on the robot 2026-10-03 -- for `AUTOCLAMP_CONFIRM_MS` (50) over at
   least `AUTOCLAMP_MIN_SAMPLES` (2) fresh readings closes the jaws. Off at power-on
   (`CLAW_AUTOCLAMP_AT_START = false`), **on** throughout driver control
   (`AUTOCLAMP_ON_IN_DRIVER`, Y toggles it) **and on by default in auton too**
@@ -84,8 +84,9 @@ photos)**.
   `CLAMP_RISE_DEG` (5°) everywhere, and **at the R1 intake handoff** it fires instantly instead
   (`AUTOCLAMP_INTAKE_CONFIRM_MS` 0) and forces the claw *down* for `AUTOCLAMP_INTAKE_PUSH_MS`
   (300 ms) rather than lifting. See README
-  "Autoclamp" -- and note that `AUTOCLAMP_REARM_MM` (80, and 105 at the handoff) must always stay
-  ABOVE whichever range is in use, or the claw re-grabs whatever it just released.
+  "Autoclamp" -- and note that the clear-to-rearm threshold is DERIVED as (range +
+  `AUTOCLAMP_REARM_GAP_MM`, 30), so it is always further out than a pin whichever range is in force. A
+  clear threshold at or inside the range makes the claw re-grab whatever it just released, forever.
 
 Visible electronics: the V5 brain sits low and flat in the middle of the chassis, screen
 facing up ([`05-cup-in-claw-brain-screen.jpg`](photos/05-cup-in-claw-brain-screen.jpg)).

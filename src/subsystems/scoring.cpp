@@ -367,7 +367,7 @@ void Scoring::toggleClaw() {
 void Scoring::setAutoclamp(bool on) {
     autoclamp_ = on;
     // The autoclamp is no longer only for the INTAKE/MATCHLOAD wait: the driver's rule is "whenever
-    // the claw is unclamped, something within AUTOCLAMP_RANGE_MM gets gripped", wherever the arm is.
+    // the claw is unclamped, something within the trigger range gets gripped", wherever the arm is.
     // So arm/disarm the claw itself here, in any state except CLAMPED (never open jaws that are
     // holding something). Claw::arm() handles the RELEASED case by leaving the re-arm to the clear
     // reading rule -- see autoclamp_detector.hpp.

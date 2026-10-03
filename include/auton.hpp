@@ -134,6 +134,36 @@ void liftDownFast();
  *  in this header that leaves a passive hold -- use it to stop a move, not to end a routine. */
 void liftStop();
 
+/**
+ * PUSH THE LIFT DOWN at a constant percentage, until something stops it. Non-blocking and LATCHED, like
+ * holding a button down:
+ *
+ *     auton::liftPush();        // presses down at config::AUTON_LIFT_PUSH_PCT (40%)
+ *     auton::clawOpen();        // ...do whatever needed the arm pressed down
+ *     auton::wait(300);
+ *     auton::liftPushStop();    // let go: the lift brake-holds exactly where it is
+ *
+ * FOR SCORING A PIN AT THE VERY BOTTOM, which is the case no height command covers: there is nothing
+ * left to command a move TO, the arm just has to lean on the pin while the jaws open. The driver's own
+ * request (2026-10-03): "a lift movement when scoring pin at very bottom that moves lift at constant
+ * -40% speed down until we stop it. just easy way to toggle in auto."
+ *
+ * It is plain open-loop voltage through Lift::driverPower() -- the SAME path the D-pad uses -- so:
+ * it cancels any active target and the Scoring macro the instant it starts, nothing profiles or tapers
+ * it, liftPushStop() brake-holds where the arm is rather than resuming an old target, and the lift's one
+ * task is still the only thing writing the motors. `percent` is a MAGNITUDE: the direction is always
+ * down, so liftPush(40) and liftPush(-40) do the same thing.
+ *
+ * YOU DO NOT HAVE TO REMEMBER TO STOP IT. auton::end() releases it too, so a route that forgets -- or
+ * one the field switch cuts off mid-push -- cannot hand driver control an arm still pressing the floor.
+ * But a route that leaves it running will press for as long as the route has left, so stop it.
+ */
+void liftPush(double percent = config::AUTON_LIFT_PUSH_PCT);
+/** Let go of liftPush(): the lift brake-holds right where it is. Safe to call when nothing is pushing. */
+void liftPushStop();
+/** liftPush() + wait(ms) + liftPushStop(), the one-liner form. BLOCKS for ms. */
+void liftPushFor(int ms, double percent = config::AUTON_LIFT_PUSH_PCT);
+
 /** Block until the lift arrives (HOLD at a level, or SEAT at the bottom). True = arrived; false =
  *  BLOCKED, FAULT, or the timeout. Returns false immediately if no target is active. */
 bool waitLift(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);

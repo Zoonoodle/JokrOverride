@@ -204,6 +204,8 @@ auton::scoreAndWait();
 | `auton::liftToMatchload()` | the MATCHLOAD height |
 | `auton::liftDown()` | the banded descent that ends **SEATED** on the hard stop (same as L2's run home, B, R2) |
 | `auton::liftStop()` | abandon the move and brake-hold here, **no target active**. The one call that leaves a passive hold -- for stopping a move, not for ending a routine |
+| `auton::liftPush(pct=40)` / `auton::liftPushStop()` | **press the lift DOWN at a constant open-loop percentage, latched until stopped** -- for scoring a pin at the very bottom, where there is no height left to command. Plain voltage through the same path the D-pad uses: it cancels any target and the macro, nothing profiles or tapers it, and `liftPushStop()` brake-holds where the arm is. `pct` is a magnitude; down is the only direction. `auton::end()` releases it too, so a forgotten push cannot be handed to driver control |
+| `auton::liftPushFor(ms, pct=40)` | the one-liner: push, wait, stop. **Blocks** for `ms` |
 | `auton::waitLift(ms)` | blocks until arrival (HOLD at a height, SEAT at the bottom) |
 | `auton::waitLiftSeated(ms)` | blocks until the arm is pressed onto the hard stop |
 | `auton::liftToAndWait(deg/Level, ms)` | the two in one line |
@@ -323,10 +325,23 @@ should read ~`X 0 Y 0`. Homing runs at the same time, so expect the arm to go do
 ## Autoclamp
 A distance sensor in the claw (port `CLAW_DISTANCE_PORT`, **21**) looks out between the jaws and sees both
 pins and cups. **While the jaws are open and the autoclamp is enabled, anything at or inside
-`AUTOCLAMP_RANGE_MM` (**50 mm**, measured on the robot 2026-10-03) for `AUTOCLAMP_CONFIRM_MS` straight
-gets gripped.** The debounce is the whole
-point: a reading that appears, vanishes and comes back is not a pin. **At the R1 intake handoff the
-reach is longer -- `AUTOCLAMP_INTAKE_RANGE_MM`, 75 mm -- and there is no debounce at all;** see below.
+the trigger range for `AUTOCLAMP_CONFIRM_MS` straight gets gripped.** The debounce is the whole
+point: a reading that appears, vanishes and comes back is not a pin.
+
+**The trigger range is different in each mode** (all three measured on the robot 2026-10-03):
+
+| Where | Range | Clear-to-rearm (range + `AUTOCLAMP_REARM_GAP_MM`) |
+|---|---|---|
+| driver control | `AUTOCLAMP_RANGE_DRIVER_MM` = **55 mm** | 85 mm |
+| autonomous | `AUTOCLAMP_RANGE_AUTON_MM` = **65 mm** | 95 mm |
+| the R1 intake handoff (either mode) | `AUTOCLAMP_INTAKE_RANGE_MM` = **75 mm** | 105 mm |
+
+Auton gets more reach than driver because **nothing is aiming the claw** in a route: it drives to a
+surveyed spot and the pin is wherever placement and odometry drift left it, so the claw has to commit
+from further out or drive past. In driver control a human is aiming, so the shorter range is the safer
+default. The handoff is further still because there the intake pushes the pin *across* the jaws. Which
+one is in force is passed to `Claw` every tick (`periodic::Inputs::auton`, `Scoring::isAtIntakeHandoff()`)
+and never latched, so a field switch cannot leave it on the wrong one.
 
 **It is asynchronous, everywhere.** The watching is done by `periodic::tick()` -- the driver loop in
 driver control, the auton tick in autonomous -- so nothing is ever called to "run" it and nothing ever
@@ -439,16 +454,16 @@ the claw and watch it move.
 
 | Knob | What it does |
 |---|---|
-| `AUTOCLAMP_RANGE_MM` (**50**) | at or inside this = something in the jaws (was 15; measured 2026-10-03) |
+| `AUTOCLAMP_RANGE_DRIVER_MM` (**55**) / `AUTOCLAMP_RANGE_AUTON_MM` (**65**) | at or inside this = something in the jaws, per mode |
 | `AUTOCLAMP_CONFIRM_MS` (50) | ...continuously for this long |
 | `AUTOCLAMP_MIN_SAMPLES` (2) | ...over at least this many fresh readings |
 | `AUTOCLAMP_STALE_GRACE_MS` (60) | an unchanged reading counts as a new sample again after this long (~2 sensor refreshes) |
-| `AUTOCLAMP_REARM_MM` (**80**) / `AUTOCLAMP_REARM_CLEAR_MS` (150) | what counts as clear, and for how long, before it re-arms. **It must always stay ABOVE the range** -- see the warning below |
+| `AUTOCLAMP_REARM_GAP_MM` (**30**) / `AUTOCLAMP_REARM_CLEAR_MS` (150) | clear = **(the range in force) + this gap**, and for how long, before it re-arms. A gap rather than an absolute distance on purpose -- see the warning below |
 | `AUTOCLAMP_MAX_VALID_MM` (9999) / `AUTOCLAMP_MIN_VALID_MM` (1) | the sensor's "nothing there" (counts as clear) and "cannot measure" (counts as neither) |
 | `AUTOCLAMP_MIN_CONFIDENCE` (0 = ignore) | the sensor's own 0..63 confidence |
 | `AUTOCLAMP_ON_IN_DRIVER` (true) | the driver default |
 | `AUTOCLAMP_ON_IN_AUTON` (true) | the auton default (2026-10-03; was hard-off) |
-| `AUTOCLAMP_INTAKE_RANGE_MM` (**75**) / `AUTOCLAMP_INTAKE_REARM_MM` (**105**) | the range and clear threshold **at the R1 handoff only** -- a longer reach, because there the intake pushes the pin *across* the jaws |
+| `AUTOCLAMP_INTAKE_RANGE_MM` (**75**) | the range **at the R1 handoff only** -- a longer reach, because there the intake pushes the pin *across* the jaws |
 | `AUTOCLAMP_INTAKE_CONFIRM_MS` (0) / `AUTOCLAMP_INTAKE_MIN_SAMPLES` (1) | the confirm window **at the R1 handoff only**: fire on the first in-range reading |
 | `AUTOCLAMP_INTAKE_PUSH_MS` (300) | how long the forced push down after a handoff clamp lasts |
 | `CLAMP_RISE_DEG` (5, in the LIFT TUNING block) | how far up every other clamp hops the arm |
@@ -460,21 +475,22 @@ running. A pure time window could therefore be satisfied by **one** lucky measur
 when `AUTOCLAMP_STALE_GRACE_MS` has passed since the last counted one (so a pin sitting dead still at
 one millimetre value still gets its second sample).
 
-**The range and the re-arm threshold move together, always.** Re-arming needs a reading *further* than
-`AUTOCLAMP_REARM_MM`; clamping needs one at or inside `AUTOCLAMP_RANGE_MM`. If the re-arm threshold ever
-drops to or below the range, anything sitting between them reads as **both** clear and in range, so the
-autoclamp arms and instantly re-grabs the thing it just released -- forever, and no score can finish.
-That is why raising the range 15 -> 50 also forced the re-arm 30 -> 80, and why the handoff has its own
-`AUTOCLAMP_INTAKE_REARM_MM` (105) above its own 75 mm range. Both pairs are `static_assert`ed in
-`Claw::detectorConfig()`, and `test/autoclamp_detector_test.cpp` has a case proving what the broken
-ordering does.
+**Why the clear threshold is a GAP and not a number.** Re-arming needs a reading *further* than the
+clear threshold; clamping needs one at or inside the range. If the clear threshold is ever at or below
+the range, anything sitting between them reads as **both** clear and in range -- so the autoclamp arms,
+instantly re-grabs the thing it just released, and does that forever; no score can finish. With three
+different ranges in play, the only way to keep that ordering true is to compute it, so the clear
+threshold is always `range + AUTOCLAMP_REARM_GAP_MM`. (The earlier absolute `AUTOCLAMP_REARM_MM` nearly
+caused exactly this bug when the range went 15 -> 50, which is why it is gone.) `AUTOCLAMP_REARM_GAP_MM`
+is `static_assert`ed positive in `Claw::detectorConfig()`, and `test/autoclamp_detector_test.cpp` has a
+case proving what the broken ordering does.
 
-**Tuning the range.** 50 mm is 5 cm of reach, so the sensor sees whatever is in front of it, not only
-pins. With a pin held in the open jaws, watch the `DIST` line's `CLAW` value:
+**Tuning the range.** 55-75 mm is 5-7 cm of reach, so the sensor sees whatever is in front of it, not
+only pins. With a pin held in the open jaws, watch the `DIST` line's `CLAW` value:
 
-* it **never reaches 50** with a pin there -> raise `AUTOCLAMP_RANGE_MM` to just above what you see;
-* it **clamps on the field, a wall or the intake** -> lower it. This is the first number to suspect if
-  the jaws shut on nothing in particular;
+* it **never reaches the range** with a pin there -> raise that mode's range to just above what you see;
+* it **clamps on the field, a wall or the intake** -> lower that mode's range. This is the first number
+  to suspect if the jaws shut on nothing in particular;
 * it reads **0** with the pin there -> the pin is inside the sensor's floor: raise the range and/or move
   the sensor back a few mm (a 0 is treated as "cannot measure", never as "very close");
 * it **clamps on a pin or cup going past** -> raise `AUTOCLAMP_CONFIRM_MS` (50 -> 80) first;
@@ -487,7 +503,7 @@ pins. With a pin held in the open jaws, watch the `DIST` line's `CLAW` value:
 **On-robot test, driver:** power on, enable driver control. First wave a hand in front of the claw's
 sensor and check the `DIST` line's **`CLAW`** value moves -- that is the whole check that the sensor really
 is on port 21. Then: `AC:ARMED` on the `CLAW` line, jaws open.
-Move a pin slowly into the jaws: `DIST CLAW` falls below **50**, `AC:` goes `SEEING`, and about 50 ms later the jaws
+Move a pin slowly into the jaws: `DIST CLAW` falls below **55** (driver control's range), `AC:` goes `SEEING`, and about 50 ms later the jaws
 shut, the line reads `CLAMPED  AC:HELD`, and **the arm hops up 5°** (`LIFT` line: `CLAMP+5`, then a hold
 at ~5). Press **A** to open: `AC:CLEAR?`. With the pin still sitting
 there it must **not** re-grab. Take the pin away: `AC:ARMED` again. Wave the pin past the jaws quickly:

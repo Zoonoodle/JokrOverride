@@ -100,6 +100,15 @@ class Claw {
      *  tick (periodic::tick() does, from Scoring::isAtIntakeHandoff()). It changes nothing else: the
      *  pure detector is the same code, just handed different numbers. */
     void setIntakeMode(bool atIntakeHandoff) { intakeMode_ = atIntakeHandoff; }
+    /** WHICH MODE THE ROBOT IS IN, because the trigger range differs: config::AUTOCLAMP_RANGE_AUTON_MM
+     *  (65) against AUTOCLAMP_RANGE_DRIVER_MM (55). In driver control a human is aiming the claw, so the
+     *  shorter range is the safer default; in autonomous nothing is aiming and the claw has to commit
+     *  from further out. Passed every tick by periodic::tick() from periodic::Inputs::auton -- NOT
+     *  latched state -- so a field switch can never leave it in the wrong mode. */
+    void setAutonMode(bool auton) { autonMode_ = auton; }
+    /** The trigger range in force right now, mm: the handoff's reach if setIntakeMode(), else this
+     *  mode's. Public so the brain/README can be checked against it. */
+    int activeRangeMm() const;
     /** Driver override: close now, no sensor needed (-> CLAMPED). */
     void clamp();
 
@@ -162,6 +171,7 @@ class Claw {
     bool enabled_ = config::CLAW_AUTOCLAMP_AT_START;  // autoclamp on/off (Y, opcontrol, auton)
     bool inhibit_ = false;           // something else owns the claw this tick (an L2 score)
     bool intakeMode_ = false;        // at the R1 handoff: the instant-fire confirm (see setIntakeMode())
+    bool autonMode_ = false;         // autonomous: a longer trigger range (see setAutonMode())
     ClampSource clampEvent_ = ClampSource::NONE;  // one-shot: the jaws just shut, and why
     bool level_ = false;             // the level the pin is actually driven to, for the brain screen
     std::uint32_t releasedAt_ = 0;   // when the jaws were last opened

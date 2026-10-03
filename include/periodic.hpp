@@ -62,6 +62,12 @@ struct Inputs {
     /** L1 (or auton::stepUp()) this tick: may OPEN the auto-intake window, if the arm really is
      *  starting a rise from the floor (see config::L1_AUTO_INTAKE_UNTIL_DEG). */
     bool stepUpPressed = false;
+    /** TRUE ONLY FROM THE AUTON TICK. The autoclamp's trigger range differs by mode
+     *  (config::AUTOCLAMP_RANGE_AUTON_MM 65 vs _DRIVER_MM 55), and this is how Claw hears which one it
+     *  is -- passed every tick rather than latched anywhere, so a field switch cannot leave it wrong.
+     *  It defaults to false, which is what makes opcontrol's loop get the driver range without having to
+     *  know this field exists. */
+    bool auton = false;
 };
 
 /** Forget both macro windows and clear their brain-screen flags. Called at the start of each mode

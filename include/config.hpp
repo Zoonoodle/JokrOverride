@@ -521,6 +521,23 @@ inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 //   It lifts far enough to matter / fights the next move: lower it (1-2 deg still moves, see above).
 inline constexpr double CLAMP_RISE_DEG = 5.0;                // TUNE: arm degrees, RELATIVE and upward only
 
+// --- THE AUTON LIFT PUSH (auton::liftPush() / liftPushStop()) ---------------
+// THE DRIVER'S REQUEST, 2026-10-03: "we need a lift movement when scoring pin at very bottom that moves
+// lift at constant -40% speed down until we stop it. just easy way to toggle in auto." So this is not a
+// move to a height and not a profiled descent -- it is a plain, constant, open-loop DOWNWARD voltage
+// that a route switches on and off, for pressing a pin down at the very bottom where there is no height
+// left to command.
+// It goes through Lift::driverPower(), the SAME manual path the D-pad uses, which is why it needs no new
+// mode in the lift and still obeys every rule: one owner of the motors, it cancels any active target the
+// instant it starts, and liftPushStop() brake-holds exactly where the arm is rather than resuming an old
+// target. It is LATCHED (like holding a button), so a route must stop it -- and auton::end() stops it
+// too, so a route that forgets, or is cut off by the field switch, cannot leave the arm leaning on the
+// floor.
+//   It does not press hard enough to seat the pin: raise it.
+//   It lifts the back of the robot / stalls the motors warm: LOWER it. 40% is 4800 mV, the same force
+//     L1_GRAB_PUSH_PCT uses, and it is open-loop, so nothing tapers it off at the bottom.
+inline constexpr double AUTON_LIFT_PUSH_PCT = 40.0;          // TUNE: % of LIFT_MAX_MV, downward
+
 // --- Clamped-mode R1 / R2 lift (see src/main.cpp and README "Driver guide") --
 // While the claw is CLAMPED on a pin, R1/R2 stop being intake/extake and become lift up/down.
 // Up is plain voltage; down goes through the banded descent above (so it seats at the bottom exactly
@@ -752,28 +769,39 @@ inline constexpr int8_t CLAW_DISTANCE_PORT = 21;             // confirmed 2026-1
 inline constexpr bool AUTOCLAMP_ON_IN_DRIVER = true;
 inline constexpr bool AUTOCLAMP_ON_IN_AUTON = true;          // the driver's call, 2026-10-03 ("should work in auto")
 inline constexpr bool CLAW_AUTOCLAMP_AT_START = false;       // power-on / initialize(): never armed
-// THE TRIGGER. 50 mm, measured by the driver on the robot 2026-10-03 ("clamp distance has to hit at
-// 50 mm actually") -- it replaces the original 15 mm guess, which was a starting point taken from the
-// first conversation and never checked against the real mounting. 50 mm is also comfortably ABOVE the
-// V5 Distance Sensor's ~20 mm specified minimum, so the old "15 sits below what this sensor is
-// specified to read" caveat no longer applies to this robot at all.
-// AT THE R1 INTAKE HANDOFF it is AUTOCLAMP_INTAKE_RANGE_MM (75) instead -- see that constant.
+// THE TRIGGER, AND IT IS DIFFERENT IN EACH MODE. The driver's measured numbers (2026-10-03): 55 mm in
+// driver control, 65 mm in autonomous, 75 mm at the R1 intake handoff in either mode. They replace the
+// original 15 mm, which was a starting point from the first conversation and was never checked against
+// the real mounting. All three are comfortably ABOVE the V5 Distance Sensor's ~20 mm specified minimum,
+// so the old "15 sits below what this sensor is specified to read" caveat no longer applies at all.
+//
+// WHY AUTON GETS MORE REACH THAN DRIVER. In driver control a human is aiming the claw, so a shorter
+// range is the safer default -- it is the driver who decides what to grab, and 55 mm is about the jaws.
+// In autonomous nothing is aiming: the route drives to a surveyed spot and the pin is wherever placement
+// and odometry drift left it, so the claw has to commit from further out or it drives past. The handoff
+// (75) is further still, because there the intake pushes the pin ACROSS the jaws rather than the claw
+// being brought to it.
+//
+// Which one is in force is NOT state this class keeps: Claw::setAutonMode() and setIntakeMode() are
+// passed every tick by periodic::tick(), the same way setInhibit() is, so it can never be left latched
+// in the wrong mode after a field switch. See Claw::activeRangeMm().
+//
 // Watch the brain's DIST line's CLAW value with a pin held in the open jaws:
-//   it never reaches 50 with a pin there    -> raise AUTOCLAMP_RANGE_MM to just above what you see.
+//   it never reaches the range with a pin there -> raise the range for that mode to just above what you
+//                                               see.
 //   it reads 0 with the pin in the jaws      -> the pin is INSIDE the sensor's floor: raise the range
 //                                               and/or move the sensor back a few mm. (A 0 is treated
 //                                               as "cannot measure", never as "very close" -- see
 //                                               AUTOCLAMP_MIN_VALID_MM.)
 //   it clamps on a cup/pin going past        -> raise AUTOCLAMP_CONFIRM_MS (50 -> 80) first.
-//   it clamps on the field/a wall/the intake -> LOWER it. 50 mm is 5 cm of reach, so this is the first
-//                                               number to suspect if the jaws shut on nothing in
-//                                               particular; the sensor sees whatever is in front of it,
-//                                               not only pins.
-// WHENEVER THIS MOVES, CHECK AUTOCLAMP_REARM_MM WITH IT. Re-arming requires a reading FURTHER than
-// rearm, and clamping a reading at or inside range: if rearm ever drops to or below range, a pin
-// sitting between the two counts as BOTH clear and in range, so the autoclamp re-arms and instantly
-// re-grabs the thing it just put down -- forever. The two must keep a real gap, rearm above range.
-inline constexpr int AUTOCLAMP_RANGE_MM = 50;                // TUNE: at or inside this = something in the jaws (was 15)
+//   it clamps on the field/a wall/the intake -> LOWER the range for that mode. 55-75 mm is 5-7 cm of
+//                                               reach, so this is the first number to suspect if the
+//                                               jaws shut on nothing in particular; the sensor sees
+//                                               whatever is in front of it, not only pins.
+// THE CLEAR THRESHOLD FOLLOWS THE RANGE AUTOMATICALLY -- see AUTOCLAMP_REARM_GAP_MM, which exists
+// precisely so that changing a range here cannot break the ordering the autoclamp depends on.
+inline constexpr int AUTOCLAMP_RANGE_DRIVER_MM = 55;         // TUNE: driver control (measured 2026-10-03)
+inline constexpr int AUTOCLAMP_RANGE_AUTON_MM = 65;          // TUNE: autonomous (measured 2026-10-03)
 inline constexpr int AUTOCLAMP_CONFIRM_MS = 50;              // TUNE: ...continuously for this long
 // ...over at least this many FRESH readings. The sensor refreshes on the order of 30 ms, i.e. slower
 // than the 10 ms tick, so the same measurement comes back two or three times in a row; without this,
@@ -789,19 +817,22 @@ inline constexpr int AUTOCLAMP_MIN_SAMPLES = 2;              // TUNE
 inline constexpr int AUTOCLAMP_STALE_GRACE_MS = 60;          // TUNE
 // RE-ARM. The instant the jaws open, the pin they just let go of is still millimetres away, so a
 // timer-based re-arm would re-grab it every single time and no score could ever finish. After ANY
-// open, the autoclamp waits until the sensor reads CLEAR -- further than AUTOCLAMP_REARM_MM, or
-// nothing in range at all -- for AUTOCLAMP_REARM_CLEAR_MS. The gap between the range and this is
-// hysteresis: the two thresholds cannot chatter at one distance.
-// RAISED 30 -> 80 (2026-10-03) BECAUSE THE RANGE WENT 15 -> 50. This is not cosmetic: a re-arm
-// threshold at or below the trigger range is a guaranteed re-grab loop -- anything sitting between them
-// reads as CLEAR (so the autoclamp arms) and as IN RANGE (so it immediately clamps), so the claw grabs
-// what it just released, every time, and no score can finish. 80 keeps the same ~30 mm of hysteresis
-// above the new range that 30 had above the old one.
-//   It re-grabs what it just put down: raise AUTOCLAMP_REARM_MM / AUTOCLAMP_REARM_CLEAR_MS.
-//   The AC: field sits on CLEAR? forever and never re-arms: there is something permanently inside
-//     this distance (the intake, a wall, the frame) -- LOWER it, but never to or below the range in
-//     use (50, or 75 at the handoff).
-inline constexpr int AUTOCLAMP_REARM_MM = 80;                // TUNE: further than this = clear (was 30)
+// open, the autoclamp waits until the sensor reads CLEAR -- further than (the range in force + this
+// gap), or nothing in range at all -- for AUTOCLAMP_REARM_CLEAR_MS.
+//
+// A GAP, NOT AN ABSOLUTE DISTANCE, AND THAT IS THE WHOLE POINT. There are three ranges now (55 driver /
+// 65 auton / 75 handoff) and each needs its own clear threshold, because a clear threshold at or below
+// the range in force is a guaranteed re-grab loop: anything sitting between them reads as CLEAR (so the
+// autoclamp arms) AND as IN RANGE (so it immediately clamps), so the claw grabs back what it just put
+// down, every time, and no score can finish. Expressing the hysteresis as "range + 30 mm" makes that
+// ordering true by construction, so changing any range above cannot reintroduce the bug -- which the
+// earlier absolute AUTOCLAMP_REARM_MM / AUTOCLAMP_INTAKE_REARM_MM pair very nearly did when the range
+// went 15 -> 50.
+//   It re-grabs what it just put down: raise this, or AUTOCLAMP_REARM_CLEAR_MS.
+//   The AC: field sits on CLEAR? forever and never re-arms: there is something permanently within
+//     (range + this) of the sensor -- the intake, a wall, the frame. LOWER it; it may not go to or below
+//     0, and the smaller it is the twitchier the arm/clamp boundary gets.
+inline constexpr int AUTOCLAMP_REARM_GAP_MM = 30;            // TUNE: clear = (range in force) + this
 inline constexpr int AUTOCLAMP_REARM_CLEAR_MS = 150;         // TUNE
 // VALIDITY of a raw reading. At or above MAX is the sensor's own "nothing in range" (9999) and counts
 // as CLEAR. Below MIN (a 0: the sensor cannot measure, e.g. an object inside its floor) and any
@@ -848,13 +879,10 @@ inline constexpr int AUTOCLAMP_INTAKE_MIN_SAMPLES = 1;       // TUNE: ...over on
 //   The jaws shut on the intake itself, or on a cup riding through: LOWER this toward 50.
 //   Pins still get carried past before the jaws move: raise it -- but then also raise
 //   AUTOCLAMP_INTAKE_REARM_MM below, which must stay above it.
+// It is the same 75 in BOTH modes: unlike the driver/auton split above, what makes the handoff want more
+// reach is the mechanism (the pin crossing the jaws on the rollers), not who is aiming. Its clear
+// threshold comes from AUTOCLAMP_REARM_GAP_MM like every other range's.
 inline constexpr int AUTOCLAMP_INTAKE_RANGE_MM = 75;         // TUNE: the trigger range at the handoff only
-// ...and its own clear threshold, for exactly the reason spelled out on AUTOCLAMP_REARM_MM: a re-arm
-// threshold at or below the range in use re-grabs what it just released, forever. Same ~30 mm of
-// hysteresis above 75 that AUTOCLAMP_REARM_MM has above 50.
-//   AC: sticks on CLEAR? at the handoff and never re-arms: something (the intake) is permanently inside
-//   this -- lower it, but never to or below AUTOCLAMP_INTAKE_RANGE_MM.
-inline constexpr int AUTOCLAMP_INTAKE_REARM_MM = 105;        // TUNE: further than this = clear, at the handoff
 // THE PUSH. The same open-loop downward force L1's GRAB uses (L1_GRAB_PUSH_PCT, 40% of volts, see "The
 // L1 GRAB" in the lift block) for this long, and then the arm HOLDS wherever it ended -- the driver's
 // "move down a bit". The jaws are already shut by the time it starts, so unlike L1's grab there is no

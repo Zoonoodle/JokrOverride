@@ -521,6 +521,22 @@ inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 //   It lifts far enough to matter / fights the next move: lower it (1-2 deg still moves, see above).
 inline constexpr double CLAMP_RISE_DEG = 5.0;                // TUNE: arm degrees, RELATIVE and upward only
 
+// --- The D-pad manual override's speeds -------------------------------------
+// D-pad Up/Down are plain open-loop voltage straight into Lift::update(), ahead of everything else
+// (CLAUDE.md safety rule 3). These are the only two numbers that decide how that feels.
+// DOWN IS HALF SPEED, the driver's call 2026-10-03 ("dpad down needs to move lift at 50% speed"):
+// gravity is already helping on the way down, so full voltage down is much faster than full voltage up
+// and it ends against the hard stop -- 50% makes the two directions feel alike and makes nudging the arm
+// down onto a pin controllable instead of a drop. UP stays at 100: nothing assists it and there is
+// nothing at the top to run into but the software limit.
+// Note these ONLY affect the D-pad. Clamped-mode R1/R2 have their own R_LIFT_UP_PCT / R_LIFT_DOWN_PCT,
+// and a commanded move's full-voltage DRIVE phase is LIFT_MAX_MV regardless -- lowering these does not
+// slow any preset, macro or auton move down.
+//   Manual down still feels like a drop: lower LIFT_MANUAL_DOWN_PCT further (40, 35).
+//   Manual down is too slow to be useful: raise it (65, 80).
+inline constexpr double LIFT_MANUAL_UP_PCT = 100.0;          // TUNE: D-pad Up, % of LIFT_MAX_MV
+inline constexpr double LIFT_MANUAL_DOWN_PCT = 50.0;         // TUNE: D-pad Down (the driver's 50%)
+
 // --- THE AUTON LIFT PUSH (auton::liftPush() / liftPushStop()) ---------------
 // THE DRIVER'S REQUEST, 2026-10-03: "we need a lift movement when scoring pin at very bottom that moves
 // lift at constant -40% speed down until we stop it. just easy way to toggle in auto." So this is not a

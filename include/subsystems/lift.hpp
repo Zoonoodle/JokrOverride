@@ -16,7 +16,8 @@
  * update() picks exactly one of these every tick, in this order:
  *
  *   1. Driver holding the manual override, D-pad Up/Down (driverPower() nonzero):
- *      full +-LIFT_MAX_MV, any target cancelled immediately, homing cancelled
+ *      plain voltage at LIFT_MANUAL_UP_PCT / LIFT_MANUAL_DOWN_PCT of LIFT_MAX_MV
+ *      (100% / 50%), any target cancelled immediately, homing cancelled
  *      immediately, no old preset resumes when they let go.
  *   2. Homing (see "Homing" below), if it has been requested and not finished.
  *   3. A commanded height (setTarget()/moveTo(), from the driver preset buttons,
@@ -190,7 +191,9 @@
  * HOLDS wherever it ended. The rise afterwards is an ordinary position move
  * commanded by Scoring, so auton::grab() can simply not command one and stay.
  *
- * THE MANUAL INPUT (driverPower(): D-pad Up/Down at full send, and R1 at
+ * THE MANUAL INPUT (driverPower(): D-pad Up at LIFT_MANUAL_UP_PCT and Down at
+ * LIFT_MANUAL_DOWN_PCT -- half speed, because gravity already helps downward and
+ * it ends on the hard stop -- and R1 at
  * R_LIFT_UP_PCT while a pin is clamped) is plain voltage fed into this same
  * loop ahead of everything else, and it cancels a score sequence at any stage.
  * R2 in clamped mode is not manual at all -- descendManual() runs the DESCENT
@@ -498,7 +501,8 @@ class Lift {
 
     /**
      * Driver manual override: -1..1 of LIFT_MAX_MV, plain motor power, no feedforward. The D-pad uses
-     * +-1.0 (full send); R1 in clamped mode uses +R_LIFT_UP_PCT / 100. Non-zero input immediately
+     * +LIFT_MANUAL_UP_PCT / -LIFT_MANUAL_DOWN_PCT (100% up, 50% down); R1 in clamped mode uses
+     * +R_LIFT_UP_PCT / 100. Non-zero input immediately
      * cancels any active target AND any homing in progress (see class comment), and letting go
      * brake-holds where it is -- no old target resumes. Call with 0 every loop nothing is holding it.
      */

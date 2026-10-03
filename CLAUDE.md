@@ -151,7 +151,11 @@ Standing permission: build, upload and commit every time without asking. Do not 
    a second `MotorGroup` or `Motor` on the lift ports — that duplicate was the real bug behind
    both the startup bounce and the failing builds. (`399c6d0`, `1de3225`, `d3efc00`)
 3. **Manual lift always wins.** Holding D-pad Up/Down feeds voltage into that same loop ahead of
-   everything else and cancels any active target immediately. Letting go brakes and holds; it must
+   everything else and cancels any active target immediately. The magnitudes are
+   `LIFT_MANUAL_UP_PCT` / `LIFT_MANUAL_DOWN_PCT` (100% / **50%** — down is half speed, the driver's call
+   2026-10-03, because gravity already helps downward and the travel ends on the hard stop). They affect
+   the D-pad ONLY: clamped-mode R1/R2 keep their own `R_LIFT_*_PCT`, and a commanded move's DRIVE phase
+   is still full `LIFT_MAX_MV`. Letting go brakes and holds; it must
    never snap back to an old preset. (L1/L2 are the intake-macro buttons, not manual lift.)
    **R1/R2 while a pin is CLAMPED** are a second manual lift input (R1 up at `R_LIFT_UP_PCT` through
    the same `driverPower()` path; R2 down through `Lift::descendManual()`, the banded seating descent).

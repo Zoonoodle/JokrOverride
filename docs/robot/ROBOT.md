@@ -159,7 +159,7 @@ standing person. All preset heights are in **lift-arm degrees from that resting 
 
 ```
 DOWN           0.0    resting / start
-INTAKE         1.1    claw at the intake handoff (R1 tap)
+INTAKE         6.1    claw at the intake handoff (R1 tap) -- driver-adjusted 2026-10-03, was 1.1
 MATCHLOAD     15.0    claw at matchload height -- TUNE, not yet measured
 STACK_LEVELS  31.0 / 59.0 / 74.6 / 87.3 / 106.9   levels 1..5 (L1 steps through these)
                        MEASURED ON THE ROBOT 2026-10-01 (arm degrees, the unbracketed LIFT/ROT
@@ -167,13 +167,15 @@ STACK_LEVELS  31.0 / 59.0 / 74.6 / 87.3 / 106.9   levels 1..5 (L1 steps through 
 MAX          111.9    software hard stop: top level (106.9) + 5 deg margin
 ```
 
-`DOWN`, `INTAKE` and the 5 `STACK_LEVELS` are measured, not guessed -- see "Lift levels" below
+`DOWN` and the 5 `STACK_LEVELS` are measured, not guessed -- see "Lift levels" below
 for the 7 reference photos they were read off. `MATCHLOAD` is still marked TUNE in `config.hpp`;
-it wasn't covered by that photo set, and `INTAKE` (1.1) is almost certainly a mis-read that needs
+it wasn't covered by that photo set, and `INTAKE` is now **6.1** (the photo's 1.1 plus the driver's
+"go up 5 degrees more", 2026-10-03) -- by eye, not surveyed, so it still deserves
 re-measuring off the brain's `LIFT` line.
 
-Driving it: **D-pad Up/Down (hold)** are plain manual power (up / down, neither = brake/hold)
-and always win -- holding either cancels whatever the lift was doing. Everything else (**L1**
+Driving it: **D-pad Up/Down (hold)** are plain manual power and always win -- holding either cancels
+whatever the lift was doing. Up is `LIFT_MANUAL_UP_PCT` (100%), down `LIFT_MANUAL_DOWN_PCT` (**50%**,
+the driver's call 2026-10-03: gravity already helps downward); neither = brake/hold. Everything else (**L1**
 step up a stack level, **L2** score and return home, **R1** tap to go to INTAKE, **B** stow to
 DOWN) goes through the PID. See "Safety rules" in `CLAUDE.md` and the README "Driver guide" --
 this single-owner split is deliberate and was hard-won.
@@ -187,7 +189,7 @@ the brain's `LIFT` line (already converted to lift-arm degrees). Photos:
 | Photo | Named height | Brain `LIFT` line read | `config::lift_preset` |
 |---|---|---|---|
 | [`levels/0-start.jpg`](photos/levels/0-start.jpg) | start / rest | `LIFT 0.1 -> none` | `DOWN = 0.0` |
-| [`levels/1-intake.jpg`](photos/levels/1-intake.jpg) | intake handoff | `LIFT 1.1 -> none` | `INTAKE = 1.1` |
+| [`levels/1-intake.jpg`](photos/levels/1-intake.jpg) | intake handoff | `LIFT 1.1 -> none` | `INTAKE` was 1.1 here; now **6.1** (driver, 2026-10-03) |
 | [`levels/2-score-L1.jpg`](photos/levels/2-score-L1.jpg) | score level 1 | `LIFT 26.6 -> none` | `STACK_LEVELS[0] = 26.6` |
 | [`levels/3-score-L2.jpg`](photos/levels/3-score-L2.jpg) | score level 2 | `LIFT 54.4 -> none` | `STACK_LEVELS[1] = 54.4` |
 | [`levels/4-score-L3.jpg`](photos/levels/4-score-L3.jpg) | score level 3 | `LIFT 72.8 -> none` | `STACK_LEVELS[2] = 72.8` |

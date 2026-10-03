@@ -927,7 +927,7 @@ show `pos` holding within a degree with no sign change in `vel`. Any oscillation
 | The last couple of degrees crawl forever | raise `LIFT_APPROACH_KP_PER_S` and `LIFT_APPROACH_MIN_DEG_PER_S`, or shrink `LIFT_APPROACH_ZONE_DEG` |
 | Rapid L1 taps stop at each level instead of merging | the arm is reaching `APPROACH`/`HOLD` before the next tap lands -- raise `LIFT_DECEL_DEG_PER_S2` so less of the move is slow. A tap is only *dropped* if D-pad Up/Down is held, or mid-L2 (`RELEASING`) |
 | Trace shows `D` and `B` alternating every line | raise `LIFT_DRIVE_RESUME_DEG_PER_S` |
-| Sags below a stack level while parked | raise `LIFT_HOLD_KI`, then `LIFT_HOLD_KP` |
+| Sags below a stack level while parked | raise `LIFT_HOLD_KI`, then `LIFT_HOLD_KP` (200 since 2026-10-03). Note `LIFT_HOLD_KP` is silent inside the deadband and `PARK` removes the loop entirely once settled, so for a *parked* sag `LIFT_HOLD_KI` really is the knob |
 | Buzzes or twitches while parked | raise `LIFT_HOLD_DEADBAND_DEG`, then lower `LIFT_HOLD_KP` |
 | `vel` swings above and below the reference in the trace (hunts) | lower `LIFT_VEL_KP` |
 | Slow to reach a commanded speed / sags before it gets going | raise `LIFT_VEL_KI` |
@@ -1003,7 +1003,7 @@ the absolute angle it saw at the stop — the one the plausibility window was ch
 | Too slow / times out | raise `LIFT_HOME_MV` magnitude (more negative) or `LIFT_HOME_TIMEOUT_MS` |
 
 ## Tuning the claw positions
-All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.hpp`) -- the number on the brain's `LIFT` line. 0 is the hard stop at the bottom. The 5 `STACK_LEVELS` were **measured on the robot 2026-10-01** by driving to each scoring height and reading the `LIFT` line: **31.0 / 59.0 / 74.6 / 87.3 / 106.9**, with `MAX` = 111.9 as the software stop. They replace the older photo-derived set (26.6 / 54.4 / 72.8 / 116.3 / 128.3), which was taken before homing existed and carried that session's zero offset. `MATCHLOAD` is still a placeholder, and `INTAKE` (1.1) almost certainly needs re-measuring. To (re)measure any of them:
+All heights are **lift-arm degrees** in `config::lift_preset` (`include/config.hpp`) -- the number on the brain's `LIFT` line. 0 is the hard stop at the bottom. The 5 `STACK_LEVELS` were **measured on the robot 2026-10-01** by driving to each scoring height and reading the `LIFT` line: **31.0 / 59.0 / 74.6 / 87.3 / 106.9**, with `MAX` = 111.9 as the software stop. They replace the older photo-derived set (26.6 / 54.4 / 72.8 / 116.3 / 128.3), which was taken before homing existed and carried that session's zero offset. `MATCHLOAD` is still a placeholder. `INTAKE` is **6.1** -- the old photo-derived 1.1 plus the driver's "go up 5 degrees more" (2026-10-03), set by eye rather than surveyed, so re-measure it if the claw still does not line up with the handoff. To (re)measure any of them:
 1. Start the program with the lift fully down.
 2. Use **D-pad Up/Down** to put the claw exactly where you want it, then read the brain's `LIFT` line for the current position.
 3. Type that number into the preset:

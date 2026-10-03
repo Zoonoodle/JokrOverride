@@ -96,13 +96,22 @@ inline constexpr double LIFT_ROTATION_RATIO = 4.0;           // confirmed: senso
 // off the absolute zero) if anything here looks off on the real robot.
 namespace lift_preset {
 inline constexpr double DOWN = 0.0;                          // resting / start position (IMG_6088 read 0.1, i.e. ~0)
-// TODO(team): RE-MEASURE. 1.1 arm deg is only 4.4 sensor deg -- about a millimetre of end-effector
-// travel on a six-bar, which is not a visible "lift to the handoff". It is almost certainly a
-// mis-read of IMG_6089 (or the photo was taken with the arm already resting at the bottom). It was
-// also smaller than the old LIFT_SETTLE_DEG (1.5), which is why R1 reported "arrived at INTAKE"
-// without the arm moving at all. To fix: run the program, D-pad Up until the claw lines up with the
-// intake handoff, read the brain's LIFT line, and put that number here.
-inline constexpr double INTAKE = 1.1;                        // TODO(team): re-measure, see above (photo IMG_6089)
+// RAISED 1.1 -> 6.1 (2026-10-03, the driver: "make the intake state go up a 5 degrees more").
+// The old 1.1 came from photo IMG_6089 and was always suspect: 1.1 arm deg is only 4.4 sensor deg, about
+// a millimetre of end-effector travel on a six-bar, which is not a visible "lift to the handoff" at all
+// -- it was almost certainly a mis-read, or the photo was taken with the arm already resting at the
+// bottom. It was also smaller than the old LIFT_SETTLE_DEG (1.5), which is why R1 used to report
+// "arrived at INTAKE" without the arm moving. 6.1 is that number plus the driver's 5, set by eye on the
+// robot rather than re-measured from scratch, so it is a real improvement on a bad value rather than a
+// surveyed one. If it still does not line up: D-pad Up until the claw meets the handoff, read the brain's
+// LIFT line, and put THAT here.
+// TWO THINGS MOVE WITH IT, both deliberately relative so neither needed touching:
+//   - the pivot handoff zone is INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG, so it is now 6.1 .. 16.1;
+//   - INTAKE is auto-promoted to a PRECISE goal wherever it is commanded from (setTarget() matches it
+//     within half a degree), so it still gets the tight band and the slow final approach, and it is
+//     still never treated as a trip to the bottom. At 6.1 it is now also above LIFT_BOTTOM_GOAL_DEG (5)
+//     outright, so that promotion is no longer the only thing keeping it off the descent path.
+inline constexpr double INTAKE = 6.1;                        // driver-adjusted 2026-10-03 (was 1.1, photo-derived)
 inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covered by the reference photos yet
 // FRONT TOGGLE: the height the arm goes to at the start of the match route to flip the front toggle,
 // then comes straight back down from (fast -- see auton::liftDownFast()). Deliberately its OWN
@@ -253,7 +262,15 @@ inline constexpr double LIFT_DRIVE_RESUME_DEG_PER_S = 20.0;  // TUNE
 //   Buzzes / twitches while holding: raise LIFT_HOLD_DEADBAND_DEG, then lower LIFT_HOLD_KP.
 //   Still bounces once or twice on arrival: RAISE LIFT_HOLD_KD. This is the anti-bounce knob.
 //   Audibly straining while parked at a high level: lower LIFT_HOLD_MAX_MV (expect some sag).
-inline constexpr float LIFT_HOLD_KP = 180.0f;                // TUNE: mV per deg of sag
+// RAISED 180 -> 200 (2026-10-03, the driver: "turn up lift P gain a little just slightly"). This is THE
+// lift's position P -- the hold's, not the velocity loop's LIFT_VEL_KP, which is an inner speed loop.
+// WHERE IT ACTUALLY BITES, so the next person is not surprised by how little changes: P is SILENT inside
+// holdDeadband() (4 deg at a level, 0.5 at INTAKE) and PARK takes the whole loop away after
+// LIFT_PARK_CONFIRM_MS / LIFT_SETTLE_TIMEOUT_MS. So this only does work (a) over the brief active hold
+// between arrival and parking, and (b) when a parked arm has drifted LIFT_REENGAGE_DEG and the hold wakes
+// up to pull it back. If the symptom is "it settles a bit low and stays there", LIFT_HOLD_KI or
+// LIFT_HOLD_DEADBAND_DEG is the knob, not this one.
+inline constexpr float LIFT_HOLD_KP = 200.0f;                // TUNE: mV per deg of sag (was 180)
 inline constexpr float LIFT_HOLD_KI = 400.0f;                // TUNE: mV per deg per second (learns gravity)
 inline constexpr float LIFT_HOLD_KD = 90.0f;                 // TUNE: mV per deg/s -- the anti-bounce term
 inline constexpr float LIFT_HOLD_MAX_MV = 7000.0f;           // TUNE: most the hold may push

@@ -166,7 +166,14 @@ void liftTo(double degrees, bool precise) {
 void liftTo(Level level) { liftTo(heightOf(level)); }
 void liftToIntake() { liftTo(preset::INTAKE, true); }
 void liftToMatchload() { liftTo(preset::MATCHLOAD); }
-void liftToFrontToggle() { liftTo(preset::FRONT_TOGGLE); }
+void liftToFrontToggle() {
+    AUTON_LOCK;
+    robot::scoring.reset();
+    // COARSE on purpose: this height only has to be TOUCHED before the arm comes straight back down,
+    // so it brakes late, keeps a quick tail and is allowed to overshoot -- noticeably faster than an
+    // ordinary rise to a stack level. See Lift::setTargetFast() and "A COARSE move" in config.hpp.
+    robot::lift.setTargetFast(preset::FRONT_TOGGLE);
+}
 void liftDown() { liftTo(preset::DOWN); }
 
 void liftDownFast() {

@@ -73,6 +73,7 @@ void Lift::zero() {
     gravityMv_ = 0.0;
     descendHeld_ = descendOwned_ = descendRequest_ = false;
     fastRequest_ = descentFast_ = toggleWait_ = false;
+    coarse_ = coarseRequest_ = false;
     seatHot_ = false;
     seatStillSince_ = 0;
     restWakes_ = 0;
@@ -259,6 +260,9 @@ void Lift::setTarget(double degrees, bool precise) {
     // ...and whether it is the FAST descent (the front toggle's way down).
     const bool fromFast = fastRequest_;
     fastRequest_ = false;
+    // ...and whether it is a COARSE move (fast, overshoot allowed -- the front toggle rise).
+    const bool fromCoarse = coarseRequest_;
+    coarseRequest_ = false;
     // Any deliberate new command cancels a fast descent that was queued behind a toggle rise.
     toggleWait_ = false;
     const double clamped = std::clamp(degrees, config::lift_preset::DOWN, config::lift_preset::MAX);
@@ -328,6 +332,7 @@ void Lift::setTarget(double degrees, bool precise) {
     active_ = true;
     descendOwned_ = fromR2;
     descentFast_ = fromFast;
+    coarse_ = fromCoarse;
     // A deliberate new command clears a latched runaway fault or a stall: the guards' job is to stop
     // the motion that was happening, not to brick every button until someone wiggles the D-pad. A real
     // wiring fault or jam simply re-trips on the next DRIVE, so nothing is lost.
@@ -357,6 +362,11 @@ void Lift::setTarget(double degrees, bool precise) {
     // Already inside this goal's band: arrived, no motion at all (so a level re-tap never twitches).
     if (std::fabs(goal_ - position) <= arrivalTolerance()) enterHold(now, goal_);
     else enterDrive(now, position);
+}
+
+void Lift::setTargetFast(double degrees) {
+    coarseRequest_ = true;
+    setTarget(degrees);
 }
 
 void Lift::moveTo(double degrees, int timeoutMs, bool waitUntilSettled) {
@@ -490,7 +500,8 @@ void Lift::descendManual(bool held) {
 // Phase helpers
 // ---------------------------------------------------------------------------
 double Lift::arrivalTolerance() const {
-    return precise_ ? config::LIFT_PRECISE_TOLERANCE_DEG : config::LIFT_TOLERANCE_DEG;
+    if (precise_) return config::LIFT_PRECISE_TOLERANCE_DEG;
+    return coarse_ ? config::LIFT_COARSE_TOLERANCE_DEG : config::LIFT_TOLERANCE_DEG;
 }
 
 double Lift::holdDeadband() const {
@@ -519,12 +530,17 @@ double Lift::speedProfile(double dist, double dir) const {
     // exponentially, so the arm approaches the goal ever more slowly and the last couple of degrees
     // dominate the move's duration. The floor makes the tail a constant walk-in instead, and
     // LIFT_STOPPED_DEG_PER_S sits above the floor so arrival still latches (see config.hpp).
+    // A COARSE move brakes later and keeps a quick tail instead of the crawl: it is allowed to arrive
+    // still moving and sail past (see "A COARSE move" in config.hpp).
+    const double decel = coarse_ ? config::LIFT_COARSE_DECEL_DEG_PER_S2 : config::LIFT_DECEL_DEG_PER_S2;
+    const double tailMin =
+        coarse_ ? config::LIFT_COARSE_MIN_DEG_PER_S : config::LIFT_APPROACH_MIN_DEG_PER_S;
     const double cap = config::LIFT_FREE_SPEED_DEG_PER_S *
                        (dir >= 0.0 ? config::LIFT_UP_SPEED_PCT : config::LIFT_DOWN_SPEED_PCT) / 100.0;
     const double curve =
-        std::sqrt(2.0 * config::LIFT_DECEL_DEG_PER_S2 * std::max(dist - config::LIFT_APPROACH_ZONE_DEG, 0.0));
-    const double close = std::clamp(config::LIFT_APPROACH_KP_PER_S * dist,
-                                    config::LIFT_APPROACH_MIN_DEG_PER_S, config::LIFT_APPROACH_DEG_PER_S);
+        std::sqrt(2.0 * decel * std::max(dist - config::LIFT_APPROACH_ZONE_DEG, 0.0));
+    const double close = std::clamp(config::LIFT_APPROACH_KP_PER_S * dist, tailMin,
+                                    std::max(config::LIFT_APPROACH_DEG_PER_S, tailMin));
     return std::min(cap, std::max(curve, close));
 }
 

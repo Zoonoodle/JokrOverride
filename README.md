@@ -199,7 +199,7 @@ auton::scoreAndWait();
 | `auton::liftTo(deg, precise=false)` | an arbitrary height, clamped to `0..lift_preset::MAX` |
 | `auton::liftTo(Level::ONE..FIVE)` | a stack level (`config::lift_preset::STACK_LEVELS`) |
 | `auton::liftToIntake()` | the precise INTAKE handoff height (tight tolerance, slow final approach, never seats) |
-| `auton::liftToFrontToggle()` / `liftToFrontToggleAndWait(ms)` | the front-toggle height, `lift_preset::FRONT_TOGGLE` (30°, its own constant -- deliberately *not* stack level 1 at 31°, so the two can be tuned apart). An ordinary position move |
+| `auton::liftToFrontToggle()` / `liftToFrontToggleAndWait(ms)` | the front-toggle height, `lift_preset::FRONT_TOGGLE` (30°, its own constant -- deliberately *not* stack level 1 at 31°, so the two can be tuned apart). A **coarse** move: speed over precision, **overshoot allowed**, because the height only has to be *touched*. It brakes late (`LIFT_COARSE_DECEL_DEG_PER_S2` 2600 vs 1200), keeps a quick tail instead of the final crawl (`LIFT_COARSE_MIN_DEG_PER_S` 45 vs 6 °/s) and counts `LIFT_COARSE_TOLERANCE_DEG` (10° vs 5) as arrived -- so it gets there noticeably faster than a rise to a stack level |
 | `auton::liftDownFast()` / `liftDownFastAndWait(ms)` | the **fast** trip to the bottom -- the toggle's way back down. Same bands → `FINAL` → `SEAT` → `REST` as `liftDown()`, with only the two *fast* bands raised (`LIFT_FAST_DESCENT_TOP_PCT` 105 % vs 80, `_MID_PCT` 120 % vs 95) and a firmer ramp (2000 vs 1200 deg/s²). The approach cruise, `FINAL` and the seat are unchanged, so it still slows near 0 and settles. **Queued behind a toggle rise:** called while a `FRONT_TOGGLE` move is still climbing, it waits (inside the lift task, never blocking the route) until the arm *touches* the toggle height and turns straight around -- brain `TOGGLE ^`, then `DESC FAST` |
 | `auton::liftToMatchload()` | the MATCHLOAD height |
 | `auton::liftDown()` | the banded descent that ends **SEATED** on the hard stop (same as L2's run home, B, R2) |
@@ -622,6 +622,15 @@ assumes the one above is settled. **Start from the values in `config.hpp` -- the
      `LIFT_DESCENT_RAMP_DEG_PER_S2` further so it finishes braking with more margin before the zone ends
    - the whole descent is too slow → raise `LIFT_DESCENT_MID_PCT`, lower `LIFT_DESCENT_SLOW_ZONE_DEG`,
      or raise `LIFT_DESCENT_SLOW_PCT` (the approach cruise itself, 30%)
+7a. **The coarse rise (`auton::liftToFrontToggle()`).** An ordinary rise is already at full voltage
+   off the line; what makes it feel measured is the braking, which starts `150²/(2a) + zone` degrees
+   out -- 14.4° of a 30° move at `a = 1200`, i.e. half of it. A coarse move brakes later, skips the
+   crawl and latches a wide band, and is allowed to sail past.
+   - overshoots too far → lower `LIFT_COARSE_DECEL_DEG_PER_S2` (2600 → 1800), then
+     `LIFT_COARSE_MIN_DEG_PER_S`
+   - still no faster than a normal rise → raise `LIFT_COARSE_DECEL_DEG_PER_S2`
+   - note 2600 deliberately asks for more deceleration than the arm can deliver. On a normal move that
+     is a bug (it is what `3723ef2` did wrong); here it is the point
 7b. **The fast descent (`auton::liftDownFast()`, the front toggle's way down).** Only the two fast
    bands and the ramp differ: `LIFT_FAST_DESCENT_TOP_PCT` (105 %, ~157 °/s, vs 80 %/120) and
    `LIFT_FAST_DESCENT_MID_PCT` (120 %, ~180 °/s, vs 95 %/142), with

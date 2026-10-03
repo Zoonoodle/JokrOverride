@@ -176,6 +176,29 @@ inline constexpr double LIFT_DOWN_SPEED_PCT = 60.0;          // TUNE: cruise spe
 //                the original overshoot (3723ef2). 1200 is 40% less demanding than that.
 inline constexpr double LIFT_DECEL_DEG_PER_S2 = 1200.0;      // TUNE: how hard it brakes, arm deg/s^2
 
+// --- A COARSE move: speed over precision, overshoot allowed ------------------
+// For a height where only "get there quickly" matters and landing a few degrees past it costs
+// nothing -- today that is the FRONT TOGGLE rise, which exists only to touch a height and come
+// straight back down. The driver: "lift to front toggle quite fast too, like a little faster than how
+// we rise to level 1, this movement doesnt have to be precise and requires speed over precision, can
+// over shoot."
+// A normal rise is already at full voltage off the line; what makes it feel measured is the BRAKING,
+// which starts 150^2/(2a) + zone degrees out -- 14.4 deg of a 30 deg move at a = 1200, i.e. half the
+// move. A coarse move brakes LATER, keeps a quick tail instead of the crawl, and counts a much wider
+// band as arrived:
+//   DECEL  2600 asks for more deceleration than this arm can actually deliver. On an ordinary move
+//          that would be a bug (it is why 3723ef2's 2000 overshot and rang); here it is the POINT --
+//          the arm arrives still moving and sails a little past, which is explicitly fine.
+//   MIN    the approach tail does not taper to a crawl, it stays at this speed until the band.
+//   TOL    a goal this wide counts as arrived, so it latches into the hold immediately instead of
+//          walking the last few degrees in.
+//   Overshoots too far / bangs into something above the goal: lower LIFT_COARSE_DECEL_DEG_PER_S2
+//     (2600 -> 1800) first, then LIFT_COARSE_MIN_DEG_PER_S.
+//   Still feels no faster than a normal rise: raise LIFT_COARSE_DECEL_DEG_PER_S2.
+inline constexpr double LIFT_COARSE_DECEL_DEG_PER_S2 = 2600.0;  // TUNE: brake this late (normal 1200)
+inline constexpr double LIFT_COARSE_MIN_DEG_PER_S = 45.0;       // TUNE: no crawl (normal 6)
+inline constexpr double LIFT_COARSE_TOLERANCE_DEG = 10.0;       // TUNE: arrived band (normal 5)
+
 // --- The last few degrees (the final approach) ------------------------------
 // Inside LIFT_APPROACH_ZONE_DEG the speed reference becomes LIFT_APPROACH_KP_PER_S * (degrees left),
 // clamped between LIFT_APPROACH_MIN_DEG_PER_S and LIFT_APPROACH_DEG_PER_S. So the arm walks the last

@@ -330,6 +330,16 @@ class Lift {
     void setTarget(double degrees, bool precise = false);
 
     /**
+     * A COARSE move to a height: speed over precision, overshoot allowed (see "A COARSE move" in
+     * config.hpp). Brakes much later (LIFT_COARSE_DECEL_DEG_PER_S2), keeps a quick tail instead of the
+     * final crawl, and treats LIFT_COARSE_TOLERANCE_DEG as arrived -- so it gets there noticeably
+     * faster than an ordinary rise and may sail a few degrees past. For a height that only has to be
+     * TOUCHED, which today means the front toggle. Never blocks; identical to setTarget() in every
+     * other way, including the guards, the hold and PARK.
+     */
+    void setTargetFast(double degrees);
+
+    /**
      * Auton-friendly wrapper: command a height, optionally blocking the CALLING task (not the lift
      * task, which keeps running regardless) until isSettled() or timeoutMs elapses.
      *   lift.moveTo(config::lift_preset::MATCHLOAD, 1500, true);
@@ -585,6 +595,8 @@ class Lift {
     bool active_ = false;   // false = no commanded height; update() just brakes (see class comment)
     double goal_ = 0.0;     // final target, arm deg
     bool precise_ = false;  // tight tolerance (INTAKE)
+    bool coarse_ = false;   // speed over precision, overshoot allowed (the front toggle rise)
+    bool coarseRequest_ = false;  // one-shot: the next setTarget() is a coarse move
     bool descent_ = false;  // a trip to the bottom: the banded DESCEND -> SEAT, not a position move
     Phase phase_ = Phase::HOLD;
     std::uint32_t phaseStart_ = 0;

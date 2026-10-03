@@ -31,6 +31,23 @@
  * object -- and a frozen in-range sensor will eventually clamp. That is why "unplugged / cannot
  * measure" (which does have a signature: PROS_ERR, or 0) is handled explicitly instead.
  *
+ * WHY WAIT_CLEAR NEEDS A WAY OUT (added 2026-10-03, after this took the autoclamp out completely).
+ * The clear rule below is right, but on its own it is an UNBOUNDED wait, and "wait forever" is a
+ * terrible failure mode for a feature with no indication beyond one word on a screen. The trap is that
+ * rearmMm is derived as rangeMm + a gap, so raising the trigger range raises the distance the world has
+ * to be at before the autoclamp will arm again -- and that has a hard physical ceiling: whatever the
+ * claw habitually has in front of it. At a 15 mm range the clear threshold was 30 mm and essentially
+ * always satisfiable; at 60-75 mm it became 90-105 mm, and anything permanently inside 10 cm of the
+ * sensor -- the claw's own structure, a cup, a wall, the pin it just put down and has not driven away
+ * from -- pinned the detector in WAIT_CLEAR for the rest of the match. The jaws then never clamped
+ * again and the only clue was `AC:CLEAR?` on the brain.
+ * So rearmMaxMs is a bounded escape hatch: after that long waiting, arm anyway. It is deliberately much
+ * longer than rearmClearMs (seconds, not milliseconds) so it is never the normal path -- a genuinely
+ * clear reading still arms in rearmClearMs -- and the risk it reintroduces is bounded and different in
+ * kind from the bug the clear rule exists to prevent: that one re-grabbed the pin within ~150 ms, every
+ * time, so no score could ever finish. Re-grabbing something still sitting in the jaws SECONDS later,
+ * after the robot has had every chance to drive away, costs one button press.
+ *
  * WHY RE-ARMING NEEDS A CLEAR READING, NOT A TIMER. The instant the jaws open -- A, the L2 score's
  * release, an auton release -- the pin they just let go of is still sitting right there, a few mm
  * away. An autoclamp that re-arms on a plain timer re-grabs it, every time, and the driver can never
@@ -75,6 +92,8 @@ class AutoclampDetector {
         int staleGraceMs;   // an unchanged reading counts as a new sample again after this long
         int rearmMm;        // further than this = clear (hysteresis above rangeMm)
         int rearmClearMs;   // ...for this long, before a disarmed detector arms again
+        int rearmMaxMs;     // ...OR this long in WAIT_CLEAR with no clear reading at all: arm anyway.
+                            // The escape hatch -- see "WHY WAIT_CLEAR NEEDS A WAY OUT" in the header.
         int maxValidMm;     // at or above this = the sensor's "nothing in range" value: CLEAR
         int minValidMm;     // below this (e.g. a 0) = cannot measure: NOT DETECTED, and NOT clear
         int minConfidence;  // 0 = ignore the sensor's confidence; otherwise require at least this
@@ -93,6 +112,8 @@ class AutoclampDetector {
         state_ = needsClear ? State::WAIT_CLEAR : State::ARMED;
         since_ = 0;
         haveSince_ = false;
+        haveWaitSince_ = false;  // the escape-hatch clock latches on the first WAIT_CLEAR tick
+        waitSince_ = 0;
         freshInRange_ = 0;
         lastRawMm_ = kNoReading;
         lastCountedAt_ = 0;
@@ -133,6 +154,23 @@ class AutoclampDetector {
         }
 
         if (state_ == State::WAIT_CLEAR) {
+            // THE ESCAPE HATCH. Start the clock on the first tick we are actually waiting (not in
+            // reset(), which has no clock) and give up waiting after rearmMaxMs. Without this, a sensor
+            // whose view is permanently occupied inside rearmMm -- the claw's own structure, a cup, the
+            // field a few centimetres away -- leaves the autoclamp disarmed FOREVER, silently. See the
+            // class comment; this is the bug that took the feature out entirely once rangeMm (and so the
+            // derived rearmMm) grew.
+            if (!haveWaitSince_) {
+                haveWaitSince_ = true;
+                waitSince_ = nowMs;
+            }
+            if (cfg.rearmMaxMs > 0 && nowMs - waitSince_ >= static_cast<std::uint32_t>(cfg.rearmMaxMs)) {
+                state_ = State::ARMED;
+                haveSince_ = false;
+                freshInRange_ = 0;
+                haveCounted_ = false;
+                return false;  // armed as of now; this tick does not also get to fire
+            }
             if (!clear) {
                 haveSince_ = false;
                 return false;
@@ -145,6 +183,7 @@ class AutoclampDetector {
                 state_ = State::ARMED;
                 haveSince_ = false;
                 freshInRange_ = 0;
+                haveCounted_ = false;
             }
             return false;
         }
@@ -200,6 +239,8 @@ class AutoclampDetector {
     State state_ = State::WAIT_CLEAR;
     std::uint32_t since_ = 0;
     bool haveSince_ = false;
+    std::uint32_t waitSince_ = 0;   // when this WAIT_CLEAR started (the escape hatch's clock)
+    bool haveWaitSince_ = false;
     int freshInRange_ = 0;
     std::uint32_t lastCountedAt_ = 0;
     bool haveCounted_ = false;

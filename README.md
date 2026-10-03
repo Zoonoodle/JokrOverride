@@ -475,6 +475,7 @@ the claw and watch it move.
 | `AUTOCLAMP_MIN_SAMPLES` (2) | ...over at least this many fresh readings |
 | `AUTOCLAMP_STALE_GRACE_MS` (60) | an unchanged reading counts as a new sample again after this long (~2 sensor refreshes) |
 | `AUTOCLAMP_REARM_GAP_MM` (**30**) / `AUTOCLAMP_REARM_CLEAR_MS` (150) | clear = **(the range in force) + this gap**, and for how long, before it re-arms. A gap rather than an absolute distance on purpose -- see the warning below |
+| `AUTOCLAMP_REARM_MAX_MS` (**2000**) | the **escape hatch**: give up waiting for a clear reading after this long and arm anyway. Without it the clear rule is an unbounded wait, which is what killed the autoclamp outright on 2026-10-03 -- see "If the autoclamp goes dead" |
 | `AUTOCLAMP_MAX_VALID_MM` (9999) / `AUTOCLAMP_MIN_VALID_MM` (1) | the sensor's "nothing there" (counts as clear) and "cannot measure" (counts as neither) |
 | `AUTOCLAMP_MIN_CONFIDENCE` (0 = ignore) | the sensor's own 0..63 confidence |
 | `AUTOCLAMP_ON_IN_DRIVER` (true) | the driver default |
@@ -515,6 +516,22 @@ only pins. With a pin held in the open jaws, watch the `DIST` line's `CLAW` valu
   means it is waiting for a clear reading -- take everything away from the jaws. `ARMED` with a pin
   present means the range is too tight. `SEEING` that never becomes a clamp means the reading is not
   staying inside the range long enough.
+
+### If the autoclamp goes dead
+**Read the `CLAW` line's `AC:` field first -- it names the cause.**
+
+| `AC:` reads | What it means | Fix |
+|---|---|---|
+| `CLEAR?` and stays there | **the failure that took the feature out on 2026-10-03.** It is waiting for a clear reading it is never going to get, because something is permanently inside (range + `AUTOCLAMP_REARM_GAP_MM`) -- 90 mm in driver, 105 in auton. The claw's own structure, a cup, a wall, or the pin it just put down and has not driven away from | `AUTOCLAMP_REARM_MAX_MS` (2 s) now arms it anyway, so it recovers by itself. If it still sticks, check `DIST CLAW` for what is sitting in view and lower the range for that mode |
+| `OFF` in auton when you did not ask | the enable never reached the `Claw` (the bug fixed in `a72e522`) | check `AUTOCLAMP_ON_IN_AUTON`, and that nothing calls `auton::autoclamp(false)` |
+| `ARMED` with a pin right in the jaws | the sensor is not seeing it: wrong port, unplugged, or the range is too tight | wave a hand at the claw and watch `DIST CLAW` move -- if it reads `--` always, the sensor is not on `CLAW_DISTANCE_PORT` (21) |
+| `HELD` | the jaws are already clamped; the autoclamp never watches a closed claw, by design | open them (A) |
+
+**Why this failure was possible at all, and the lesson:** the clear threshold is *derived* from the
+trigger range, so raising the range for sensitivity silently raised how far away the world has to be
+before the autoclamp will arm again -- and that has a hard physical ceiling the range does not. Going
+15 mm → 60/75 mm took the clear threshold from an always-satisfiable 30 mm to 90/105 mm. A threshold rule
+that can wait forever needs a bound; now it has one.
 
 **On-robot test, driver:** power on, enable driver control. First wave a hand in front of the claw's
 sensor and check the `DIST` line's **`CLAW`** value moves -- that is the whole check that the sensor really

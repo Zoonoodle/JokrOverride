@@ -56,8 +56,8 @@ AutoclampDetector::Config Claw::detectorConfig() const {
         rangeMm,                          confirmMs,
         minSamples,                       config::AUTOCLAMP_STALE_GRACE_MS,
         rearmMm,                          config::AUTOCLAMP_REARM_CLEAR_MS,
-        config::AUTOCLAMP_MAX_VALID_MM,   config::AUTOCLAMP_MIN_VALID_MM,
-        config::AUTOCLAMP_MIN_CONFIDENCE,
+        config::AUTOCLAMP_REARM_MAX_MS,   config::AUTOCLAMP_MAX_VALID_MM,
+        config::AUTOCLAMP_MIN_VALID_MM,   config::AUTOCLAMP_MIN_CONFIDENCE,
     };
 }
 

@@ -32,6 +32,7 @@ constexpr AutoclampDetector::Config kCfg{
     /*staleGraceMs*/ 60,
     /*rearmMm*/ 90,
     /*rearmClearMs*/ 150,
+    /*rearmMaxMs*/ 2000,
     /*maxValidMm*/ 9999,
     /*minValidMm*/ 1,
     /*minConfidence*/ 0,
@@ -51,6 +52,7 @@ constexpr AutoclampDetector::Config kAutonCfg{
     /*staleGraceMs*/ 60,
     /*rearmMm*/ 105,
     /*rearmClearMs*/ 150,
+    /*rearmMaxMs*/ 2000,
     /*maxValidMm*/ 9999,
     /*minValidMm*/ 1,
     /*minConfidence*/ 0,
@@ -63,6 +65,7 @@ constexpr AutoclampDetector::Config kIntakeCfg{
     /*staleGraceMs*/ 60,
     /*rearmMm*/ 105,
     /*rearmClearMs*/ 150,
+    /*rearmMaxMs*/ 2000,
     /*maxValidMm*/ 9999,
     /*minValidMm*/ 1,
     /*minConfidence*/ 0,
@@ -296,6 +299,59 @@ int main() {
         f.reset(true);
         runStream(f, {100, 100, 100, 100, 100, 100, 100}, 3, 1000, kAutonCfg);
         check(f.state() == AutoclampDetector::State::WAIT_CLEAR, "...but not in auton (needs 105)");
+    }
+
+    // --- THE ESCAPE HATCH out of WAIT_CLEAR -- the bug that took the autoclamp out entirely ---------
+    // Because rearmMm is derived as rangeMm + a gap, raising the trigger range raised how far away the
+    // world has to be before the detector will arm again (90 mm in driver control). Anything permanently
+    // inside that -- the claw's own structure, a cup, the pin it just put down -- used to pin it in
+    // WAIT_CLEAR for the rest of the match, with `AC:CLEAR?` on the brain as the only clue. rearmMaxMs
+    // bounds the wait.
+    {
+        AutoclampDetector d;
+        d.reset(true);  // just released; the view is permanently occupied at 40 mm (inside the range)
+        std::uint32_t now = 1000;
+        bool firedEarly = false;
+        // Well before the hatch it must still be waiting -- the hatch is a backstop, not the normal path.
+        for (int i = 0; i < 100; ++i) {  // 1.0 s
+            firedEarly = firedEarly || d.step(now, 40 + (i % 2), 64, kCfg, false);
+            now += 10;
+        }
+        check(!firedEarly && d.state() == AutoclampDetector::State::WAIT_CLEAR,
+              "an occupied view still waits well before rearmMaxMs");
+        bool firedLate = false;
+        for (int i = 0; i < 150; ++i) {  // past 2.0 s in total
+            firedLate = firedLate || d.step(now, 40 + (i % 2), 64, kCfg, false);
+            now += 10;
+        }
+        // Once the hatch arms it, the object that was occupying the view IS a pin as far as the rule is
+        // concerned, so it gets gripped -- which is precisely the bounded trade the hatch makes, and the
+        // reason it is seconds rather than milliseconds. Asserting on `fired` says that out loud;
+        // asserting on state() would not, because firing resets straight back to WAIT_CLEAR.
+        check(firedLate, "...but arms anyway once rearmMaxMs has passed (and then grips what is there)");
+    }
+    {
+        // A GENUINELY clear reading must still arm in rearmClearMs (150 ms), nowhere near the hatch --
+        // otherwise the hatch has quietly become the normal path and the clear rule stops meaning
+        // anything.
+        AutoclampDetector d;
+        d.reset(true);
+        runStream(d, {200, 200, 200, 200, 200, 200, 200}, 3);  // 210 ms of clear
+        check(d.state() == AutoclampDetector::State::ARMED,
+              "a real clear reading still arms in rearmClearMs, not at the hatch");
+    }
+    {
+        // And the hatch must not resurrect a DEAD sensor into clamping on junk: it arms, but invalid
+        // readings still never fire, so an unplugged sensor stays harmless.
+        AutoclampDetector d;
+        d.reset(true);
+        std::uint32_t now = 1000;
+        bool fired = false;
+        for (int i = 0; i < 400; ++i) {  // 4 s of PROS_ERR, well past the hatch
+            fired = fired || d.step(now, -1, 64, kCfg, false);
+            now += 10;
+        }
+        check(!fired, "the hatch cannot make a dead sensor clamp");
     }
 
     // --- the R1 HANDOFF mode: the FIRST valid in-range reading fires, with no debounce at all -------

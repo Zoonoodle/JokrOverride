@@ -944,6 +944,25 @@ inline constexpr int AUTOCLAMP_STALE_GRACE_MS = 60;          // TUNE
 //     0, and the smaller it is the twitchier the arm/clamp boundary gets.
 inline constexpr int AUTOCLAMP_REARM_GAP_MM = 30;            // TUNE: clear = (range in force) + this
 inline constexpr int AUTOCLAMP_REARM_CLEAR_MS = 150;         // TUNE
+// THE ESCAPE HATCH, and it is not optional -- without it this whole rule is an UNBOUNDED wait.
+// WHAT WENT WRONG (2026-10-03): because the clear threshold is derived as range + gap, raising the
+// trigger range also raises how far away the world has to be before the autoclamp will arm again. At the
+// original 15 mm range that was 30 mm and essentially always satisfiable. At 60-75 mm it is 90-105 mm --
+// and anything permanently inside 10 cm of the sensor (the claw's own structure, a cup, a wall, or the
+// pin it just put down and has not driven away from) pins the detector in WAIT_CLEAR for the rest of the
+// match. The jaws then never clamp again in EITHER mode, and the only clue is `AC:CLEAR?` on the brain.
+// That is exactly what happened, and it is why a threshold rule that can wait forever needs a bound.
+// So: after this long waiting with no clear reading, arm anyway. It is seconds, not milliseconds, so it
+// is never the normal path -- a genuinely clear reading still arms in AUTOCLAMP_REARM_CLEAR_MS (150 ms).
+// The risk it reintroduces is bounded and NOT the bug the clear rule exists to prevent: that one
+// re-grabbed the released pin within ~150 ms every single time, so no score could finish. Re-grabbing
+// something still in the jaws two seconds later, after the robot has had every chance to drive away,
+// costs one press of A.
+//   It re-grabs what it just put down, but only after a pause: raise this.
+//   The autoclamp still goes dead after a release (brain sticks on `AC:CLEAR?` for seconds): LOWER it --
+//     and check the DIST line's CLAW value, because something is permanently inside (range + gap).
+//   0 disables the hatch entirely and restores the old wait-forever behaviour. Don't.
+inline constexpr int AUTOCLAMP_REARM_MAX_MS = 2000;          // TUNE: give up waiting for clear after this
 // VALIDITY of a raw reading. At or above MAX is the sensor's own "nothing in range" (9999) and counts
 // as CLEAR. Below MIN (a 0: the sensor cannot measure, e.g. an object inside its floor) and any
 // negative value (PROS_ERR / unplugged) count as NOT DETECTED and are not clear either -- so a dead or

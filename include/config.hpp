@@ -166,6 +166,29 @@ inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
 inline constexpr double MAX = 111.9;
 }  // namespace lift_preset
 
+// ---------------------------------------------------------------------------
+// L1's LADDER: a fixed 20 deg step, not the absolute stack levels
+// ---------------------------------------------------------------------------
+// THE DRIVER'S REQUEST, 2026-10-03: "have our l1 actauly just go up by 20 each time until it our current
+// highest level it goes down by one each time when it gets upo there, by 20 deg".
+// So L1 is no longer "jump to STACK_LEVELS[n]". Each press moves the arm a fixed L1_STEP_DEG, and the
+// direction REVERSES at the ends: up 20 at a time until the top, then down 20 at a time, then up again.
+//   press:  1    2    3    4    5    6        7     8     9   ...
+//   height: 20   40   60   80   100  106.9    86.9  66.9  46.9
+// WHAT THIS DOES NOT CHANGE: lift_preset::STACK_LEVELS is untouched and still means the measured scoring
+// heights -- auton::liftTo(Level::THREE), the brain's preset names and everything else still use them.
+// Only L1's own ladder is relative now.
+// THE CEILING is the top measured stack level, derived rather than typed so it cannot drift away from it.
+// The last step up is CLAMPED to it, so the top of the ladder is a real scoring height rather than
+// wherever a multiple of 20 happens to land (100 would be 7 deg short of it).
+//   The steps are too coarse / too fine: change L1_STEP_DEG. It needs no other number changed -- the
+//     ladder is generated from it.
+//   It should stop at the top instead of coming back down: that is a code change in
+//     Scoring::advanceStep(), not a constant.
+inline constexpr double L1_STEP_DEG = 20.0;                  // TUNE: arm degrees per L1 press
+inline constexpr double L1_STEP_CEILING_DEG =
+    lift_preset::STACK_LEVELS[lift_preset::STACK_LEVEL_COUNT - 1];  // the top measured level (106.9)
+
 // ===========================================================================
 // LIFT TUNING — start here
 // ===========================================================================

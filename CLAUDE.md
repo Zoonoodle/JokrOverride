@@ -8,7 +8,7 @@ every session, so changes get built, uploaded and tested for real.
 
 | File | Owns |
 |---|---|
-| `include/config.hpp` | **Every** port, ratio, preset and PID gain. Nothing robot-specific goes anywhere else. |
+| `include/config.hpp` | **Every** port, ratio, preset and PID gain — with ONE documented exception: the chassis PID (`lateral`/`angular` `ControllerSettings`) and the drive curves are typed directly in `src/robot.cpp` at the user's request (2026-10-02) and must not be moved here. Nothing else robot-specific goes anywhere else. |
 | `include/robot.hpp`, `src/robot.cpp` | The LemLib chassis + the single instance of each subsystem. |
 | `include/subsystems/lift.*`, `src/subsystems/lift.cpp` | DR6-4B position PID, gravity feedforward, stall + runaway guards, manual override. **Only** place that writes the lift motors. |
 | `include/subsystems/claw.*` | Pneumatic claw + the distance-sensor autoclamp. **Only** place that writes the claw cylinder. |
@@ -28,8 +28,11 @@ every session, so changes get built, uploaded and tested for real.
 Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
 
 - **Drivetrain**: 6 wheels, 2.75" omnis, 450 RPM, gear-driven. Left `-8,-2,-1`, right `3,9,10`
-  (confirmed 2026-10-02). Chassis PID gains and every other `ControllerSettings` argument live in
-  `config.hpp` (`LATERAL_*` / `ANGULAR_*`), not in `robot.cpp`.
+  (confirmed 2026-10-02). **The chassis PID (`lateral` / `angular` `lemlib::ControllerSettings`) and
+  the `ExpoDriveCurve` driver curves are typed as literal numbers directly in `src/robot.cpp`**, where
+  the driver tunes them — the user's own decision, 2026-10-02 ("i want to be able to tune and enter
+  them in here"). **Do not move them into `config.hpp`.** They are the one documented exception;
+  everything else robot-specific still lives in `config.hpp`.
 - **Odometry**: ONE vertical tracking-wheel pod on rotation port `17`, **plus an IMU on port `18`**
   (fitted and confirmed 2026-10-02). Heading comes from the IMU, distance from the pod. Calibration
   runs in a background task from `initialize()`; `opcontrol()` never waits on it, `autonomous()` waits
@@ -131,7 +134,7 @@ block at the top of the lift section, `// ===== LIFT TUNING — start here =====
 braking decel, the final-approach knobs, the velocity loop's KP/KI, the hold's KP/KI/KD, the descent
 bands, the seating voltage, and R1/R2's clamped-mode speeds. Each line says which way to move it for
 which symptom; the order to turn them in is README "Tuning the lift". Also in `config.hpp`: ports,
-`lift_preset::*` heights, chassis PID gains, claw/pivot timings and polarity, homing constants, stall
+`lift_preset::*` heights, claw/pivot timings and polarity, homing constants, stall
 and runaway thresholds, and the `LIFT_TRACE` switch. `TODO(team): confirm` = never checked on the
 robot. `TUNE` = a starting value, not a tuned one. Procedures are in `README.md` ("Lift direction
 check", "Lift speed and motion", "Tuning the lift", "Capturing a trace", "Tuning the claw positions").
@@ -205,8 +208,9 @@ back: `d2978c7` (jumped setpoint, high kP), `6b8165c` (trapezoid + leash + fixed
 still-moving springy six-bar to the firmware's stiff brake-hold made it ring), and anything that
 parks the arm a few degrees above the bottom instead of seating it.
 
-Also in `config.hpp`: the chassis PID (`LATERAL_*` / `ANGULAR_*` — every `ControllerSettings`
-argument, not just the gains), the `AUTOCLAMP_*` block, the `AUTON_*` timeouts and `MOVEB_*`. **Which
+Also in `config.hpp`: the `AUTOCLAMP_*` block, the `AUTON_*` timeouts and `MOVEB_*`. **The chassis
+PID and the drive curves are the exception — they are literals in `src/robot.cpp`, see Hardware.**
+**Which
 auton route runs is NOT in `config.hpp`** — it is `constexpr Route SELECTED` at the top of
 `src/autons.cpp`, because it is a strategy choice, not a robot constant.
 

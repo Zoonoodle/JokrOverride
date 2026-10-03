@@ -26,27 +26,32 @@ std::unique_ptr<pros::Imu> imu = config::IMU_PORT != 0 ? std::make_unique<pros::
 static lemlib::OdomSensors sensors(&verticalWheel, nullptr, nullptr, nullptr, imu.get());
 
 // ---- Chassis PID ----
-// The numbers live in config.hpp (LATERAL_* / ANGULAR_*), not here: these are the values tuned on the
-// robot 2026-10-02, and every argument is named there -- the error ranges and timeouts were tuned too,
-// not just the gains. Changing how the drive behaves means editing config.hpp and nothing else.
-static lemlib::ControllerSettings lateral(config::LATERAL_KP, config::LATERAL_KI, config::LATERAL_KD,
-                                          config::LATERAL_WINDUP,
-                                          config::LATERAL_SMALL_ERROR_IN,
-                                          config::LATERAL_SMALL_TIMEOUT_MS,
-                                          config::LATERAL_LARGE_ERROR_IN,
-                                          config::LATERAL_LARGE_TIMEOUT_MS,
-                                          config::LATERAL_SLEW);
-static lemlib::ControllerSettings angular(config::ANGULAR_KP, config::ANGULAR_KI, config::ANGULAR_KD,
-                                          config::ANGULAR_WINDUP,
-                                          config::ANGULAR_SMALL_ERROR_DEG,
-                                          config::ANGULAR_SMALL_TIMEOUT_MS,
-                                          config::ANGULAR_LARGE_ERROR_DEG,
-                                          config::ANGULAR_LARGE_TIMEOUT_MS,
-                                          config::ANGULAR_SLEW);
+// Drive PID: tune these numbers right here.
+static lemlib::ControllerSettings lateral(6,    // proportional gain (kP)
+                                          0,    // integral gain (kI)
+                                          16,   // derivative gain (kD)
+                                          0,    // anti windup
+                                          1,    // small error range, in inches
+                                          150,  // small error range timeout, ms
+                                          3,    // large error range, in inches
+                                          500,  // large error range timeout, ms
+                                          0     // maximum acceleration (slew)
+);
+
+static lemlib::ControllerSettings angular(2.55, // proportional gain (kP)
+                                          0,    // integral gain (kI)
+                                          15,   // derivative gain (kD)
+                                          0,    // anti windup
+                                          1,    // small error range, in degrees
+                                          150,  // small error range timeout, ms
+                                          7,    // large error range, in degrees
+                                          600,  // large error range timeout, ms
+                                          0     // maximum acceleration (slew)
+);
 
 // Driver curves: small stick movements stay gentle, full stick is full speed.
 static lemlib::ExpoDriveCurve throttleCurve(3, 10, 1.009);
-static lemlib::ExpoDriveCurve steerCurve(5, 15, 1.021);
+static lemlib::ExpoDriveCurve steerCurve(5, 15, 1.023);
 
 lemlib::Chassis chassis(drivetrain, lateral, angular, sensors, &throttleCurve, &steerCurve);
 

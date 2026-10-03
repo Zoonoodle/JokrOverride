@@ -50,27 +50,12 @@ inline constexpr float ODOM_VERTICAL_OFFSET_IN = 0.0f;       // TODO(team): meas
 // brain shows "IMU  none" instead of junk. Nothing else changes either way.
 inline constexpr int8_t IMU_PORT = 18;                        // confirmed 2026-10-02: IMU fitted
 
-// ---- Chassis PID (lemlib::ControllerSettings) ----
-// THESE ARE THE VALUES THE DRIVER TUNED ON THE ROBOT (2026-10-02), moved here out of robot.cpp so
-// there is one place to change them -- every argument of both ControllerSettings is named below, not
-// just the gains, because the error ranges and timeouts were tuned too. Order in the constructor is:
-// kP, kI, kD, anti-windup, small error range, small error timeout, large error range, large error
-// timeout, slew. Procedure: LemLib's own PID tuning guide.
-//   LATERAL = driving in a straight line (inches). ANGULAR = turning (degrees).
-inline constexpr float LATERAL_KP = 6.0f, LATERAL_KI = 0.0f, LATERAL_KD = 16.0f;   // TUNE
-inline constexpr float LATERAL_WINDUP = 0.0f;                // anti-windup range
-inline constexpr float LATERAL_SMALL_ERROR_IN = 1.0f;        // "close enough" band, inches
-inline constexpr int LATERAL_SMALL_TIMEOUT_MS = 150;         // ...held this long = settled
-inline constexpr float LATERAL_LARGE_ERROR_IN = 3.0f;        // give-up band, inches
-inline constexpr int LATERAL_LARGE_TIMEOUT_MS = 500;
-inline constexpr float LATERAL_SLEW = 0.0f;                  // 0 = no acceleration limit
-inline constexpr float ANGULAR_KP = 2.55f, ANGULAR_KI = 0.0f, ANGULAR_KD = 15.0f;  // TUNE
-inline constexpr float ANGULAR_WINDUP = 0.0f;
-inline constexpr float ANGULAR_SMALL_ERROR_DEG = 1.0f;
-inline constexpr int ANGULAR_SMALL_TIMEOUT_MS = 150;
-inline constexpr float ANGULAR_LARGE_ERROR_DEG = 7.0f;
-inline constexpr int ANGULAR_LARGE_TIMEOUT_MS = 600;
-inline constexpr float ANGULAR_SLEW = 0.0f;
+// ---- Chassis PID: NOT HERE, ON PURPOSE ----
+// The lateral/angular lemlib::ControllerSettings -- and the ExpoDriveCurve driver curves -- are typed
+// as literal numbers directly in src/robot.cpp, where the driver tunes them. That is the user's own
+// decision (2026-10-02): "remove these drive pid values from config, i want to be able to tune and
+// enter them in here". Do NOT move them back into this file. Everything else about the robot still
+// belongs here; the chassis PID and the drive curves are the one documented exception.
 
 // ---------------------------------------------------------------------------
 // Lift (DR6-4B)

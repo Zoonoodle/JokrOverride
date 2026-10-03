@@ -622,18 +622,20 @@ inline constexpr double LIFT_MANUAL_DOWN_PCT = 50.0;         // TUNE: D-pad Down
 // target. It is LATCHED (like holding a button), so a route must stop it -- and auton::end() stops it
 // too, so a route that forgets, or is cut off by the field switch, cannot leave the arm leaning on the
 // floor.
-// HALVED 40 -> 20 (2026-10-03, the driver: "liftPushFor needs to move down slower, like half the speed
-// its currently at"). 20% is 2400 mV. Note this is the DOWN push only -- AUTON_LIFT_PUSH_UP_PCT is still
-// 40, deliberately, because they are different jobs: this one mostly has to HOLD the arm down on a pin
-// while the jaws let go, and it is working WITH gravity; the up nudge is working against it.
-// WATCH FOR THE FLOOR UNDER THIS NUMBER. It is open-loop, and this lift's rubber bands pull UP hardest
-// at the folded position, so below some percentage the bands simply win and the arm does not move at all
-// -- it just sits there drawing current. 20% has not been checked against that on the robot. If the arm
-// stops descending entirely (rather than descending slowly), that is this floor, not a jam: raise it
-// back toward 30.
+// SETTLED AT 45 (2026-10-03), after trying 20 on the robot and reverting: the driver asked for "half the
+// speed", then "nvm, turn speed back to 45 actually" -- i.e. 20% was too weak and 45 is slightly FIRMER
+// than the 40 it started at. That is the floor below being real: this is open-loop, and this lift's
+// rubber bands pull UP hardest at exactly the folded position where this push is used, so under some
+// percentage the bands win and the arm does not descend at all -- it just sits drawing current. 20 was
+// evidently at or under that; the usable range is apparently nearer 40-45 than 20-30. Do not "restore"
+// a slower value without re-checking it on the robot.
+// This is the DOWN push only. AUTON_LIFT_PUSH_UP_PCT is separate (40) because they are different jobs:
+// this one mostly has to HOLD the arm down on a pin while the jaws let go, working WITH gravity; the up
+// nudge works against it. The 20 experiment did not touch the up nudge, which is why they are separate.
 //   It does not press hard enough to seat the pin, or does not move at all: raise it.
-//   It lifts the back of the robot / slams the pin down / stalls the motors warm: LOWER it.
-inline constexpr double AUTON_LIFT_PUSH_PCT = 20.0;          // TUNE: % of LIFT_MAX_MV, downward (was 40)
+//   It lifts the back of the robot / slams the pin down / stalls the motors warm: LOWER it -- but see
+//     the band floor above before going far below 40.
+inline constexpr double AUTON_LIFT_PUSH_PCT = 45.0;          // TUNE: % of LIFT_MAX_MV, downward (40 -> 20 -> 45)
 // ...and the same thing UPWARD (auton::liftPushUp() / liftPushUpFor()), for the driver's first-pin nudge.
 // THIS IS THE TRANSLATION OF THEIR OLD-LIBRARY LINES, which were:
 //     liftMotors.move(50);  pros::delay(300);  liftMotors.move(0);

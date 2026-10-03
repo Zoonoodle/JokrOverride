@@ -80,6 +80,7 @@ void Lift::zero() {
     parkMv_ = 0.0;
     parkTimeout_ = false;
     holdSettleSince_ = 0;
+    idleStillSince_ = 0;
     score_ = returnFast_ = scoreStuck_ = releasedByTravel_ = releasedByFloor_ = false;
     scoredAbove_ = scoreCycle_ = returnRequest_ = false;
     grab_ = gripWanted_ = gripAcked_ = false;
@@ -609,9 +610,16 @@ void Lift::enterHold(std::uint32_t now, double holdAt) {
     // back-EMF of the arrival speed back out of it first -- the integral was sustaining the crawl as
     // well as fighting gravity, and carrying that extra into a hold that wants ZERO speed would make
     // the arm creep past the level before the KI term unlearned it.
-    const double kv = config::LIFT_MAX_MV / config::LIFT_FREE_SPEED_DEG_PER_S;  // mV per deg/s
-    gravityMv_ = std::clamp(velI_ - kv * velocity_, -static_cast<double>(config::LIFT_HOLD_MAX_MV),
-                            static_cast<double>(config::LIFT_HOLD_MAX_MV));
+    // ...but ONLY if the velocity loop actually ran. A move that arrived straight out of DRIVE never
+    // built an integral (enterDrive() zeroes it), so velI_ is 0 and this seed would be
+    // -kv * arrival speed -- a big DOWNWARD voltage, which PARK would then freeze and drive the arm
+    // into the floor with. That is reachable from any short or COARSE move. In that case keep whatever
+    // the hold learned last time and let its integral correct from there.
+    if (velI_ != 0.0) {
+        const double kv = config::LIFT_MAX_MV / config::LIFT_FREE_SPEED_DEG_PER_S;  // mV per deg/s
+        gravityMv_ = std::clamp(velI_ - kv * velocity_, -static_cast<double>(config::LIFT_HOLD_MAX_MV),
+                                static_cast<double>(config::LIFT_HOLD_MAX_MV));
+    }
     velI_ = 0.0;
 }
 
@@ -669,7 +677,11 @@ void Lift::enterPark(std::uint32_t now, double parkAt, bool timedOut) {
     parkGoal_ = parkAt;
     holdGoal_ = parkAt;
     parkTimeout_ = timedOut;
-    parkMv_ = std::clamp(gravityMv_, -static_cast<double>(config::LIFT_HOLD_MAX_MV),
+    // FREEZE WHAT WAS ACTUALLY HOLDING THE ARM -- the hold loop's last output -- not just its
+    // integral. By now the arm is inside the band and slow, so that output IS the steady voltage this
+    // height costs; the integral alone can be stale (nothing learned yet) or carry an arrival
+    // transient. Getting this wrong makes the arm sag and the hold re-engage, over and over.
+    parkMv_ = std::clamp(lastOutput_, -static_cast<double>(config::LIFT_HOLD_MAX_MV),
                          static_cast<double>(config::LIFT_HOLD_MAX_MV));
     velI_ = 0.0;
     holdSettleSince_ = 0;
@@ -750,11 +762,15 @@ void Lift::runHold(std::uint32_t now, double dt, double position) {
     const double sat = config::LIFT_HOLD_MAX_MV;
     if (out > sat) out = sat;
     else if (out < -sat) out = -sat;
-    // FREEZE THE INTEGRAL INSIDE THE BAND. Letting it keep winding against stiction while the P term
-    // is deliberately silent is precisely the limit cycle this is meant to end: it winds until the arm
-    // breaks free, overshoots, and then has to unwind. Inside the band the hold is just the gravity
-    // voltage it has already learned.
-    else if (!inBand) gravityMv_ = std::clamp(gravityMv_ + config::LIFT_HOLD_KI * err * dt, -sat, sat);
+    // LEARN GRAVITY, inside the band as well as outside it. Freezing the integral in the band (which
+    // this used to do) looked like the cure for the limit cycle, but it was the cause of a worse bug:
+    // a move that arrives already inside the band never learns anything, so PARK froze a voltage that
+    // had never been measured -- often 0 after a REST, or a large NEGATIVE one after a fast arrival --
+    // and the arm sagged, re-engaged at LIFT_REENGAGE_DEG, got pushed back, parked wrong again... which
+    // is the "moving up and down randomly" the driver saw when driver control took over. The integral
+    // is what makes parkMv_ right, and it cannot wind for long: PARK takes the loop away within
+    // LIFT_SETTLE_TIMEOUT_MS. The P term staying silent in the band is what stops the hunting.
+    else gravityMv_ = std::clamp(gravityMv_ + config::LIFT_HOLD_KI * err * dt, -sat, sat);
     motors_.move_voltage(static_cast<int>(out));
     lastOutput_ = out;
     lastVRef_ = 0.0;
@@ -1331,8 +1347,31 @@ void Lift::update() {
     //    moves until something explicitly calls setTarget()/moveTo()) and right after the driver
     //    lets go of the manual override (no old target resumes).
     if (!active_) {
-        wakeMotors();  // the no-target state is a BRAKE-hold, never a coast: an arm that is up must
-                       // not fall (CLAUDE.md safety rule 1). Only REST at the bottom ever coasts.
+        // AT THE BOTTOM, WITH NOTHING COMMANDED: coast. The arm is resting on its hard stop, so the
+        // motors have nothing to do and should not be asked to hold anything -- the driver's words,
+        // "during down state like scored state, it needs to not use arm pid and let the motors just
+        // coast and chill". This is the same REST the descent ends in, reached from the idle path.
+        // ANYWHERE ELSE it is still a BRAKE-hold: an arm that is up must not fall when a target is
+        // dropped (CLAUDE.md safety rule 1), and letting go of the manual override still brake-holds.
+        if (position <= config::LIFT_BOTTOM_GOAL_DEG &&
+            std::fabs(velocity_) <= config::LIFT_REST_STILL_DEG_PER_S && config::LIFT_REST_AFTER_MS > 0) {
+            if (idleStillSince_ == 0) idleStillSince_ = now;
+            if (now - idleStillSince_ >= static_cast<std::uint32_t>(config::LIFT_REST_AFTER_MS)) {
+                if (!coasting_) {
+                    motors_.set_brake_mode_all(pros::v5::MotorBrake::coast);
+                    coasting_ = true;
+                }
+                motors_.move_voltage(0);
+                lastError_ = 0.0;
+                lastOutput_ = 0.0;
+                lastVRef_ = 0.0;
+                trace(now, 'E', position, 0.0, false);
+                return;
+            }
+        } else {
+            idleStillSince_ = 0;
+        }
+        wakeMotors();
         motors_.brake();
         lastError_ = 0.0;
         lastOutput_ = 0.0;

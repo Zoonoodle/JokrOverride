@@ -193,7 +193,10 @@ and cannot bounce) → **REST** (`LIFT_REST_AFTER_MS`, 300 ms, after the seated 
 **COAST** and 0 V — no PID, no seat push, not even the firmware hold, so the motors draw nothing. The
 user asked for this on 2026-10-03, "keep motors loose so they arent being usefd and burn out", and it
 reverses "pressed into the hard stop" as the *final* state: the press still happens, it just stops once
-the arm is settled. REST counts as seated/settled everywhere. **Coasting happens ONLY here** — the
+the arm is settled. REST counts as seated/settled everywhere. The idle path does the same thing: **no target + at or below
+`LIFT_BOTTOM_GOAL_DEG` + still = coast**, not a brake-hold (the driver, 2026-10-03: "during down state
+like scored state, it needs to not use arm pid and let the motors just coast and chill"). **Coasting
+happens ONLY at the bottom** — the
 no-target state and every manual release are still brake-holds, so an arm that is up cannot fall, and
 safety rule 1 is unchanged. Because the bands pull UP hardest at the folded position, a resting arm that
 creeps past `LIFT_REST_WAKE_DEG` is re-seated and rests again, at most `LIFT_REST_MAX_WAKES` times;

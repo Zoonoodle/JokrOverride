@@ -660,7 +660,10 @@ assumes the one above is settled. **Start from the values in `config.hpp` -- the
      only lasts `LIFT_REST_AFTER_MS` now, so this should no longer happen
 8b. **`REST`: loose motors at the bottom.** `LIFT_REST_AFTER_MS` (300 ms) after the seated arm has gone
    still, the phase becomes `REST`: brake mode **coast**, 0 V, no PID and no seat push, so the motors
-   draw nothing at all for the rest of the match. The frame holds the arm. Trace: `E` lines with
+   draw nothing at all for the rest of the match. **The same thing happens with no target at all:** an
+   arm sitting at or below `LIFT_BOTTOM_GOAL_DEG` with nothing commanded (after a `cancel()`, after a
+   manual nudge down, at the end of a score) coasts too, instead of brake-holding. Anywhere *above*
+   the bottom a dropped target is still a brake-hold -- an arm that is up must not fall. The frame holds the arm. Trace: `E` lines with
    `mv 0`. With the robot disabled-but-powered after an auton, the arm should feel **completely free**
    by hand at the bottom, and stiff everywhere else.
    - the arm **creeps up** off the stop, or the brain cycles `REST` → `FINAL` → `SEAT` → `REST`: this

@@ -625,6 +625,7 @@ class Lift {
     double parkMv_ = 0.0;           // the frozen constant voltage PARK pushes
     double parkGoal_ = 0.0;         // the height PARK believes it is at (re-engage is measured from it)
     bool parkTimeout_ = false;      // this PARK is an abandoned move, not an arrival
+    std::uint32_t idleStillSince_ = 0;   // no target, at the bottom, still: when that started
     std::uint32_t holdSettleSince_ = 0;  // when the hold was first seen inside the band and slow
     std::uint32_t moveStart_ = 0;   // when the current position move was commanded (LIFT_MOVE_TIMEOUT_MS)
 

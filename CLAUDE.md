@@ -82,7 +82,14 @@ Full description: **`docs/robot/ROBOT.md`**, photos in `docs/robot/photos/`.
   no score can finish. With three ranges the only way to keep that ordering true is to compute it. (The
   old absolute `AUTOCLAMP_REARM_MM` nearly caused exactly this when the range went 15 → 50; it is gone.)
   The gap is `static_assert`ed positive in `Claw::detectorConfig()` and the broken ordering has a host
-  test. `CLAW_RELEASE_LOCKOUT_MS` is kept on top as a floor. It is inhibited for the
+  test. **AND THE WAIT IS BOUNDED** (`AUTOCLAMP_REARM_MAX_MS`, 2 s): give up waiting for clear and arm
+  anyway. Without that bound the clear rule is an unbounded wait, and on 2026-10-03 it took the autoclamp
+  out completely in both modes — because the threshold is DERIVED from the range, raising the range for
+  sensitivity (15 → 60/75) raised the required clearance to 90/105 mm, and anything permanently inside
+  10 cm of the sensor (the claw's own structure, a cup, a wall, the pin just put down) pinned it in
+  WAIT_CLEAR for the match with only `AC:CLEAR?` on the brain to show it. **A threshold rule that can
+  wait forever needs a bound.** Diagnosis table: README "If the autoclamp goes dead".
+  `CLAW_RELEASE_LOCKOUT_MS` is kept on top as a floor. It is inhibited for the
   whole L2 score. **ON by default in BOTH modes** — driver (`AUTOCLAMP_ON_IN_DRIVER`, re-enabled each
   `opcontrol()`, Y toggles) and **auton** (`AUTOCLAMP_ON_IN_AUTON`, applied by `autonomous()` since
   2026-10-03; `auton::autoclamp(false)` is the per-route switch). OFF at power-on. It is **entirely

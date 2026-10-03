@@ -152,7 +152,7 @@ void liftStop();
  * PUSH THE LIFT DOWN at a constant percentage, until something stops it. Non-blocking and LATCHED, like
  * holding a button down:
  *
- *     auton::liftPush();        // presses down at config::AUTON_LIFT_PUSH_PCT (40%)
+ *     auton::liftPush();        // presses down at config::AUTON_LIFT_PUSH_PCT (20%)
  *     auton::clawOpen();        // ...do whatever needed the arm pressed down
  *     auton::wait(300);
  *     auton::liftPushStop();    // let go: the lift brake-holds exactly where it is

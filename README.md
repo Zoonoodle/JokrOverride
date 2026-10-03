@@ -206,8 +206,8 @@ auton::scoreAndWait();
 | `auton::liftToMatchload()` | the MATCHLOAD height |
 | `auton::liftDown()` | the banded descent that ends **SEATED** on the hard stop (same as L2's run home, B, R2) |
 | `auton::liftStop()` | abandon the move and brake-hold here, **no target active**. The one call that leaves a passive hold -- for stopping a move, not for ending a routine |
-| `auton::liftPush(pct=40)` / `auton::liftPushStop()` | **press the lift DOWN at a constant open-loop percentage, latched until stopped** -- for scoring a pin at the very bottom, where there is no height left to command. Plain voltage through the same path the D-pad uses: it cancels any target and the macro, nothing profiles or tapers it, and `liftPushStop()` brake-holds where the arm is. `pct` is a magnitude; down is the only direction. `auton::end()` releases it too, so a forgotten push cannot be handed to driver control |
-| `auton::liftPushFor(ms, pct=40)` | the one-liner: push, wait, stop. **Blocks** for `ms` |
+| `auton::liftPush(pct=20)` / `auton::liftPushStop()` | **press the lift DOWN at a constant open-loop percentage, latched until stopped** -- for scoring a pin at the very bottom, where there is no height left to command. Plain voltage through the same path the D-pad uses: it cancels any target and the macro, nothing profiles or tapers it, and `liftPushStop()` brake-holds where the arm is. `pct` is a magnitude; down is the only direction. `auton::end()` releases it too, so a forgotten push cannot be handed to driver control |
+| `auton::liftPushFor(ms, pct=20)` | the one-liner: push, wait, stop. **Blocks** for `ms`. 20% since 2026-10-03 (halved); it is open-loop, so if the arm stops moving *entirely* that is the rubber bands winning, not a jam -- raise it back toward 30 |
 | `auton::waitLift(ms)` | blocks until arrival (HOLD at a height, SEAT at the bottom) |
 | `auton::waitLiftSeated(ms)` | blocks until the arm is pressed onto the hard stop |
 | `auton::liftToAndWait(deg/Level, ms)` | the two in one line |

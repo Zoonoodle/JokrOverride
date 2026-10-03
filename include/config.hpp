@@ -622,10 +622,18 @@ inline constexpr double LIFT_MANUAL_DOWN_PCT = 50.0;         // TUNE: D-pad Down
 // target. It is LATCHED (like holding a button), so a route must stop it -- and auton::end() stops it
 // too, so a route that forgets, or is cut off by the field switch, cannot leave the arm leaning on the
 // floor.
-//   It does not press hard enough to seat the pin: raise it.
-//   It lifts the back of the robot / stalls the motors warm: LOWER it. 40% is 4800 mV, the same force
-//     L1_GRAB_PUSH_PCT uses, and it is open-loop, so nothing tapers it off at the bottom.
-inline constexpr double AUTON_LIFT_PUSH_PCT = 40.0;          // TUNE: % of LIFT_MAX_MV, downward
+// HALVED 40 -> 20 (2026-10-03, the driver: "liftPushFor needs to move down slower, like half the speed
+// its currently at"). 20% is 2400 mV. Note this is the DOWN push only -- AUTON_LIFT_PUSH_UP_PCT is still
+// 40, deliberately, because they are different jobs: this one mostly has to HOLD the arm down on a pin
+// while the jaws let go, and it is working WITH gravity; the up nudge is working against it.
+// WATCH FOR THE FLOOR UNDER THIS NUMBER. It is open-loop, and this lift's rubber bands pull UP hardest
+// at the folded position, so below some percentage the bands simply win and the arm does not move at all
+// -- it just sits there drawing current. 20% has not been checked against that on the robot. If the arm
+// stops descending entirely (rather than descending slowly), that is this floor, not a jam: raise it
+// back toward 30.
+//   It does not press hard enough to seat the pin, or does not move at all: raise it.
+//   It lifts the back of the robot / slams the pin down / stalls the motors warm: LOWER it.
+inline constexpr double AUTON_LIFT_PUSH_PCT = 20.0;          // TUNE: % of LIFT_MAX_MV, downward (was 40)
 // ...and the same thing UPWARD (auton::liftPushUp() / liftPushUpFor()), for the driver's first-pin nudge.
 // THIS IS THE TRANSLATION OF THEIR OLD-LIBRARY LINES, which were:
 //     liftMotors.move(50);  pros::delay(300);  liftMotors.move(0);

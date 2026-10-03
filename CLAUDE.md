@@ -326,7 +326,8 @@ auton route runs is NOT in `config.hpp`** — it is `constexpr Route SELECTED` a
 `src/autons.cpp`, because it is a strategy choice, not a robot constant.
 
 **The auton lift push.** `auton::liftPush(pct)` / `liftPushStop()` / `liftPushFor(ms, pct)` press the
-arm DOWN at a constant open-loop `AUTON_LIFT_PUSH_PCT` (40, TUNE) until stopped — the driver's 2026-10-03
+arm DOWN at a constant open-loop `AUTON_LIFT_PUSH_PCT` (**20**, TUNE — halved from 40 on 2026-10-03;
+the UP nudge `AUTON_LIFT_PUSH_UP_PCT` stays 40, they are different jobs) until stopped — the driver's 2026-10-03
 request, for scoring a pin at the very bottom where there is no height left to command. It is **not** a
 new lift mode: it goes through `Lift::driverPower()`, the same manual path the D-pad feeds, so safety
 rules 2 and 3 are untouched (one owner, it cancels any target and the macro instantly, release

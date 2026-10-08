@@ -166,10 +166,14 @@ void disabled() {
 }
 
 void competition_initialize() {
-
-    // Grip the preloaded pin before the match (user's choice, 2026-10-03). Through the Claw's own
-    // method, so its state machine knows the jaws are CLAMPED and nothing opens them again later.
-    claw.clamp();
+    // NOTHING MOVES HERE. This used to grip the preloaded pin with claw.clamp() (2026-10-03), but the
+    // driver's standing instruction from 2026-10-07 is "no longer reset position at the beginning of
+    // auton or driver, just keep arm claw where it is" -- and that applies to the pre-match hook too:
+    // the jaws stay wherever they physically are, and no cylinder fires on its own.
+    //
+    // A ROUTE THAT NEEDS THE PRELOAD GRIPPED MUST SAY SO. auton::clawGrip() is the call, and both
+    // MATCH and MATCHLOAD_FINISH already begin with it, so nothing regressed there. A route that
+    // forgets it now starts with open jaws instead of silently inheriting a pre-match grip.
 }
 
 void autonomous() {
@@ -193,13 +197,21 @@ void autonomous() {
     //    (Driver control enables it the same way from AUTOCLAMP_ON_IN_DRIVER -- see opcontrol().)
     auton::autoclamp(config::AUTOCLAMP_ON_IN_AUTON);
 
-    // 3. Pivot OUT (the power-on / travel position) and ask the lift to home. HOMING IS CURRENTLY
-    //    SWITCHED OFF -- config::LIFT_HOME_ON_ENABLE is false, the driver's decision 2026-10-03,
-    //    because the arm is set at its hard stop every time and zero()'s absolute-angle seed is
-    //    already correct -- so this records HOME SKIPPED and the route starts lifting immediately,
-    //    with nothing driving the arm down first. Setting that constant back to true restores the
-    //    old behaviour here and in opcontrol() at once; nothing else has to change.
-    auton::homeLift();
+    // 3. NOTHING MOVES AT THE START OF AUTON. This used to call auton::homeLift(), which swung the
+    //    pivot OUT and asked the lift to home against its hard stop. Both are gone: the driver's
+    //    standing instruction, 2026-10-07, is "no longer reset position at the beginning of auton or
+    //    driver, just keep arm claw where it is".
+    //
+    //    So the arm holds whatever height it is at (the lift task has NO target active at power-on and
+    //    its idle branch brake-holds, or coasts once it is resting on the stop), the pivot keeps the
+    //    position it is physically in, and the jaws keep theirs. The POSITION READING is untouched by
+    //    this: Lift::zero() in initialize() still seeds the counter from the rotation sensor's own
+    //    calibrated absolute zero, exactly as before, so every preset still means the same height.
+    //    Only the physical reset is gone.
+    //
+    //    A ROUTE THAT WANTS THE ARM SOMEWHERE SPECIFIC SAYS SO ITSELF -- auton::liftDownAndWait(),
+    //    auton::pivotOut() and so on. That is deliberate: the route is the one place that knows where
+    //    the arm should be for the run it is about to do.
 
     // 4. Odometry/IMU calibration, BOUNDED. A drive move needs a heading, so wait for it -- but never
     //    longer than AUTON_CALIBRATE_TIMEOUT_MS, so an unplugged IMU costs a few seconds instead of
@@ -223,8 +235,11 @@ void opcontrol() {
     // auton::autoclamp(true);  // driver control starts with the autoclamp ON, just like auton (config::AUTOCLAMP_ON_IN_DRIVER)
     // pros::delay(100000); 
     
-    // let the lift PID task start and zero() the rotation sensor before reading it on the brain
-    auton::liftDownFast();
+    // NOTHING MOVES AT THE START OF DRIVER CONTROL. This used to call auton::liftDownFast(), which ran
+    // the arm down to its hard stop the instant driver control began -- including on the auton ->
+    // driver switch in a real match, where it threw away whatever height auton had left the arm at.
+    // Removed on the driver's standing instruction, 2026-10-07: "no longer reset position at the
+    // beginning of auton or driver, just keep arm claw where it is".
     master.print(0, 0, "DRIVER ON       ");
 
     // Take the per-loop logic back from the auton tick BEFORE anything else: end() blocks until that
@@ -241,12 +256,20 @@ void opcontrol() {
     // the claw nor the pivot nor the lift, so whatever height auton left the arm holding is kept.
     scoring.reset();
 
-    // Home the lift if autonomous() didn't already (driver skills, or a practice run straight into
-    // driver control). requestHome() is a no-op once a run has homed, failed or been cancelled, so a
-    // real match homes exactly once, during auton. It never blocks: the drive loop below starts
-    // immediately and the arm homes underneath it. Holding D-pad Up/Down cancels it.
-    scoring.pivotOut();
-    lift.requestHome();
+    // NO PIVOT SWING AND NO HOMING HERE EITHER. This used to call scoring.pivotOut() -- firing the
+    // pivot cylinder to its OUT position -- and lift.requestHome(), which drives the arm down into its
+    // hard stop to find zero. Both are physical resets at the start of a mode, so both are gone
+    // (driver, 2026-10-07). The pivot keeps whatever position it is in, including one auton left it in,
+    // and the arm keeps its height.
+    //
+    // THE SOFTWARE STATE IS STILL CONSISTENT, with nothing moving to make it so: Scoring's pivotOut_
+    // and Claw's state_/level_ live on the one long-lived object each, so they already describe where
+    // the cylinders physically are when driver control takes over from auton. There is nothing to
+    // re-seed -- only scoring.reset() above was needed, and that moves nothing.
+    //
+    // Homing is no longer requested ANYWHERE automatically (config::LIFT_HOME_ON_ENABLE has been false
+    // since 2026-10-03 and this was the last caller, so in practice nothing changes today). A route or
+    // a debug build that really wants it calls robot::lift.requestHome() itself.
 
     // The autoclamp is ON for the whole of driver control by default, every time opcontrol starts:
     // whenever the jaws are open, anything that sits at or inside config::AUTOCLAMP_RANGE_DRIVER_MM for

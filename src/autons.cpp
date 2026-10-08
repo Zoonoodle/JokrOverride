@@ -421,52 +421,53 @@ void matchloadFinishAuto() {
                      {.expectedMm = config::MATCHLOAD_BACK_EXPECTED_MM,
                       .minMm = config::MATCHLOAD_BACK_MIN_MM,
                       .maxMm = config::MATCHLOAD_BACK_MAX_MM});
-auton::intakeFor(1500, auton::Spin::IN);   // 1.5 s inward
+auton::intakeFor(1000, auton::Spin::IN);   // 1.5 s inward
+auton::liftPushUpFor(350);
 auton::clawGrip();
     // --- The preload -------------------------------------------------------
     
 
-    chassis.swingToHeading(-42, lemlib::DriveSide::RIGHT, 800);
-    chassis.moveToPoint(9, -13, 1000, {.forwards = false, .maxSpeed = 90});
+    chassis.swingToHeading(-42, lemlib::DriveSide::RIGHT, 400);
+    chassis.moveToPoint(9.5, -14, 1000, {.forwards = false});
      auton::liftPushUpFor(350);
     chassis.waitUntilDone();
- auton::liftPushFor(400);
+ auton::liftPushFor(800);
  pros::delay(200);
-    chassis.moveToPoint(3.0, -15.5, 500);
-    pros::delay(300);
+    chassis.moveToPoint(4.7, -3.1, 500);
     auton::clawOpen();
     //score piun
 
 
-    chassis.moveToPoint(13, -5.2, 1000);
-    chassis.turnToPoint(11, -37.6, 500);
-    chassis.moveToPoint(11, -37.6, 2000, {.forwards = false, .maxSpeed = 60});
+    chassis.moveToPoint(3.8, 3.6, 500);
+    chassis.turnToHeading(-55.8, 500);
+    chassis.moveToPoint(34.3, -15.8, 2000, {.forwards = false, .maxSpeed = 60});
       auton::autoclamp(true);
     //move to first cup
     chassis.waitUntilDone();
-    chassis.swingToPoint(1.5, -32, lemlib::DriveSide::LEFT, 700);
+    chassis.swingToHeading(-63, lemlib::DriveSide::LEFT, 700);
     pros::delay(400);
       auton::liftTo(auton::Level::ONE);
-    chassis.moveToPoint(1.5, -32, 1200, {.forwards = false, .maxSpeed = 80});
+    chassis.moveToPoint(37, -19.4, 1000, {.forwards = false, .maxSpeed = 80});
   chassis.waitUntilDone();
 auton::scoreAndWait();  
-chassis.moveToPoint(4.6, -43.5, 1000);
-chassis.turnToPoint(-14.3,33.7, 500);
+chassis.moveToPoint(36, -21, 1000);
+chassis.turnToHeading(35.5, 500);
 auton::liftDownFast();
 auton::autoclamp(true);
-chassis.moveToPoint(-14.3, 33.7, 2000, {.forwards = false, .maxSpeed = 60});
+chassis.moveToPoint(19, -41.4, 2000, {.forwards = false, .maxSpeed = 60});
 chassis.waitUntilDone();
-chassis.turnToPoint(-6.3, -26, 500);
+chassis.turnToHeading(162, 500);
+pros::delay(200);
 auton::liftTo(auton::Level::TWO);
 
-chassis.moveToPoint(-6.3, -26, 1200, {.forwards = false, .maxSpeed = 80});
+chassis.moveToPoint(14.6, -29.5, 1000, {.forwards = false, .maxSpeed = 80});
 //score second
 chassis.waitUntilDone();
 auton::scoreAndWait();
 
-chassis.moveToPoint(-32, -31, 1500);
+chassis.moveToPoint(15.6, -57, 1500);
 chassis.waitUntilDone();
-chassis.turnToHeading(90, 600);
+chassis.turnToHeading(87.5, 700);
 
 
 }

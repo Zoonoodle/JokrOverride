@@ -41,11 +41,14 @@ void reset() {
     sweepAfterGrab = false;
     autoIntakeOn = false;
     autoOuttakeOn = false;
-    // ...and drop any clamp nobody has reacted to yet. The one that matters is
-    // competition_initialize()'s pre-match grip of the preloaded pin: that clamp happens while the robot
-    // is DISABLED, with no tick running, so without this it would still be sitting there when auton
-    // starts and the arm would hop CLAMP_RISE_DEG on the first tick of the match (CLAUDE.md safety
-    // rule 1 -- the field switch must not make the arm move for a clamp that happened before it).
+    // ...and drop any clamp nobody has reacted to yet. THIS PREVENTS MOTION, which is why it stays
+    // (and matters more than ever now that no mode start resets anything): a clamp that happened with
+    // no tick running would otherwise still be queued when the next enabled mode starts ticking, and
+    // Scoring would hop the arm CLAMP_RISE_DEG for it -- the field switch making the arm move for a
+    // clamp that happened before it, which is exactly CLAUDE.md safety rule 1.
+    // competition_initialize() used to be the source of one of these (it gripped the preload with
+    // claw.clamp()); that call is gone as of 2026-10-07, but a clamp can still arrive while disabled
+    // from the autoclamp, so the guard is still load-bearing.
     robot::claw.clearClampEvent();
 }
 

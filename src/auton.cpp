@@ -149,12 +149,6 @@ double heightOf(Level level) {
     return preset::STACK_LEVELS[i];
 }
 
-void homeLift() {
-    AUTON_LOCK;
-    robot::scoring.pivotOut();  // home in the power-on configuration, same as main.cpp does
-    robot::lift.requestHome();
-}
-
 bool waitHome(int timeoutMs) {
     const std::uint32_t start = pros::millis();
     while (robot::lift.isHoming()) {

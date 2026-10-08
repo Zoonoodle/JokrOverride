@@ -5,7 +5,6 @@
  * THE POINT. A routine should read like a script and never need to know how any of it works:
  *
  *     auton::begin();                       // starts the 10 ms subsystem tick
- *     auton::homeLift();  auton::waitHome();
  *     auton::liftTo(auton::Level::THREE);   auton::waitLift();
  *     auton::score();                       auton::waitScore();
  *     auton::liftDown();                    auton::waitLiftSeated();
@@ -94,10 +93,12 @@ enum class Level { ONE = 1, TWO = 2, THREE = 3, FOUR = 4, FIVE = 5 };
 /** The arm degrees a Level means. */
 double heightOf(Level level);
 
-/** Home the lift against its hard stop (the same Lift::requestHome() the first enabled mode uses,
- *  with the pivot put OUT first exactly like main.cpp does). Returns immediately; homing runs inside
- *  the lift task. A no-op once a run has homed, failed or been cancelled. */
-void homeLift();
+// homeLift() WAS HERE AND IS GONE (2026-10-07). It swung the pivot OUT and asked the lift to home
+// against its hard stop -- two physical resets -- and the driver's standing instruction is that no
+// mode start moves the arm, claw or pivot. Nothing called it once main.cpp stopped, and leaving a
+// one-line call that fires a cylinder would have been a trap. Homing itself still exists in Lift and
+// is still gated by config::LIFT_HOME_ON_ENABLE (false); call robot::lift.requestHome() directly if
+// you ever genuinely want it. waitHome()/liftHomed() below stay -- they only ASK, they never move.
 /** Block until homing finishes. True only if it really HOMED (so the arm is seated on a trustworthy
  *  zero); false on HOME FAIL / CANCELLED / SKIPPED or the timeout. */
 bool waitHome(int timeoutMs = config::AUTON_HOME_TIMEOUT_MS);

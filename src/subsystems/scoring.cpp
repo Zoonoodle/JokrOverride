@@ -158,11 +158,15 @@ void Scoring::handleClampEvent() {
         return;
     }
 
+    // ONLY A REAL AUTOCLAMP GRAB HOPS (driver, 2026-10-07). Claw::clamp() records MANUAL, so this one
+    // test excludes the driver's A press AND every clamp the scoring macro makes for itself (CLAMPING,
+    // the L1 GRAB) -- only the detector in Claw::update() ever produces AUTOCLAMP.
+    if (source != Claw::ClampSource::AUTOCLAMP) return;
+
     // A COMMANDED MOVE ALWAYS WINS. The hop must never fight the L1 grab's own push, an L2 score cycle,
     // a lift move that is still in flight (an auton route's `clawGrip(); liftToFrontToggle();` is exactly
     // that), or a macro state that is about to command a height of its own.
     if (lift_.isGrabbing() || lift_.isScoring() || lift_.isScoreCycle() || lift_.isScoredAbove()) return;
-    if (lift_.hasActiveTarget() && !lift_.isSettled() && !lift_.isBlocked() && !lift_.isFaulted()) return;
     switch (state_) {
         case State::CLAMPING:     // about to rise to a stack level
         case State::STACKING:
@@ -172,6 +176,14 @@ void Scoring::handleClampEvent() {
         case State::SCORED:
         case State::RETURNING:
         case State::MOVING:
+        // The INTAKE SEQUENCE'S OWN GRAB. These were missing from this list when the sequence was
+        // added, which let a clamp during the automatic grab fall out of the switch and hop the arm
+        // on top of it. They are excluded explicitly now: the intake has its own reaction entirely.
+        case State::GRAB_SETTLE:
+        case State::GRAB_PUSH:
+        case State::GRAB_RISE:
+        case State::INTAKE_APPROACH:  // unreachable: isAtIntakeHandoff() took these above
+        case State::INTAKE_DESCEND:
             return;
         case State::IDLE:
         case State::INTAKE_POS:      // unreachable: isAtIntakeHandoff() took it above
@@ -179,7 +191,30 @@ void Scoring::handleClampEvent() {
             break;
     }
 
-    // UP, by CLAMP_RISE_DEG, from wherever the arm is right now -- never down, and never past MAX.
+    // DON'T RISE YET. Let the jaws hold what they just caught for CLAMP_RISE_DELAY_MS before moving --
+    // only the TIME is recorded here. serviceClampHop(), called every tick from update(), does the
+    // rise when the delay is up, and re-checks the conditions then because 400 ms is long enough for
+    // them to change. Clearing this one timestamp is all it takes to cancel, which is why enter() and
+    // reset() can do it for free on any button.
+    pendingHopAt_ = pros::millis();
+}
+
+void Scoring::serviceClampHop() {
+    if (pendingHopAt_ == 0) return;
+    if (pros::millis() - pendingHopAt_ < static_cast<std::uint32_t>(config::CLAMP_RISE_DELAY_MS)) return;
+    pendingHopAt_ = 0;  // one-shot, whatever happens below
+
+    // THE GRIP DID NOT HOLD. Knocked out, or shaken loose during the wait: stay down rather than lift
+    // an empty claw and pretend we have something.
+    if (!claw_.isClamped()) return;
+    // Re-check what the delay may have changed. The STATE cannot have changed without enter() clearing
+    // this, so only the lift's own business needs re-testing.
+    if (lift_.isGrabbing() || lift_.isScoring() || lift_.isScoreCycle() || lift_.isScoredAbove()) return;
+    if (lift_.hasActiveTarget() && !lift_.isSettled() && !lift_.isBlocked() && !lift_.isFaulted()) return;
+
+    // UP, by CLAMP_RISE_DEG, from wherever the arm is NOW -- never down, and never past MAX. "Now" is
+    // the position at the end of the delay, which is what the driver asked for ("move up 7.5 degrees
+    // from where it is"), not where it was when the jaws shut.
     const double here = lift_.getPosition();
     const double goal = std::min(here + config::CLAMP_RISE_DEG, preset::MAX);
     // The arm is already at (or above) the software top: there is no room to hop into, and MAX is BELOW
@@ -193,6 +228,10 @@ void Scoring::enter(State next) {
     state_ = next;
     stateStart_ = pros::millis();
     hasCommanded_ = false;
+    // Any state change cancels a pending clamp hop: if the driver pressed anything during the 400 ms
+    // wait, their button wins. This is also what guarantees the 7.5 deg hop can never fire on top of
+    // the intake sequence's own grab -- entering GRAB_SETTLE comes through here.
+    pendingHopAt_ = 0;
     switch (next) {
         case State::IDLE: resetStep(); break;  // arrived home after score() lowers to DOWN (reset() sets IDLE directly, without going through enter())
         case State::INTAKE_POS:
@@ -295,6 +334,9 @@ bool Scoring::inHandoffZone() const {
 void Scoring::reset() {
     state_ = State::IDLE;
     hasCommanded_ = false;
+    // reset() sets state_ directly instead of going through enter(), so the pending hop has to be
+    // dropped here too -- the D-pad override calls this every tick it is held.
+    pendingHopAt_ = 0;
     resetStep();
 }
 
@@ -487,6 +529,8 @@ void Scoring::update() {
     // transition made this tick cannot be seen half-done. It always consumes the event (see
     // handleClampEvent()), so nothing queues.
     handleClampEvent();
+    // ...and the delayed rise that a clamp outside the intake may have queued.
+    serviceClampHop();
 
     const std::uint32_t elapsed = pros::millis() - stateStart_;
     switch (state_) {

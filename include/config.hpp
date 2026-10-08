@@ -780,15 +780,34 @@ inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 // Brain's LIFT line: `CLAMP UP` -- deliberately NOT the number, which would be a lie the moment this
 // constant is tuned (it just was, 5 -> 8). The height is on the same line anyway, as `-> 8.0`.
 //
-// WHERE IT IS SKIPPED (see Scoring::handleClampEvent()): at the R1 INTAKE handoff (the driver's own
-// exception -- there the autoclamp pushes DOWN instead, see AUTOCLAMP_INTAKE_PUSH_MS), during an L1
-// GRAB push, anywhere inside an L2 score cycle, while a lift move is still in flight or a Scoring
-// macro owns the lift (a commanded move always wins), and for any clamp that happened while the robot
-// was DISABLED -- periodic::reset() drops the event at the start of each enabled mode, so
-// competition_initialize()'s pre-match grip can never queue a rise that fires when auton starts.
-//   It does not clear the thing it just gripped: raise it.
+// IT WAITS FIRST (driver, 2026-10-07): "whenever auto clamp actually grabs ANYWHERE besides inside the
+// intake (that's special), we need lift to move up 7.5 degrees from where it is automatically, but
+// delay it so it clamps for 400ms before doing that movement." So the arm stays exactly where the
+// clamp caught it for CLAMP_RISE_DELAY_MS, letting the jaws take a real grip on the cup or pin, and
+// only then rises CLAMP_RISE_DEG from wherever it is at THAT moment. Both numbers are below.
+//
+// WHAT TRIGGERS IT: a clamp the AUTOCLAMP DETECTOR made, outside the intake sequence -- picking up
+// from matchload, from the bottom (-39), or off the field. Nothing else:
+//   - a MANUAL clamp never hops. Claw::clamp() records ClampSource::MANUAL, so the driver's A press
+//     and every clamp the scoring macro makes itself (CLAMPING, the L1 GRAB) are excluded by source
+//     alone. Only the detector in Claw::update() produces ClampSource::AUTOCLAMP.
+//   - THE INTAKE SEQUENCE IS EXCLUDED and has its own, different reaction: settle, push down to
+//     GRAB_PUSH_DEPTH_DEG, rise to level 1 releasing the pivot. See "THE INTAKE AUTOCLAMP GRAB".
+//     Entering those states clears any pending hop, so the two can never both run.
+//   - Scoring states that are driving the arm themselves (STACKING, RELEASING, SCORED, RETURNING,
+//     CLAMPING, GRABBING, LIFT_SETTLE, MOVING, and the GRAB_* states) are excluded: a commanded move
+//     always wins. A re-clamp during an L2 cycle is excluded twice over -- the autoclamp is inhibited
+//     for the whole cycle, and Lift::isScoreCycle() is checked again when the delay expires.
+//   - a clamp that happened while the robot was DISABLED: periodic::reset() drops the event at the
+//     start of each enabled mode, so a pre-match grip can never queue a rise that fires in auton.
+//   - an EMPTY CLAW at the end of the delay (the pin was knocked out while it waited): no rise.
+// ANY DRIVER INPUT CANCELS IT, during the delay or the rise, because the pending hop is cleared by
+// Scoring::enter() and Scoring::reset() -- which every button goes through.
+//   It does not clear the thing it just gripped: raise CLAMP_RISE_DEG.
 //   It lifts far enough to matter / fights the next move: lower it (1-2 deg still moves, see above).
-inline constexpr double CLAMP_RISE_DEG = 8.0;                // TUNE: arm degrees, RELATIVE and upward only (was 5)
+//   It rises before the grip is solid and drops the cup: raise CLAMP_RISE_DELAY_MS.
+inline constexpr double CLAMP_RISE_DEG = 7.5;                // TUNE: arm deg, RELATIVE, up only (8 -> 7.5)
+inline constexpr int CLAMP_RISE_DELAY_MS = 400;              // TUNE: hold still this long after the clamp
 
 // --- The D-pad manual override's speeds -------------------------------------
 // D-pad Up/Down are plain open-loop voltage straight into Lift::update(), ahead of everything else

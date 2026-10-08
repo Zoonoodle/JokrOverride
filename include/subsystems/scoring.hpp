@@ -294,6 +294,9 @@ class Scoring {
     /** Put the ladder back at the bottom. Only the rung NUMBER is state; advanceStep() takes its
      *  height from the lift itself, so this does not pin where the next press goes. */
     void resetStep();
+    /** Run the delayed clamp hop: once CLAMP_RISE_DELAY_MS has passed since an autoclamp grab outside
+     *  the intake sequence, rise CLAMP_RISE_DEG from wherever the arm is then. Called every tick. */
+    void serviceClampHop();
     double heightOf(State s) const;
 
     Lift& lift_;
@@ -317,6 +320,10 @@ class Scoring {
     // THE BOUNCE (INTAKE_POS, step (d)): which end of the -2.2 .. -0.5 band is currently commanded.
     // Flipped on a timer, not on arrival -- the band is narrower than the arrival tolerance, see
     // "THE INTAKE SEQUENCE" in config.hpp.
+    // A clamp outside the intake sequence has fired and owes the arm a CLAMP_RISE_DEG hop, once
+    // CLAMP_RISE_DELAY_MS has passed. 0 = nothing pending. Cleared by enter() and reset(), which is
+    // what makes any driver input cancel it.
+    std::uint32_t pendingHopAt_ = 0;
     bool bounceUp_ = false;
     std::uint32_t bounceFlipAt_ = 0;      // when the current half of the bounce started
     // autoStackAfterPush_ IS GONE (2026-10-07). The "push, then rise to level 1 by itself" flag was

@@ -145,10 +145,8 @@ void Scoring::handleClampEvent() {
     if (isAtIntakeHandoff()) {
         if (source != Claw::ClampSource::AUTOCLAMP) return;
         if (lift_.isGrabbing() || lift_.isScoring() || lift_.isScoreCycle()) return;  // already busy
-        // THE BOUNCE CAUGHT SOMETHING. Stop sweeping and run the automatic grab (driver, 2026-10-07):
-        // settle, push down into it, then rise to level 1 releasing the pivot on the way. Entering
-        // GRAB_SETTLE is what stops the bounce -- INTAKE_POS is the only state that commands it, so
-        // leaving the state ends it on this very tick, with no flag to clear.
+        // THE INTAKE CAUGHT SOMETHING. Run the automatic grab (driver, 2026-10-07): settle, push down
+        // into it, then rise to level 1 releasing the pivot on the way.
         //
         // No startClampPush() any more: the push down is now a real, measured move to
         // GRAB_PUSH_DEPTH_DEG in GRAB_PUSH, not a timed voltage shove, so the depth is what the
@@ -235,14 +233,12 @@ void Scoring::enter(State next) {
     switch (next) {
         case State::IDLE: resetStep(); break;  // arrived home after score() lowers to DOWN (reset() sets IDLE directly, without going through enter())
         case State::INTAKE_POS:
-            // STEP (d), THE BOUNCE. The pivot is already ENGAGED (INTAKE_DESCEND did it at 13.5) and
-            // the arm is already at -2.2; all this does is start the sweep from the bottom end.
-            // setPivot(false) is belt-and-braces for the MOVING path, which can still land here.
+            // STEP (d): just HOLD -2.2. The pivot is already ENGAGED (INTAKE_DESCEND did it at 13.5)
+            // and the arm is already here; setPivot(false) is belt-and-braces for the MOVING path,
+            // which can still land in this state.
             openClawForPickup();
             setPivot(false);
-            bounceUp_ = false;
-            bounceFlipAt_ = pros::millis();
-            command(preset::INTAKE, true);  // precise: the band is 1.7 deg wide
+            command(preset::INTAKE, true);  // precise: this is the one height that must line up
             break;
         case State::MATCHLOAD_POS:
             command(heightOf(next));
@@ -372,8 +368,7 @@ void Scoring::goToIntake() {
         return;
     }
     // Already running the sequence: a re-tap is a no-op rather than a restart, so it cannot throw the
-    // arm back up to 13.5 from the bounce. (The bounce re-commands its own height every tick, so
-    // there is nothing to "re-send" the way the old single-height handoff needed.)
+    // arm back up to 13.5 once it is already down at -2.2.
     if (state_ == State::INTAKE_POS || state_ == State::INTAKE_APPROACH ||
         state_ == State::INTAKE_DESCEND) {
         return;
@@ -534,22 +529,13 @@ void Scoring::update() {
 
     const std::uint32_t elapsed = pros::millis() - stateStart_;
     switch (state_) {
-        case State::INTAKE_POS: {
-            // STEP (d), THE BOUNCE. Sweep steadily between -2.2 and -0.5 so that a cup and a pin --
-            // which are different sizes -- each end up inside the claw sensor's range at some point
-            // in the cycle. It runs forever; the two ways out are a clamp (handleClampEvent() above
-            // enters GRAB_SETTLE, which stops this by leaving the state) and any driver button.
-            //
-            // TIME-DRIVEN, NOT ARRIVAL-DRIVEN: the band is 1.7 deg, narrower than the arrival
-            // tolerance, so waiting for "arrived" would stall at one end. Each half gets
-            // INTAKE_BOUNCE_HALF_MS.
-            if (pros::millis() - bounceFlipAt_ >= static_cast<std::uint32_t>(config::INTAKE_BOUNCE_HALF_MS)) {
-                bounceUp_ = !bounceUp_;
-                bounceFlipAt_ = pros::millis();
-            }
-            command(bounceUp_ ? config::INTAKE_BOUNCE_TOP_DEG : preset::INTAKE, true);
+        case State::INTAKE_POS:
+            // STEP (d): HOLD -2.2 and wait (the oscillation was removed 2026-10-07 -- "just keep it at
+            // -2.2"). command() only writes when the height actually changes, so this costs nothing per
+            // tick once the target is in. The two ways out are a clamp (handleClampEvent() above enters
+            // GRAB_SETTLE) and any driver button.
+            command(preset::INTAKE, true);
             break;
-        }
 
         // --- THE INTAKE SEQUENCE ----------------------------------------------------------------
         case State::INTAKE_APPROACH:

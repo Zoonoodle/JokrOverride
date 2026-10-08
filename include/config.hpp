@@ -189,29 +189,23 @@ inline constexpr double MAX = 137.7;
 // down from -2.2 to -0.5 just slightly and steadily, this is so we can intake cup and pin (they are
 // different sizes) so it'll fall into the range of one."
 //
-// FOUR STEPS, one per Scoring state (see scoring.hpp):
+// THE BOUNCE WAS REMOVED 2026-10-07 at the driver's request -- "remove the oscillation thing on the
+// intake, just keep it at -2.2". Step (d) now simply HOLDS -2.2. The quote above is kept because it is
+// why the sequence exists at all; only the oscillation went.
+//
+// THREE STEPS, one per Scoring state (see scoring.hpp):
 //   (a) INTAKE_APPROACH  pivot DISENGAGED, lift to INTAKE_PIVOT_TRIGGER_DEG (13.5)
 //   (b)                  the tick the lift ARRIVES at 13.5 -- from above OR below -- engage the pivot.
 //                        No delay: the cylinder is fast, so the same tick commands step (c).
 //   (c) INTAKE_DESCEND   lift to lift_preset::INTAKE (-2.2), as a PRECISE move so it walks in slowly
 //                        and steadily rather than running at it (see LIFT_PRECISE_TOLERANCE_DEG).
-//   (d) INTAKE_POS       the BOUNCE: alternate between INTAKE (-2.2) and INTAKE_BOUNCE_TOP_DEG (-0.5)
-//                        forever, until something clamps or the driver cancels. A cup and a pin are
-//                        different sizes, so sweeping this 1.7 deg band puts one or the other inside
-//                        the claw sensor's trigger range.
+//   (d) INTAKE_POS       HOLD at -2.2, steadily, until something clamps or the driver cancels.
 //
 // "PIVOT ENGAGED" IS Scoring::setPivot(FALSE). Careful: the code's bool means "is the pivot OUT (the
 // travel / scoring position)", which is the OPPOSITE of the driver's "engaged". Engaged = pulled IN
 // toward the intake to receive a cup = pivot BACK = setPivot(false) = pivotOut_ false, and with
 // PIVOT_OUT_IS_ADI_HIGH false that is the ADI pin HIGH. Disengaged = setPivot(true) = OUT = pin LOW.
 inline constexpr double INTAKE_PIVOT_TRIGGER_DEG = 13.5;     // TUNE: step (a)/(b) -- engage the pivot here
-inline constexpr double INTAKE_BOUNCE_TOP_DEG = -0.5;        // TUNE: step (d) -- the top of the bounce
-// The bounce is TIME-driven, not arrival-driven: the band is only 1.7 deg, which is inside
-// LIFT_PRECISE_TOLERANCE_DEG (1.0) plus sensor noise, so "has it arrived?" is not a reliable way to
-// turn it around. Each half of the cycle simply gets this long.
-//   The bounce is too twitchy / the arm buzzes: raise this.
-//   It is too slow to catch a cup going past: lower it, or widen the band with INTAKE_BOUNCE_TOP_DEG.
-inline constexpr int INTAKE_BOUNCE_HALF_MS = 350;            // TUNE: ms at each end of the bounce
 // Backstops, so a jammed arm can never leave the sequence stuck in one step forever. On a timeout the
 // step gives up and moves to the next one, which is always safe here (both are downward).
 inline constexpr int INTAKE_APPROACH_TIMEOUT_MS = 3000;      // TUNE: step (a) waiting for 13.5

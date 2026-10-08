@@ -113,11 +113,11 @@ class Scoring {
     enum class State {
         IDLE, INTAKE_POS, MATCHLOAD_POS,
         // --- THE INTAKE SEQUENCE (driver, 2026-10-07). R1 and every auton intake call enter
-        // INTAKE_APPROACH; the three states run in order and end in INTAKE_POS, which BOUNCES.
+        // INTAKE_APPROACH; the states run in order and end holding -2.2 in INTAKE_POS.
         // See "THE INTAKE SEQUENCE" in config.hpp for the numbers and the pivot polarity.
         INTAKE_APPROACH,  // (a) pivot DISENGAGED, lift to INTAKE_PIVOT_TRIGGER_DEG (13.5)
         INTAKE_DESCEND,   // (b)+(c) pivot ENGAGED on arrival at 13.5, then precise descent to -2.2
-        // ...and INTAKE_POS is (d): the steady -2.2 <-> -0.5 bounce, until a clamp or a button.
+        // ...and INTAKE_POS is (d): hold -2.2 steadily, until a clamp or a button.
 
         // --- THE INTAKE AUTOCLAMP GRAB. Entered by the clamp event itself, runs to level 1 on its
         // own, and cancelled by any driver input (they all call enter()/reset()).
@@ -229,7 +229,7 @@ class Scoring {
         // what switches the claw to AUTOCLAMP_INTAKE_RANGE_MM (70 mm) and to the intake clamp
         // reaction, and the driver asked for that range "when in intake position/mode" -- so it is
         // live from the moment R1 starts the sequence, through the descent, and all through the
-        // bounce. The approach step is included deliberately: a cup can arrive early.
+        // whole sequence. The approach step is included deliberately: a cup can arrive early.
         return state_ == State::INTAKE_POS || state_ == State::INTAKE_APPROACH ||
                state_ == State::INTAKE_DESCEND ||
                (state_ == State::MOVING && moveDest_ == State::INTAKE_POS && inHandoffZone());
@@ -317,15 +317,10 @@ class Scoring {
                                            // scoreOrMatchload()'s INTAKE_POS destination
     bool grabRise_ = false;               // GRABBING: rise to a stack level afterwards (L1), or stay
                                            // exactly where the push ended (auton::grab())
-    // THE BOUNCE (INTAKE_POS, step (d)): which end of the -2.2 .. -0.5 band is currently commanded.
-    // Flipped on a timer, not on arrival -- the band is narrower than the arrival tolerance, see
-    // "THE INTAKE SEQUENCE" in config.hpp.
     // A clamp outside the intake sequence has fired and owes the arm a CLAMP_RISE_DEG hop, once
     // CLAMP_RISE_DELAY_MS has passed. 0 = nothing pending. Cleared by enter() and reset(), which is
     // what makes any driver input cancel it.
     std::uint32_t pendingHopAt_ = 0;
-    bool bounceUp_ = false;
-    std::uint32_t bounceFlipAt_ = 0;      // when the current half of the bounce started
     // autoStackAfterPush_ IS GONE (2026-10-07). The "push, then rise to level 1 by itself" flag was
     // replaced by the real GRAB_SETTLE -> GRAB_PUSH -> GRAB_RISE states, which the clamp event enters
     // directly. Being a STATE rather than a flag is what makes "any driver input cancels it" free:

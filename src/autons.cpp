@@ -515,7 +515,6 @@ const TunePoint kTunePoints[] = {
     {"L4", config::lift_preset::STACK_LEVELS[3], false},
     {"13.5 trig", config::INTAKE_PIVOT_TRIGGER_DEG, true},  // the precise spots
     {"-2.2 intake", config::lift_preset::INTAKE, true},
-    {"-0.5 bounce", config::INTAKE_BOUNCE_TOP_DEG, true},
     {"-5 grab", config::GRAB_PUSH_DEPTH_DEG, true},
 };
 constexpr int kTunePointCount = static_cast<int>(sizeof(kTunePoints) / sizeof(kTunePoints[0]));

@@ -105,18 +105,18 @@ inline constexpr int LIFT_SENSOR_START_RETRY_MS = 250;       // TUNE
 // photos (docs/robot/photos/levels/, 2026-09-30) with the robot powered on and the arm physically
 // moved to each position by hand; see docs/robot/ROBOT.md "Lift levels" for the photo-by-photo readout.
 //
-// CAVEAT: those photos were taken on a build where Lift::zero() still reset_position()'d the sensor
-// at every boot (startup-relative), before it was changed to seed from the sensor's own persistent
-// absolute zero (see the comment in Lift::zero(), lift.cpp). If the arm wasn't sitting exactly at
-// the true physical bottom when the robot was powered on for that photo session, every one of these
-// numbers carries that same constant offset. Re-measure against the brain's LIFT line (now reading
-// off the absolute zero) if anything here looks off on the real robot.
+// CAVEAT: those photos long predate the current frame, which is defined by HOMING -- the arm drives
+// onto its hard stop and the sensor is zeroed there, so lift_preset::DOWN is 0.0 and every height is
+// measured up from the stop. Anything derived from those photos carries whatever offset the arm
+// happened to be at that session. Re-measure against the brain's LIFT line, with LIFT0 showing
+// "frame OK", if anything here looks off on the real robot.
 namespace lift_preset {
-// THE BOTTOM IS NO LONGER 0 (the driver, 2026-10-07: "The lift goes lower now too so it'll go lower
-// than 0; it's -31.9 now at the lowest position"). The arm's hard stop reads -31.9 on the brain's LIFT
-// line in the zero frame the rotation sensor is already calibrated to, and NOTHING about how or where
-// the lift is zeroed has changed -- Lift::zero() still seeds from the sensor's own persistent absolute
-// zero (see lift.cpp). What changed is only that this number is negative.
+// THE BOTTOM IS 0, BECAUSE HOMING PUTS IT THERE (the driver, 2026-10-07: "go back to how we reset our
+// position to 0 by moving lift down at the start ... so everything will be positive up"). The arm
+// drives onto its hard stop on the first enabled mode and the sensor is zeroed at that point, so DOWN
+// is 0.0 and every other height below is a positive number measured up from the stop. Earlier frames
+// in this file's history had the bottom at 0, then -31.9, then -39, then 48.5; all of those were
+// attempts to name whatever the un-homed sensor happened to read, and homing removes the question.
 //
 // EVERY "this many degrees above the bottom" THRESHOLD IS NOW WRITTEN AS `DOWN + <offset>` rather than
 // as a bare height, so there is exactly one place the bottom is stated. The ones that moved with it:
@@ -175,10 +175,9 @@ inline constexpr double FIRST_SCORE = 48.0;                  // PROVISIONAL -- R
 // arm-degree column; read as sensor degrees they would divide down to 8..27 arm deg, which is less
 // than one old stack level of total travel.)
 //
-// The old photo-measured set was 26.6 / 54.4 / 72.8 / 116.3 / 128.3. Those were taken on a build whose
-// Lift::zero() still reset the sensor at every boot, so they all carried whatever offset the arm was
-// sitting at that session -- exactly the caveat written below. These are measured against the real
-// absolute zero with homing working, which is why the top is 107 rather than 128.
+// The old photo-measured set was 26.6 / 54.4 / 72.8 / 116.3 / 128.3, taken before the frame was
+// defined by homing, so they carried whatever offset the arm was sitting at that session. The values
+// above are driver-measured in the current homed frame, where the hard stop is 0.
 inline constexpr int STACK_LEVEL_COUNT = 5;
 inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
      67.7,  // TUNE: level 1 (116.2 in the old frame)
@@ -706,9 +705,9 @@ inline constexpr float LIFT_SEAT_MV = -800.0f;               // LEGACY: supersed
 // autoclamp still comes back on at the seat, the matchload grab still fires and the clamp hop can
 // still lift off the bottom. Homing is unaffected: it only writes the zero on the tick it stops, and
 // after HOME DONE it never re-zeroes, so a continuous push afterwards cannot move the frame.
-// Written as a literal, not as LIFT_HOME_MV, only because LIFT_HOME_MV is declared further down this
-// file. The static_assert next to it keeps the two locked together, so changing one without the other
-// fails the build rather than silently drifting apart.
+// INDEPENDENT OF LIFT_HOME_MV, on purpose. It STARTS equal to it (-3500), which is "the same speed it
+// does when it resets lift position at the first", but they are two separate knobs: lower THIS one on
+// its own if SEAT(hot) shows up or the motors run warm, without slowing homing back down.
 inline constexpr float LIFT_DOWN_PUSH_MV = -3500.0f;         // TUNE: hold-down drive at the bottom
 // HEAT. This is a genuine stall, so the motors dissipate V^2/R with no back-EMF: at 3.5 V into a V5
 // motor's ~4.8 ohm that is ~0.73 A and ~2.6 W each, ~5 W across the pair, versus ~0.14 W at the old
@@ -1092,12 +1091,13 @@ inline constexpr int LIFT_TRACE_TAIL_MS = 500;
 // ---------------------------------------------------------------------------
 // Lift homing — find the hard stop and zero there, once per program run
 // ---------------------------------------------------------------------------
-// Why: the arm often powers on sitting well above the bottom. Lift::zero() can only seed the position
-// counter from the rotation sensor's folded absolute angle, which is unambiguous only within +-45 arm
-// deg (+-180 sensor deg) of the true bottom -- further up than that and every preset is off by a whole
-// sensor revolution. Homing removes the guesswork: drive the arm down at a steady, moderate voltage
-// until the sensor stops changing, confirm the sensor's absolute angle really is near its calibrated
-// zero, and set_position(0) there.
+// Why: the sensor's own counter cannot tell you where the arm is at startup. get_position() is a
+// retained multi-turn value that only re-folds to its single-turn angle on a real power cycle, and one
+// turn is just 90 arm degrees at LIFT_ROTATION_RATIO 4 against 179.5 degrees of travel -- so no
+// software guess works for every boot. Homing removes the question mechanically: drive the arm down at
+// a steady voltage until the sensor stops changing, then set_position(0) there. There is no
+// absolute-angle plausibility gate; the hard stop is the ground truth, and the stall detector is what
+// separates "reached it" (HOME DONE, zeroes) from "never stopped" (HOME FAIL, zeroes nothing).
 //
 // This is the ONE deliberate exception to "nothing moves at startup" (CLAUDE.md safety rule 1), and it
 // is kept narrow: homing never runs in initialize(). It runs on the first ENABLED mode of a program
@@ -1106,30 +1106,28 @@ inline constexpr int LIFT_TRACE_TAIL_MS = 500;
 // 10 ms task is still the only thing that writes the lift motors, nothing blocks on it, and holding
 // D-pad Up/Down cancels it instantly (safety rule 3 is untouched). Lift targets asked for during
 // homing are queued and run the moment it finishes.
-// IS HOMING RUN AT ALL? OFF since 2026-10-03, by the driver's decision: "the thing that calibrates
-// the lift and moves it down at the bottom, needs to stop rn for auton, we are correctly at bottom
-// each time for auton now. we no longer need that, so we can immeditatly start liftng at start of
-// auton." With the arm genuinely at its hard stop at setup, Lift::zero()'s seed from the rotation
-// sensor's own calibrated absolute zero is already correct, and homing is just a second of the arm
-// driving down before the route can start.
-// WITH THIS FALSE, Lift::requestHome() does nothing but record Home::SKIPPED (the brain's LIFT line
-// says HOME SKIPPED), so NEITHER autonomous() NOR opcontrol() moves the arm on enable -- important,
-// because turning it off only in auton would have made opcontrol's own call live, and the arm would
-// have driven itself down at the start of driver control, possibly holding a pin.
-// IT MUST NOW STAY FALSE (2026-10-07). Homing's entire purpose was to drive the arm onto its hard
-// stop and set_position() the sensor THERE, and that write is gone: the driver's instruction is that
-// nothing in this program resets the lift's position, because the sensor is absolute. updateHoming()
-// can now only CHECK whether the arm looks like it is at the bottom and report HOME DONE / HOME FAIL;
-// it changes no reading. Setting this true would therefore drive the arm into its stop at the start of
-// the first enabled mode for no benefit at all. The machinery is kept, not deleted, only because the
-// Home state, auton::waitHome()/liftHomed() and the brain's LIFT line are threaded through it.
-// THE PROBLEM HOMING EXISTED FOR IS NOW SOLVED DIFFERENTLY, and only partly -- see
-// Lift::getSensorPosition() in lift.cpp. The old ±45-arm-degree seed window is gone with the seed, so
-// a lift left up now reads its true height across a program restart. A BRAIN POWER CYCLE still
-// re-seeds the sensor's counter from its single-turn angle, which covers only 90 arm degrees at
-// LIFT_ROTATION_RATIO 4, so readings outside one turn come back a whole revolution out. The real fix
-// for that is mechanical: move the sensor onto the 48T output axle (LIFT_ROTATION_RATIO 1.0), where
-// the arm's whole 143.8-degree travel fits inside a single sensor turn.
+// IS HOMING RUN AT ALL? YES, since 2026-10-07 -- the driver: "go back to how we reset our position to
+// 0 by moving lift down at the start." It is how the frame is defined: updateHoming() drives the arm
+// down onto its hard stop and set_position(0)s the sensor THERE, which is the one and only sensor
+// write in the program. lift_preset::DOWN is 0.0 and every other height is a positive number measured
+// up from that stop, so the numbers mean the same thing on every boot however the brain was started.
+//
+// It replaced a software startup offset that could not work: get_position() is a RETAINED multi-turn
+// counter that only re-folds to the single-turn angle on a real sensor power cycle, so cold and warm
+// starts disagreed and no fixed window was right for both. See "THE STARTUP UNWRAP IS GONE" above.
+//
+// IT RUNS ONCE PER PROGRAM RUN, non-blocking, on the first ENABLED mode: autonomous() asks for it, and
+// opcontrol() asks again for the driver-only case. requestHome() only acts from Home::IDLE, so a real
+// match homes in auton and the opcontrol call is a no-op. Homing runs as a mode inside Lift::update(),
+// so the 10 ms task is still the only thing writing the lift motors, nothing blocks on it, drive moves
+// carry on underneath it, and holding D-pad Up/Down cancels it. Lift targets asked for during homing
+// are queued and start the moment it ends.
+//
+// IF IT FAILS, THE FRAME IS WRONG AND NOTHING ELSE CATCHES IT. A home that never reaches the stop
+// times out, writes no zero, and leaves the lift in the raw sensor frame where every preset lands low.
+// The brain's LIFT0 line is the check: "frame OK" means the zero was written, "frame RAW" means it was
+// not. See LIFT_HOME_TIMEOUT_MS below -- that is the constant that decides whether a home from high up
+// finishes at all.
 inline constexpr bool LIFT_HOME_ON_ENABLE = true;            // BACK ON, the driver's call 2026-10-07
 // 1.75x FASTER (the driver, 2026-10-07: "during that recalibration, lift needs to move at 1.75x the
 // speed down it currently is"): -2000 * 1.75 = -3500. Capped by LIFT_MAX_MV (12000), which this is
@@ -1137,11 +1135,7 @@ inline constexpr bool LIFT_HOME_ON_ENABLE = true;            // BACK ON, the dri
 // what decides whether a home from high up finishes at all -- a timed-out home writes NO zero and
 // leaves every height wrong, so speed here buys reliability, not just time.
 inline constexpr float LIFT_HOME_MV = -3500.0f;              // TUNE: downward drive while homing (was -2000)
-// "The same speed it does when it resets lift position at the first" -- the bottom's hold-down push
-// and homing's descent are deliberately the SAME voltage. Split them only on purpose.
-static_assert(LIFT_DOWN_PUSH_MV == LIFT_HOME_MV,
-              "LIFT_DOWN_PUSH_MV and LIFT_HOME_MV are meant to match (see FORCING DOWN AT THE BOTTOM); "
-              "change both, or delete this assert if you really want them different");
+
 // Don't start looking for "stopped" until the arm has been driving this long, so a sticky start isn't
 // mistaken for the bottom.
 inline constexpr int LIFT_HOME_MIN_DRIVE_MS = 250;           // TUNE

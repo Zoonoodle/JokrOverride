@@ -205,7 +205,9 @@ void Lift::updateHoming(const std::uint32_t now) {
     const double rawSensorDeg = rawCentideg / 100.0;  // SENSOR degrees, the unit LIFT_HOME_STILL_DEG is in
     const std::uint32_t elapsed = now - homeStart_;
 
-    // Timeout: stop pushing, keep zero()'s seed, say so on the brain.
+    // Timeout: never reached the stop. Stop pushing and report HOME FAIL -- NO zero is written, so the
+    // lift stays in the raw sensor frame and every preset will land low. The brain's LIFT0 line says
+    // "frame RAW" when this happens.
     if (elapsed >= static_cast<std::uint32_t>(config::LIFT_HOME_TIMEOUT_MS)) {
         homeStopAngleDeg_ = foldCentideg(rotation_->get_angle()) / 100.0;
         home_ = Home::FAILED;

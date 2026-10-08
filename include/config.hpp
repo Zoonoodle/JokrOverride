@@ -682,7 +682,41 @@ inline constexpr int LIFT_FRONT_TOGGLE_MAX_WAIT_MS = 1500;   // TUNE: then go do
 //   Motors warm up while parked at the bottom: lower LIFT_SEAT_MV's magnitude (e.g. -1000), or
 //     LIFT_FINAL_FORCE_MS if the motors are warming during FINAL itself (unlikely at 1.5 s).
 //   Declares true SEAT while still visibly short: lower LIFT_SEAT_ZERO_DEG.
-inline constexpr float LIFT_SEAT_MV = -800.0f;               // TUNE: constant downward seating voltage, red retune 2026-10-07 (was -1500)
+inline constexpr float LIFT_SEAT_MV = -800.0f;               // LEGACY: superseded by LIFT_DOWN_PUSH_MV below
+// ===========================================================================
+// FORCING DOWN AT THE BOTTOM — the arm always tries to go below 0
+// ===========================================================================
+// The driver, 2026-10-07: "for matchlaod height, and bottom height when we are just down in code, it
+// needs to be forcing itself down, below 0 even trying to, and maintaining that, the same speed it
+// does when it resets lift position at the first."
+//
+// So whenever the commanded target is lift_preset::DOWN (and MATCHLOAD is DOWN, so matchload is the
+// same thing), the arm does NOT settle into a position hold around 0 and does NOT ease off once it
+// gets there: Phase::SEAT drives a constant LIFT_DOWN_PUSH_MV into the hard stop for as long as the
+// target stays DOWN. "The same speed it resets at" is literal -- this defaults to LIFT_HOME_MV, the
+// voltage homing drives down at, so the two stay equal unless someone deliberately splits them.
+//
+// WHAT LEAVES IT: any new target at all. A preset, the D-pad, R1's trip to the intake, the 7.5 deg
+// clamp hop, the start of the intake sequence -- every one of those is a setTarget(), and SEAT is not
+// one of the "flying" phases setTarget() merges into, so they all start a fresh move and the push
+// stops on that tick. Nothing special was needed to make that work.
+//
+// WHAT STILL WORKS, because this stays inside the existing SEAT phase rather than being a new one:
+// isSeated() and isSettled() are both true in SEAT, so auton::waitLiftSeated() still returns, the
+// autoclamp still comes back on at the seat, the matchload grab still fires and the clamp hop can
+// still lift off the bottom. Homing is unaffected: it only writes the zero on the tick it stops, and
+// after HOME DONE it never re-zeroes, so a continuous push afterwards cannot move the frame.
+// Written as a literal, not as LIFT_HOME_MV, only because LIFT_HOME_MV is declared further down this
+// file. The static_assert next to it keeps the two locked together, so changing one without the other
+// fails the build rather than silently drifting apart.
+inline constexpr float LIFT_DOWN_PUSH_MV = -3500.0f;         // TUNE: hold-down drive at the bottom
+// HEAT. This is a genuine stall, so the motors dissipate V^2/R with no back-EMF: at 3.5 V into a V5
+// motor's ~4.8 ohm that is ~0.73 A and ~2.6 W each, ~5 W across the pair, versus ~0.14 W at the old
+// -800 mV. Low in absolute terms but ~19x more, and it now runs for the whole time the arm is parked
+// down rather than stopping after LIFT_REST_AFTER_MS. The EXISTING seat guard still covers it: SEAT
+// checks the motor temperature twice a second and brakes above LIFT_SEAT_TEMP_LIMIT_C, so this cannot
+// cook unattended. If the motors still get warm over a match, lower THIS constant -- holding against
+// a hard stop very likely does not need the full homing voltage.
 // Where DESCEND hands over to FINAL. Also doubles as the "close enough to re-check" threshold for
 // un-seating (see LIFT_SEAT_UNSEAT_DEG below) -- was a separate constant (LIFT_SEAT_DETECT_DEG, 6 deg)
 // before the 2026-10-02 retune moved the whole handover down to 3 so the fast bands run longer.
@@ -751,7 +785,13 @@ inline constexpr double LIFT_SEAT_TEMP_LIMIT_C = 50.0;       // safety net, not 
 //     behaviour. (Then watch the TEMP line instead: -1500 mV is about a watt per motor.)
 //   The motors still feel stiff at the bottom: check the brain says REST, not SEAT -- SEAT means the
 //     stillness test never passed, so raise LIFT_REST_STILL_DEG_PER_S.
-inline constexpr int LIFT_REST_AFTER_MS = 300;               // TUNE: still-at-the-stop time before coasting; 0 = never
+// 0 = NEVER COAST AT THE BOTTOM (driver, 2026-10-07). REST was the opposite of what is wanted now:
+// it let go of a seated arm and coasted the motors, where the arm must instead keep forcing itself
+// down. Setting this to 0 is the switch the phase was already written around -- SEAT simply never
+// hands over, and keeps pushing LIFT_DOWN_PUSH_MV for as long as the target stays DOWN.
+// (It also stops the IDLE-at-the-bottom branch coasting when NOTHING is commanded; that case
+// brake-holds instead, which is correct -- with no target there is nothing asking for a push.)
+inline constexpr int LIFT_REST_AFTER_MS = 0;                 // TUNE: 0 = never coast (was 300)
 inline constexpr double LIFT_REST_STILL_DEG_PER_S = 3.0;     // TUNE: what counts as "not moving" for the above
 // DOWN-relative (2026-10-07): 4 deg above the hard stop = -27.9 now.
 inline constexpr double LIFT_REST_WAKE_DEG = lift_preset::DOWN + 4.0;  // TUNE: rising past this while resting = re-seat it
@@ -1097,6 +1137,11 @@ inline constexpr bool LIFT_HOME_ON_ENABLE = true;            // BACK ON, the dri
 // what decides whether a home from high up finishes at all -- a timed-out home writes NO zero and
 // leaves every height wrong, so speed here buys reliability, not just time.
 inline constexpr float LIFT_HOME_MV = -3500.0f;              // TUNE: downward drive while homing (was -2000)
+// "The same speed it does when it resets lift position at the first" -- the bottom's hold-down push
+// and homing's descent are deliberately the SAME voltage. Split them only on purpose.
+static_assert(LIFT_DOWN_PUSH_MV == LIFT_HOME_MV,
+              "LIFT_DOWN_PUSH_MV and LIFT_HOME_MV are meant to match (see FORCING DOWN AT THE BOTTOM); "
+              "change both, or delete this assert if you really want them different");
 // Don't start looking for "stopped" until the arm has been driving this long, so a sticky start isn't
 // mistaken for the bottom.
 inline constexpr int LIFT_HOME_MIN_DRIVE_MS = 250;           // TUNE

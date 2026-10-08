@@ -1317,9 +1317,13 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
 
     // --- output ---
     if (phase_ == Phase::SEAT) {
-        // Constant downward pressure, forever: the arm stays forced onto the stop and cannot bounce
-        // back up. Temperature is the one thing that can stop it (checked every 50th tick, i.e. twice
-        // a second); see the heat note on LIFT_SEAT_MV in config.hpp.
+        // CONSTANT DOWNWARD PRESSURE, FOREVER, AND AT THE HOMING VOLTAGE. The arm is not holding a
+        // position around 0 -- it is actively trying to go below it, which is what the driver asked
+        // for at the bottom and at matchload (they are the same height). It never eases off: with
+        // LIFT_REST_AFTER_MS at 0 this phase no longer hands over to REST's coast, so the push lasts
+        // as long as the target stays DOWN. Any new target leaves SEAT and ends it on that tick.
+        // Temperature is the one thing that can stop it (checked every 50th tick, i.e. twice a
+        // second); see the heat note on LIFT_DOWN_PUSH_MV in config.hpp.
         if (++seatTempTick_ >= 50) {
             seatTempTick_ = 0;
             seatHot_ = getTemperature() >= config::LIFT_SEAT_TEMP_LIMIT_C;
@@ -1328,8 +1332,8 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
             motors_.brake();
             lastOutput_ = 0.0;
         } else {
-            motors_.move_voltage(static_cast<int>(config::LIFT_SEAT_MV));
-            lastOutput_ = config::LIFT_SEAT_MV;
+            motors_.move_voltage(static_cast<int>(config::LIFT_DOWN_PUSH_MV));
+            lastOutput_ = config::LIFT_DOWN_PUSH_MV;
         }
         lastVRef_ = 0.0;
         trace(now, 'S', position, lastOutput_, false);

@@ -419,18 +419,51 @@ double readLeftAveraged(int ms);
  * IT CAN REFUSE. If nothing valid is read, or the correction would be bigger than
  * config::START_ALIGN_MAX_IN, the nominal (x, y, theta) is used unchanged and the brain says
  * `!! START align skipped`. A sensor that is looking at a goal instead of the wall must never be able
- * to teleport the pose. Returns true if the correction was applied.
+ * to teleport the pose. Returns true if EITHER axis's correction was applied.
  *
  * It also handles the one ordering trap: chassis.calibrate() RESETS the pose, so this waits for
  * calibration (bounded) and re-applies the pose once more if calibration lands late.
  *
  *     auton::startPose(0, 0, 0, MATCH_START_LEFT_MM);
+ *
+ * THE Y AXIS, OPTIONALLY, FROM THE BACK SENSOR. Pass a BackY and the rear sensor
+ * (config::BACK_DISTANCE_PORT) sets the starting Y the same way the left sensor sets X:
+ *
+ *     dy_inches = (reading_mm - backY.expectedMm) / 25.4
+ *
+ * so a reading FURTHER than expected gives +y and CLOSER gives -y. It is applied straight to Y with
+ * no heading rotation, because this correction is only meaningful at a known heading and every route
+ * using it starts at theta 0. The two axes are INDEPENDENT: X alignment is driven by expectedLeftMm,
+ * Y by backY.expectedMm, and either can be off (0) while the other is on.
+ *
+ * BackY REFUSES OUTSIDE ITS WINDOW. A reading below minMm or above maxMm, or one the sensor itself
+ * rejects, is not used at all and Y stays nominal -- it is a gate, not a clamp, so a sensor aimed at
+ * a robot instead of the wall cannot drag the pose part-way. startBackApplied() says which happened.
+ *
+ *     auton::startPose(0, 0, 0, 0,
+ *                      {.expectedMm = config::MATCHLOAD_BACK_EXPECTED_MM,
+ *                       .minMm = config::MATCHLOAD_BACK_MIN_MM,
+ *                       .maxMm = config::MATCHLOAD_BACK_MAX_MM});
  */
-bool startPose(double x, double y, double thetaDeg, double expectedLeftMm);
+struct BackY {
+    double expectedMm = 0.0;  // <= 0 disables the Y correction entirely (the sensor is not even read)
+    double minMm = 0.0;       // readings below this are ignored
+    double maxMm = 0.0;       // readings above this are ignored
+};
+bool startPose(double x, double y, double thetaDeg, double expectedLeftMm, BackY backY = {});
 /** The shift startPose() applied, inches (0 if it was skipped or never ran). */
 double startShiftIn();
 /** The averaged left reading startPose() used, mm (negative if it had none). */
 double startLeftMm();
+/** The Y shift startPose() applied from the back sensor, inches (0 if skipped or never ran). */
+double startShiftYIn();
+/** The averaged back reading startPose() took, mm (negative if it had none or never asked). */
+double startBackMm();
+/** True if the last startPose() applied a back-sensor Y correction. */
+bool startBackApplied();
+/** True if the last startPose() was ASKED for a back-sensor Y correction, whether or not it used the
+ *  reading. Lets the brain distinguish "ignored a reading" from "never wanted one". */
+bool startBackRequested();
 /** True if the last startPose() applied its correction; false if it was skipped or hasn't run. */
 bool startAligned();
 /** True once startPose() has run at all this program run (so the brain can show its result). */
@@ -442,6 +475,13 @@ void startAlignSample();
 /** The settled pre-match average, mm, or a negative number if the history is empty, unsettled or
  *  stale. The brain's START line shows this live while disabled. */
 double startAlignPreview();
+/** One VALIDATED instantaneous back reading, mm, or negative. For the brain's live pre-match preview
+ *  of the back-sensor Y calibration -- there is no rolling history for this sensor. Distinct from
+ *  backDistanceMm() below, which is moveB's raw unvalidated read. */
+double startBackPreview();
+/** Average the BACK sensor for ms and return mm, or negative if nothing valid came back. The same
+ *  validity rules as the left sensor (see startPose()). Blocks for ms. */
+double readBackAveraged(int ms);
 
 // ---------------------------------------------------------------------------
 // moveB — drive until the REAR distance sensor reads a target distance

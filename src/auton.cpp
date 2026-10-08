@@ -534,6 +534,11 @@ std::atomic<bool> poseRan{false};
 std::atomic<bool> poseAligned{false};
 std::atomic<int> poseShiftThou{0};  // thousandths of an inch, so it fits an atomic int
 std::atomic<int> poseLeftMm{-1};
+// ...and the same three for the back sensor's Y correction.
+std::atomic<bool> poseBackApplied{false};
+std::atomic<bool> poseBackRequested{false};
+std::atomic<int> poseShiftYThou{0};
+std::atomic<int> poseBackMm{-1};
 
 /** The settled average of the history, or -1. "Settled" = enough samples, recent enough, and tight
  *  enough that nothing was moving while they were taken (a hand still placing the robot, or someone
@@ -577,6 +582,25 @@ double readLeftAveraged(int ms) {
     return n > 0 ? sum / n : -1.0;
 }
 
+double startBackPreview() { return validMm(robot::backDistance); }
+
+double readBackAveraged(int ms) {
+    // Identical to readLeftAveraged() but on the rear sensor. There is no disabled-mode rolling
+    // history for this one, so this fresh average is the only source and it always costs its ms.
+    const std::uint32_t start = pros::millis();
+    double sum = 0.0;
+    int n = 0;
+    do {
+        const double mm = validMm(robot::backDistance);
+        if (mm > 0.0) {
+            sum += mm;
+            ++n;
+        }
+        pros::delay(10);
+    } while (ms > 0 && pros::millis() - start < static_cast<std::uint32_t>(ms));
+    return n > 0 ? sum / n : -1.0;
+}
+
 void startAlignSample() {
     const double mm = validMm(robot::leftDistance);
     if (mm <= 0.0) return;
@@ -602,8 +626,12 @@ double startShiftIn() { return poseShiftThou.load() / 1000.0; }
 double startLeftMm() { return poseLeftMm.load(); }
 bool startAligned() { return poseAligned.load(); }
 bool startPoseRan() { return poseRan.load(); }
+double startShiftYIn() { return poseShiftYThou.load() / 1000.0; }
+double startBackMm() { return poseBackMm.load(); }
+bool startBackApplied() { return poseBackApplied.load(); }
+bool startBackRequested() { return poseBackRequested.load(); }
 
-bool startPose(double x, double y, double thetaDeg, double expectedLeftMm) {
+bool startPose(double x, double y, double thetaDeg, double expectedLeftMm, BackY backY) {
     // 1. CALIBRATION FIRST. chassis.calibrate() resets the pose, so applying one before it finishes
     //    would simply be erased. autonomous() already waits (bounded) before the route runs; this is
     //    the backstop for the case where that wait timed out.
@@ -652,19 +680,42 @@ bool startPose(double x, double y, double thetaDeg, double expectedLeftMm) {
         }
     }
 
+    // 3b. THE Y CORRECTION, from the back sensor, and its own gate. Independent of the X alignment
+    //     above: this route may use one, both or neither. The window is a HARD GATE -- a reading
+    //     outside it is dropped entirely and Y stays nominal, rather than being clamped to the edge,
+    //     because a sensor aimed at a robot instead of the wall must not drag the pose part-way.
+    //     Reading FURTHER than expected = +y, CLOSER = -y, equal = 0. The driver's own convention.
+    double backMeasured = -1.0;
+    double dyIn = 0.0;
+    bool backApplied = false;
+    if (backY.expectedMm > 0.0) {
+        backMeasured = readBackAveraged(config::MATCHLOAD_BACK_SAMPLE_MS);
+        if (backMeasured > 0.0 && backMeasured >= backY.minMm && backMeasured <= backY.maxMm) {
+            dyIn = (backMeasured - backY.expectedMm) / 25.4;
+            backApplied = true;
+        }
+    }
+
     // 4. Apply it along the ROBOT'S RIGHT AXIS. In LemLib's frame theta is clockwise from +y, so the
     //    robot's right unit vector is (cos theta, -sin theta); at theta = 0 this is exactly x + dx,
     //    which is the driver's own description. Writing it this way keeps it physically right if a
     //    route ever starts facing another way.
+    //    The back sensor's dy goes straight onto Y with NO rotation: it is only meaningful at a known
+    //    heading, and every route using it starts at theta 0, where the field Y axis and the robot's
+    //    own fore-aft axis are the same line.
     const double rad = thetaDeg * M_PI / 180.0;
     const double px = x + dxIn * std::cos(rad);
-    const double py = y - dxIn * std::sin(rad);
+    const double py = y - dxIn * std::sin(rad) + dyIn;
     robot::chassis.setPose(px, py, thetaDeg);
 
     poseRan.store(true);
     poseAligned.store(applied);
     poseShiftThou.store(static_cast<int>(dxIn * 1000.0));
     poseLeftMm.store(measured > 0.0 ? static_cast<int>(measured) : -1);
+    poseBackRequested.store(backY.expectedMm > 0.0);
+    poseBackApplied.store(backApplied);
+    poseShiftYThou.store(static_cast<int>(dyIn * 1000.0));
+    poseBackMm.store(backMeasured > 0.0 ? static_cast<int>(backMeasured) : -1);
 
     // 5. If calibration had NOT finished when we got here, it will reset the pose when it does. Put it
     //    back, once, from a short-lived task so the route is not held up.
@@ -684,7 +735,9 @@ bool startPose(double x, double y, double thetaDeg, double expectedLeftMm) {
             },
             TASK_PRIORITY_DEFAULT, TASK_STACK_DEPTH_DEFAULT, "start-pose-reapply");
     }
-    return applied;
+    // True if EITHER axis was corrected. px/py captured by the re-apply task above already carry both,
+    // so a late calibration cannot wipe the Y correction either.
+    return applied || backApplied;
 }
 
 // ---------------------------------------------------------------------------

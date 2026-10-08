@@ -43,5 +43,8 @@ const char* selectedName();
 /** The SELECTED route's expected left-wall reading, mm (0 if that route does not align). The brain
  *  shows the live pre-match alignment against this while the robot sits disabled. */
 double expectedLeftMm();
+/** The SELECTED route's expected BACK reading, mm, or 0 if it does not use back-sensor Y calibration.
+ *  The brain's START line uses this for the live pre-match preview. */
+double expectedBackMm();
 
 }  // namespace autons

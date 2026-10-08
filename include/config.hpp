@@ -1220,6 +1220,37 @@ inline constexpr int START_ALIGN_CALIBRATE_WAIT_MS = 2500;   // TUNE
 inline constexpr int START_ALIGN_REAPPLY_WINDOW_MS = 4000;   // how long that one-shot re-apply waits
 
 // ---------------------------------------------------------------------------
+// BACK-SENSOR Y CALIBRATION — the other axis, for MATCHLOAD_FINISH
+// ---------------------------------------------------------------------------
+// The driver, 2026-10-07: "when we start our matchload finish auton, backdistance expects to see
+// 1520. If the value is less than 1250 or greater than 1700, don't use the value and skip using
+// backdistance for pose calibration. This value should dictate the y value only: if it's greater than
+// 1520, y start is increased; if it's less, the starting y offset is decreased below 0 (negative)."
+//
+// THIS IS THE Y AXIS ONLY, and it is a SEPARATE mechanism from the left-sensor X alignment above --
+// a route may use either, both or neither. The back sensor (config::BACK_DISTANCE_PORT, 14, the same
+// one auton::moveB drives on) measures how far the robot is from whatever is behind it, so with the
+// heading fixed at 0 the difference between the reading and the expected reading IS the Y offset. No
+// sensor-offset geometry and no heading rotation are involved.
+//
+//   y_offset_inches = (reading_mm - MATCHLOAD_BACK_EXPECTED_MM) / 25.4
+//
+// so reading > expected -> +y, reading < expected -> -y, reading == expected -> 0, exactly as asked.
+//
+// THE WINDOW IS A HARD GATE, not a clamp: a reading outside MIN..MAX is not trusted at all and the
+// route starts at its nominal Y (offset 0) rather than a clamped guess. A reading the sensor itself
+// rejects (0, 9999, PROS_ERR, under START_ALIGN_MIN_CONFIDENCE, or past START_ALIGN_MAX_MM) lands in
+// the same place. The brain's START line says which happened, so it can be checked before a match.
+//   Legitimate setups keep getting ignored: widen MIN/MAX, but check the DIST line's BACK figure
+//     first -- if it disagrees with a tape measure, the problem is the sensor or what it is aimed at.
+inline constexpr double MATCHLOAD_BACK_EXPECTED_MM = 1520.0;  // TUNE: driver-measured 2026-10-07
+inline constexpr double MATCHLOAD_BACK_MIN_MM = 1250.0;       // TUNE: below this, ignore the reading
+inline constexpr double MATCHLOAD_BACK_MAX_MM = 1700.0;       // TUNE: above this, ignore the reading
+// The back sensor has no disabled-mode rolling history (that machinery is the left sensor's), so this
+// is always a fresh in-auton average and it always costs this much of the autonomous period.
+inline constexpr int MATCHLOAD_BACK_SAMPLE_MS = 300;          // TUNE
+
+// ---------------------------------------------------------------------------
 // Intake (ONE motor)
 // ---------------------------------------------------------------------------
 // Do NOT try to fix the roller direction by flipping this sign -- it was tried and the rollers

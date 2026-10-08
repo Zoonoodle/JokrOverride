@@ -121,9 +121,25 @@ void draw() {
     // team can see how the robot is placed BEFORE auton runs. Once auton has run startPose() it shows
     // what was actually applied, or says it was skipped (a reading it could not trust -- the nominal
     // pose was used instead). Blank when neither applies.
+    // A route may align X off the left sensor, Y off the back sensor, both or neither. The BACK-Y
+    // case gets the line to itself when it is the one in use, because that is the number the drive
+    // team has to sanity-check against where the robot is actually standing.
     {
         const double expected = autons::expectedLeftMm();
-        if (auton::startPoseRan()) {
+        const double expectedBack = autons::expectedBackMm();
+        if (auton::startPoseRan() && auton::startBackRequested()) {
+            // Back-Y was asked for: report what it did with the reading.
+            const double bmm = auton::startBackMm();
+            if (auton::startBackApplied()) {
+                pros::screen::print(pros::E_TEXT_MEDIUM, 4, "START BACK %.0f -> y %+.2f in          ",
+                                    bmm, auton::startShiftYIn());
+            } else {
+                char back[12];
+                formatMm(back, sizeof(back), static_cast<int>(bmm));
+                pros::screen::print(pros::E_TEXT_MEDIUM, 4, "!! START BACK %s ignored, y 0          ",
+                                    back);
+            }
+        } else if (auton::startPoseRan()) {
             const double mm = auton::startLeftMm();
             char left[12];
             formatMm(left, sizeof(left), static_cast<int>(mm));
@@ -132,6 +148,24 @@ void draw() {
                                     auton::startShiftIn(), left, expected);
             } else {
                 pros::screen::print(pros::E_TEXT_MEDIUM, 4, "!! START align skipped (L %s)          ", left);
+            }
+        } else if (expectedBack > 0.0) {
+            // LIVE pre-match preview for a back-Y route: what Y this placement would start at, and
+            // whether the reading is even inside the window that would let it be used.
+            const double liveBack = auton::startBackPreview();
+            if (liveBack > 0.0) {
+                const bool usable = liveBack >= config::MATCHLOAD_BACK_MIN_MM &&
+                                    liveBack <= config::MATCHLOAD_BACK_MAX_MM;
+                if (usable) {
+                    pros::screen::print(pros::E_TEXT_MEDIUM, 4, "START BACK %.0f/%.0f  y %+.2f in     ",
+                                        liveBack, expectedBack, (liveBack - expectedBack) / 25.4);
+                } else {
+                    pros::screen::print(pros::E_TEXT_MEDIUM, 4, "!! BACK %.0f out of %.0f-%.0f        ",
+                                        liveBack, config::MATCHLOAD_BACK_MIN_MM,
+                                        config::MATCHLOAD_BACK_MAX_MM);
+                }
+            } else {
+                pros::screen::print(pros::E_TEXT_MEDIUM, 4, "!! BACK no reading, y will be 0        ");
             }
         } else {
             const double live = auton::startAlignPreview();

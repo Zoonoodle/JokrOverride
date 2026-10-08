@@ -410,17 +410,24 @@ void autoclampTest() {
 // the jaws open so the autoclamp takes a pin -> let the macro carry it to level 1 by itself -> drive
 // to the stack -> score -> back clear } -> finish with the arm down and seated.
 void matchloadFinishAuto() {
-    // Pose exactly (0, 0, 0), with NO distance-sensor correction: MATCHLOAD_START_LEFT_MM is 0, which
-    // makes startPose() skip the sensor entirely rather than sample it and discard the result. Every
-    // coordinate below is measured from this origin.
+    // Pose (0, 0, 0), with the LEFT sensor off -- MATCHLOAD_START_LEFT_MM is 0, so startPose() does
+    // not even sample it -- but with the BACK sensor setting the starting Y (the driver, 2026-10-07).
+    // The back sensor expects 1520 mm; the Y offset is (reading - 1520) / 25.4 inches, so further back
+    // than expected starts at +y and closer starts at -y. A reading outside 1250..1700, or one the
+    // sensor itself rejects, is ignored entirely and Y stays 0. X and theta are always exactly 0.
+    // The brain's START line shows the reading and whether it was used -- check it before a match.
     auton::startPose(MATCHLOAD_START_X, MATCHLOAD_START_Y, MATCHLOAD_START_THETA,
-                     MATCHLOAD_START_LEFT_MM);
-
+                     MATCHLOAD_START_LEFT_MM,
+                     {.expectedMm = config::MATCHLOAD_BACK_EXPECTED_MM,
+                      .minMm = config::MATCHLOAD_BACK_MIN_MM,
+                      .maxMm = config::MATCHLOAD_BACK_MAX_MM});
+auton::intakeFor(1500, auton::Spin::IN);   // 1.5 s inward
+auton::clawGrip();
     // --- The preload -------------------------------------------------------
-    auton::clawGrip();
+    
 
-    chassis.swingToHeading(9.5, lemlib::DriveSide::RIGHT, 800);
-    chassis.moveToPoint(2.8, -16.5, 1000, {.forwards = false, .maxSpeed = 90});
+    chassis.swingToHeading(-42, lemlib::DriveSide::RIGHT, 800);
+    chassis.moveToPoint(9, -13, 1000, {.forwards = false, .maxSpeed = 90});
      auton::liftPushUpFor(350);
     chassis.waitUntilDone();
  auton::liftPushFor(400);
@@ -492,6 +499,14 @@ double expectedLeftMm() {
         case Route::SKILLS: return SKILLS_START_LEFT_MM;
         case Route::MATCHLOAD_FINISH: return MATCHLOAD_START_LEFT_MM;
         default: return 0.0;  // the lift/pivot/odom test routes do not align
+    }
+}
+
+double expectedBackMm() {
+    switch (SELECTED) {
+        // MATCHLOAD_FINISH is the only route that calibrates Y off the back sensor.
+        case Route::MATCHLOAD_FINISH: return config::MATCHLOAD_BACK_EXPECTED_MM;
+        default: return 0.0;
     }
 }
 

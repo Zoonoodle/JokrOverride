@@ -1091,21 +1091,35 @@ inline constexpr int LIFT_TRACE_TAIL_MS = 500;
 // for that is mechanical: move the sensor onto the 48T output axle (LIFT_ROTATION_RATIO 1.0), where
 // the arm's whole 143.8-degree travel fits inside a single sensor turn.
 inline constexpr bool LIFT_HOME_ON_ENABLE = true;            // BACK ON, the driver's call 2026-10-07
-inline constexpr float LIFT_HOME_MV = -2000.0f;              // TUNE: steady downward drive while homing, red retune 2026-10-07 (was -4000)
+// 1.75x FASTER (the driver, 2026-10-07: "during that recalibration, lift needs to move at 1.75x the
+// speed down it currently is"): -2000 * 1.75 = -3500. Capped by LIFT_MAX_MV (12000), which this is
+// comfortably inside. It also shortens the trip, which matters because LIFT_HOME_TIMEOUT_MS below is
+// what decides whether a home from high up finishes at all -- a timed-out home writes NO zero and
+// leaves every height wrong, so speed here buys reliability, not just time.
+inline constexpr float LIFT_HOME_MV = -3500.0f;              // TUNE: downward drive while homing (was -2000)
 // Don't start looking for "stopped" until the arm has been driving this long, so a sticky start isn't
 // mistaken for the bottom.
 inline constexpr int LIFT_HOME_MIN_DRIVE_MS = 250;           // TUNE
 // "Stopped" = the raw sensor moved less than LIFT_HOME_STILL_DEG (SENSOR degrees, not arm degrees)
 // across a LIFT_HOME_STILL_MS window. Small wobble at the stop is expected and allowed.
 inline constexpr double LIFT_HOME_STILL_DEG = 2.5;           // TUNE: sensor degrees
-inline constexpr int LIFT_HOME_STILL_MS = 200;               // TUNE
+// REBOUND MARGIN. Hitting the stop 1.75x harder makes the arm bounce more, and this window is what
+// keeps the bounce from being read as "stopped": any movement over LIFT_HOME_STILL_DEG re-opens it, so
+// the zero can only be written once the arm has genuinely been still for this long. Raised with the
+// speed (200 -> 300) so a bigger bounce still has to settle out before anything is written.
+inline constexpr int LIFT_HOME_STILL_MS = 300;               // TUNE (was 200)
 // Plausibility window: at the stop, the sensor's own absolute angle (folded to +-180 sensor deg) must
 // be within this much of its calibrated zero before we trust it and set_position(0). The user's own
 // observation is that it settles around 358-359-0-1, i.e. within a degree or two. If the arm stopped
 // somewhere else it is jammed on something, NOT at the bottom: homing then stops pushing, keeps the
 // absolute-angle seed from zero(), and shows HOME FAIL instead of zeroing to a wrong place.
 // Hard stop on the whole attempt. Stops pushing and shows HOME FAIL.
-inline constexpr int LIFT_HOME_TIMEOUT_MS = 3000;            // TUNE
+// A HOME THAT TIMES OUT WRITES NO ZERO, and the lift then runs in the raw sensor frame where every
+// preset lands low by however far the bottom happens to read -- the exact symptom of "all the heights
+// are going way lower than they should be". So this has to be long enough to cover the WORST start,
+// which is the arm up at level 5 (lift_preset::STACK_LEVELS[4] above the stop). Raised 3000 -> 4000
+// alongside the faster drive; the brain's LIFT0 line says HOME FAIL / frame RAW if it still runs out.
+inline constexpr int LIFT_HOME_TIMEOUT_MS = 4000;            // TUNE (was 3000)
 
 // Default timeout for lift.moveTo() when the caller doesn't give one (autonomous safety net so a
 // stuck lift can't hang a routine forever). Pass a different value per call, or 0 to wait forever.

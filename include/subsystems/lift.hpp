@@ -431,6 +431,11 @@ class Lift {
     bool isBlocked() const { return blocked_; }
     /** True if the runaway guard tripped. */
     bool isFaulted() const { return faulted_; }
+    /** TRUE ONLY IF THE POSITION FRAME IS TRUSTWORTHY -- i.e. homing actually reached the hard stop and
+     *  wrote the zero there. Anything else (HOME FAIL on the timeout, CANCELLED by the D-pad, SKIPPED,
+     *  or never requested) means the readings are still in the raw sensor frame, where every preset
+     *  lands low by however far the bottom happens to read. The brain's LIFT0 line shows this. */
+    bool isFrameZeroed() const { return home_ == Home::DONE; }
     /** True once the rotation sensor has stopped answering (PROS_ERR). The position then HOLDS its
      *  last good value instead of dividing an error code through, and the lift faults so it stops
      *  chasing garbage. Latched: it needs a power cycle or a re-plug plus a new command to clear. */

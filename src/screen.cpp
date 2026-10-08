@@ -208,6 +208,24 @@ void draw() {
     while (line < 5 + kMaxWarnings) {
         pros::screen::print(pros::E_TEXT_MEDIUM, line++, "                                        ");
     }
+
+    // --- 8: THE LIFT'S ZERO. Did homing actually reach the hard stop and write the zero there, and
+    // what does the arm read right now? This is the line to look at when "every height lands too low":
+    // the frame is only trustworthy after HOMED. Anything else -- HOME FAIL (timed out before reaching
+    // the stop), HOME CANCELLED (the D-pad interrupted it), HOME SKIPPED, or blank (never requested) --
+    // means the readings are still in the RAW sensor frame and every preset is off by whatever the
+    // bottom happens to read. `bottom` is the live position, so with a good home it should sit at
+    // about lift_preset::DOWN (0.0) with the arm resting down.
+    {
+        const char* hs = lift.homeStateName();
+        if (lift.isFrameZeroed()) {
+            pros::screen::print(pros::E_TEXT_MEDIUM, 8, "LIFT0 HOMED   pos %.1f  frame OK        ",
+                                lift.getPosition());
+        } else {
+            pros::screen::print(pros::E_TEXT_MEDIUM, 8, "!! LIFT0 %-14s pos %.1f  frame RAW  ",
+                                hs[0] ? hs : "NOT HOMED", lift.getPosition());
+        }
+    }
 }
 
 }  // namespace

@@ -155,8 +155,28 @@ void Claw::update() {
 
     switch (state_) {
         case State::OPEN:
+            // THE ONE WAY OUT OF OPEN, so "the autoclamp is on but the claw is not armed" can never be
+            // a dead end. OPEN used to be terminal: the only transitions out of it were arm() and
+            // clamp(), both of which have to be CALLED by somebody, so an enabled autoclamp sitting in
+            // OPEN stayed there for the rest of the program run -- `AC:OFF` on the brain's CLAW line
+            // with the autoclamp switched on, never arming and never firing. That is the driver's
+            // 2026-10-08 report: "when I start driver (raw, without doing auton), autoclamp is never
+            // armed and autoclamp doesn't happen."
+            // With the enable now pushed every tick (periodic::tick()), this is what makes "always on
+            // in driver" true by construction instead of relying on one call at mode start landing.
+            // NOTHING MOVES HERE, deliberately: OPEN already means the jaws are open, so unlike arm()
+            // this does not write the cylinder at all -- it is the state machine and the detector only.
+            // Armed fresh (no clear-reading wait), exactly like arm() on an open claw: if something is
+            // already sitting in the jaws the confirm window then fires on it, which is the autoclamp
+            // doing its job. Not while inhibited -- an L2 score owns the claw.
+            if (enabled_ && !inhibit_) {
+                detect_.reset(false);
+                state_ = State::ARMED;
+            }
+            break;
+
         case State::CLAMPED:
-            break;  // autoclamp off, or already holding: the driver / the scoring sequence decides
+            break;  // already holding: the driver / the scoring sequence decides
 
         case State::ARMED:
             // THE AUTOCLAMP. Something at or inside AUTOCLAMP_RANGE_MM, continuously for

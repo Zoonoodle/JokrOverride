@@ -9,13 +9,19 @@
  *
  * State machine:
  *
- *   OPEN ──(arm)──> ARMED ──(pin seen for DEBOUNCE ms)──> CLAMPED
- *    ^ (power-on)     ^                                      │
- *    │                └──(lockout over)── RELEASED <──(release)
- *    └──(disarm)───────────────────────────────────────────────
+ *   OPEN ──(arm, or update() while ENABLED)──> ARMED ──(pin seen for DEBOUNCE ms)──> CLAMPED
+ *    ^ (power-on)                              ^                                      │
+ *    │                                         └──(lockout over)── RELEASED <──(release)
+ *    └──(disarm)──────────────────────────────────────────────────────────────────────────
  *
  *   OPEN     jaws open, autoclamp DISABLED (driver in full manual control). This is the power-on
  *            state, because the cylinder's unpowered position IS open -- see below.
+ *            IT IS NOT A DEAD END ANY MORE: update() arms an OPEN claw by itself the moment the
+ *            autoclamp is enabled (and nothing is inhibiting it), without touching the cylinder.
+ *            It used to need somebody to CALL arm(), so an enable that did not reach a call -- the
+ *            one-shot at the top of opcontrol() being the only one in the whole program run -- left
+ *            the autoclamp showing `AC:OFF` while switched ON, for good. The enable is now mirrored
+ *            onto this class every tick by periodic::tick(), and this is the half that acts on it.
  *   ARMED    jaws open, autoclamp enabled, watching the sensor through AutoclampDetector
  *   CLAMPED  jaws closed on a pin (L1, A, the autoclamp, or an auton call)
  *   RELEASED jaws just opened with the autoclamp still enabled. It may NOT re-arm until the sensor
@@ -86,7 +92,12 @@ class Claw {
      *  and disarm() would open the jaws and drop it. Without this, a match that grips its preload in
      *  competition_initialize() and then enables the autoclamp in autonomous() set the flag on Scoring
      *  but never here, so the first time the route opened the jaws they re-armed to OPEN (autoclamp off)
-     *  instead of ARMED and the autoclamp could not fire for the rest of the match. */
+     *  instead of ARMED and the autoclamp could not fire for the rest of the match.
+     *
+     *  PASSED EVERY TICK by periodic::tick() as well, from Scoring::autoclampOn() -- the same deal as
+     *  setInhibit() / setIntakeMode() / setAutonMode(). That is what makes "the autoclamp is always on
+     *  in driver" true by construction: the enable is a mirror of the mode's intent rather than latched
+     *  state that one call at mode start has to land for. */
     void setAutoclampEnabled(bool on) { enabled_ = on; }
     /** Is the autoclamp enabled? (Y toggles it; opcontrol turns it on, auton leaves it off.) */
     bool autoclampEnabled() const { return enabled_; }

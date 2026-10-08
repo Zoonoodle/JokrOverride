@@ -24,6 +24,11 @@
  *     subsystems/intake.hpp: never add a second writer).
  *   - It runs L1's auto-intake sweep window and L2's auto-outtake window (the timers and the
  *     cancel/timeout rules that used to be local variables in opcontrol()).
+ *   - It PUSHES the claw's per-mode state every tick rather than letting it latch: the L2 inhibit, the
+ *     R1-handoff confirm window, the auton trigger range -- and the autoclamp ENABLE itself, mirrored
+ *     from Scoring::autoclampOn(). The enable used to be the one latched exception, set once at the top
+ *     of opcontrol() and never again, which is how driver control could start with the autoclamp OFF
+ *     (`AC:OFF`) and no way back for the rest of the match. Every one of these moves nothing.
  *   - It calls Claw::update() and Scoring::update(), in that order, once per tick.
  *   - It NEVER writes the lift motors. Lift::update(), in the lift's own 10 ms task, is still the
  *     only thing in the program that does (CLAUDE.md safety rule 2). Commanded heights still only

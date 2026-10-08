@@ -165,6 +165,21 @@ void tick(const Inputs& in) {
     // to a surveyed spot needs to commit from further out). Same deal: passed, never latched.
     robot::claw.setAutonMode(in.auton);
 
+    // ...AND THE ENABLE ITSELF, every tick, for the same reason all three above are passed every tick.
+    // THE BUG THIS FIXES (the driver, 2026-10-08): "when I start driver (raw, without doing auton),
+    // autoclamp is never armed and autoclamp doesn't happen. Ensure auto clamp is always on in driver."
+    // The enable + arm used to be the ONE piece of the claw's per-mode state that was latched: a single
+    // scoring.setAutoclamp(config::AUTOCLAMP_ON_IN_DRIVER) at the top of opcontrol(), and nothing
+    // anywhere re-asserted it for the rest of the match. PROS enters opcontrol() once, so if that one
+    // call did not land on the Claw -- it early-returns while the jaws are CLAMPED (Scoring), and
+    // Claw::arm() early-returns from CLAMPED/RELEASED -- the autoclamp stayed dead for the whole of
+    // driver control, showing `AC:OFF` with nothing to explain why and no way back.
+    // Now it is a MIRROR of the mode's intent (Scoring::autoclampOn(), which is what opcontrol's
+    // AUTOCLAMP_ON_IN_DRIVER, auton's AUTOCLAMP_ON_IN_AUTON, Y and auton::autoclamp() all set), pushed
+    // every tick exactly like the inhibit. Nothing here moves a cylinder: it is the flag only, and
+    // Claw::update()'s own OPEN branch is what turns an enabled-but-open claw back into an armed one.
+    robot::claw.setAutoclampEnabled(robot::scoring.autoclampOn());
+
     // Claw::update() first, then Scoring::update(): a clamp the autoclamp makes this tick is therefore
     // reacted to (the rise, or the handoff push) in the SAME tick rather than the next one.
     robot::claw.update();

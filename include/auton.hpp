@@ -120,10 +120,11 @@ void liftToFrontToggle();
  * for putting the first pin down, where there is no stack under it yet and stack level 1 (31 deg) is far
  * too high. An ordinary, fast position move -- non-blocking.
  *
- * DO NOT EXPECT auton::score() TO SENSE ANYTHING FROM HERE. 9 deg is below L2_RELEASE_FLOOR_DEG (10), so
- * the scorer's floor rule fires on its very first press tick and the jaws just open (`REL(floor)`).
- * There is only 9 deg of travel to work with, which is not enough to detect a landing in, so that is the
- * honest outcome rather than a bug. For the first pin, do it explicitly instead:
+ * CHANGED 2026-10-07: this used to warn that auton::score() could sense nothing from here, because 9 deg
+ * was below L2_RELEASE_FLOOR_DEG when that floor was a bare 10. The floor is now lift_preset::DOWN + 10
+ * = -21.9, so 9.0 is ~31 deg above it and the scorer has a real travel budget to detect a landing in.
+ * `REL(floor)` is no longer the guaranteed outcome. Scoring onto BARE FLOOR still has nothing to sense a
+ * landing on, though, so for the first pin the explicit sequence is still the predictable one:
  *     auton::liftToFirstScoreAndWait();
  *     auton::clawOpen();
  *     auton::liftPushFor(300);   // keep pressing down so the jaws slide clear of the pin
@@ -297,7 +298,32 @@ void intakeIn(double power = 1.0);
 void intakeOut(double power = 1.0);
 /** Drop the request: the macros (or nothing) decide again. */
 void intakeStop();
-/** intakeIn()/intakeOut() for ms, then intakeStop(). Blocks for ms. */
+
+/** Which way the rollers turn, for intakeFor(). IN pulls a pin in (the R1 direction); OUT ejects. */
+enum class Spin { IN, OUT };
+/**
+ * SPIN THE ROLLERS ONE WAY FOR A FIXED TIME, then stop them. The driver's 2026-10-07 request: one
+ * function with a direction and a duration, to kick the intake at the start of a route.
+ *
+ *     auton::intakeFor(1500, auton::Spin::IN);    // 1.5 s inward, e.g. first thing in auto
+ *     auton::intakeFor(400, auton::Spin::OUT);    // a short eject
+ *     auton::intakeFor(1500, auton::Spin::IN, 0.6);  // same, at 60% of config::INTAKE_MV
+ *
+ * BLOCKS for ms, then stops the rollers -- so the next thing in the route starts with the intake
+ * already idle and nothing latched. ms <= 0 just stops them and returns immediately. power is 0..1 of
+ * config::INTAKE_MV and is clamped into that range.
+ *
+ * It goes through the SAME latched request the driver's R1/R2 feed, so it beats the L1/L2 macro
+ * windows exactly as the driver's own buttons do, and it is applied by the auton tick as the one
+ * intake write per tick (CLAUDE.md's single-writer rule).
+ *
+ * To overlap the spin with a drive move, don't use this -- latch it and stop it yourself:
+ *     auton::intakeIn();                 // returns at once
+ *     chassis.moveToPoint(...);          // rollers keep turning through the move
+ *     auton::intakeStop();
+ */
+void intakeFor(int ms, Spin dir, double power = 1.0);
+/** intakeFor() with the direction baked in. Kept because existing routes call them. */
 void intakeInFor(int ms, double power = 1.0);
 void intakeOutFor(int ms, double power = 1.0);
 

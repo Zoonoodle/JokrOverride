@@ -107,13 +107,14 @@ namespace lift_preset {
 // L2_RELEASE_FLOOR_DEG. LIFT_SEAT_ZERO_DEG is a WINDOW and stays a plain width; the code now measures
 // it from DOWN instead of from 0 (lift.cpp, FINAL's atZero test).
 // If the hard stop is ever re-measured, change THIS line and nothing else.
-// REVERTED 2026-10-07 from a half-finished change to -31.9. DO NOT set this negative on its own:
-// the rest of the lift still measures the bottom from 0, not from this constant --
-// LIFT_BOTTOM_GOAL_DEG, LIFT_DESCENT_SLOW_ZONE_DEG, LIFT_FINAL_START_DEG, LIFT_REST_WAKE_DEG,
-// L2_RELEASE_FLOOR_DEG, and the `atZero` test in lift.cpp (fabs(position) <= LIFT_SEAT_ZERO_DEG).
-// With DOWN at -31.9 a trip to the bottom declares SEAT about 32 deg ABOVE the hard stop and starts
-// the FINAL forcing push from there. Moving the bottom off 0 means changing all of those together.
-inline constexpr double DOWN = 0.0;                          // the hard stop / zero frame
+//
+// WHY THIS IS SAFE TO SET NEGATIVE NOW (and was not, half-done, earlier today): every threshold that
+// means "this far above the bottom" is written below as `lift_preset::DOWN + <offset>`, and the two
+// places in the code that compared against a bare 0 were changed to measure from DOWN --
+// FINAL's `atZero` test and homing's re-zero (both in lift.cpp). Setting this negative while those
+// still read 0 makes the lift declare SEAT about 32 deg ABOVE the stop and start FINAL's forcing push
+// from there, so the two go together or not at all.
+inline constexpr double DOWN = -31.9;                        // the hard stop, measured on the robot 2026-10-07 (was 0.0)
 // THE INTAKE HANDOFF. History: 1.1 (photo-derived) -> 6.1 (driver, 2026-10-03) -> -3.3 (driver,
 // 2026-10-07). If it ever stops lining up: D-pad Up/Down until the claw meets the handoff, read the
 // brain's LIFT line, and put THAT here. One thing moves with it automatically and needed no touching --
@@ -121,14 +122,13 @@ inline constexpr double DOWN = 0.0;                          // the hard stop / 
 // RE-MEASURED -3.3 (2026-10-07, the driver: "lift position for intaking is -3.3"), read straight off
 // the brain's LIFT line with the claw lined up at the handoff. It is ABOVE the bottom (-31.9) by 28.6
 // deg, so R1 from a seated arm is now a real rise of nearly 30 degrees, not the 6 it used to be.
-// IT IS STILL THE ONE PRECISE HEIGHT, and now precise in BOTH directions: the arm reaches it coming UP
-// from the hard stop as well as coming DOWN from a stack level, and the same slow final approach
-// applies either way (see LIFT_PRECISE_APPROACH_* below). setTarget() still auto-promotes any goal
-// within half a degree of this number to PRECISE, so no call site can forget, and -3.3 is far above
-// LIFT_BOTTOM_GOAL_DEG (now -26.9) so it is never mistaken for a trip to the bottom.
-// REVERTED 2026-10-07 to 6.1 along with DOWN above: -3.3 was measured in a zero frame where the
-// bottom was -31.9, and it is below the bottom in this one. Re-measure it if DOWN moves properly.
-inline constexpr double INTAKE = 6.1;                        // driver-measured handoff height
+// IT IS STILL THE ONE PRECISE HEIGHT, and it is precise in BOTH directions with no code change: the
+// slow walk-in is Lift::speedProfile(), which works off the UNSIGNED distance to the goal and uses the
+// direction only to pick the cruise-speed cap, so the arm crawls the last degrees in exactly the same
+// way coming UP from the hard stop as coming DOWN from a stack level. setTarget() still auto-promotes
+// any goal within half a degree of this number to PRECISE, so no call site can forget, and -3.3 is far
+// above LIFT_BOTTOM_GOAL_DEG (now -26.9) so it is never mistaken for a trip to the bottom.
+inline constexpr double INTAKE = -3.3;                       // driver-measured 2026-10-07 (was 6.1)
 inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covered by the reference photos yet
 // FRONT TOGGLE: the height the arm goes to at the start of the match route to flip the front toggle,
 // then comes straight back down from (fast -- see auton::liftDownFast()). Deliberately its OWN
@@ -141,12 +141,12 @@ inline constexpr double FRONT_TOGGLE = 45.0;                 // TUNE: arm degree
 // too high for a pin that is going onto bare floor.
 // ITS OWN CONSTANT, not a STACK_LEVELS entry, because it is not a stack level: nothing stacks on top of
 // it and it is tuned for clearing the floor, not for landing on a tower.
-// READ THIS BEFORE SCORING FROM IT WITH L2. At 9 deg the L2 sensing scorer cannot sense anything: the
-// press starts BELOW L2_RELEASE_FLOOR_DEG (10), so the floor rule fires on the very first PRESS tick and
-// the jaws open immediately (`REL(floor)` on the brain). That is not a bug and not worth "fixing" by
-// lowering the floor -- there is only 9 deg of travel available, which is not enough to detect a landing
-// in. For the first pin either accept that (it is then simply "lower to 9 and let go", which is what
-// scoring onto bare floor IS), or skip the scorer and do it explicitly:
+// SCORING FROM IT WITH L2 (changed 2026-10-07). This used to say the L2 scorer could not sense
+// anything from 9 deg, because the press started BELOW L2_RELEASE_FLOOR_DEG when that floor was a bare
+// 10. The floor is now DOWN + 10 = -21.9, so 9.0 is ~31 deg ABOVE it and there is a real travel budget
+// to detect a landing in: L2 from here now presses and senses like any other height, and `REL(floor)`
+// is no longer the guaranteed outcome. The explicit sequence below still works and is still the
+// predictable choice for putting a pin on bare floor, where there is nothing to sense a landing on:
 //     auton::liftToFirstScoreAndWait();
 //     auton::clawOpen();
 //     auton::liftPushFor(300);   // press down while the jaws clear the pin
@@ -186,12 +186,23 @@ inline constexpr double MAX = 111.9;
 // ---------------------------------------------------------------------------
 // L1's LADDER: a fixed 20 deg step, not the absolute stack levels
 // ---------------------------------------------------------------------------
-// THE DRIVER'S REQUEST, 2026-10-03: "have our l1 actauly just go up by 20 each time until it our current
-// highest level it goes down by one each time when it gets upo there, by 20 deg".
-// So L1 is no longer "jump to STACK_LEVELS[n]". Each press moves the arm a fixed L1_STEP_DEG, and the
-// direction REVERSES at the ends: up 20 at a time until the top, then down 20 at a time, then up again.
-//   press:  1    2    3    4    5    6        7     8     9   ...
-//   height: 20   40   60   80   100  106.9    86.9  66.9  46.9
+// THE DRIVER'S REQUEST, 2026-10-03: "have our l1 actauly just go up by 20 each time", and 2026-10-07:
+// "Still have L1 smooth and fast, move it up 20 degrees each time". So L1 is not "jump to
+// STACK_LEVELS[n]": each press moves the arm a fixed L1_STEP_DEG FURTHER UP.
+//
+// UP ONLY (changed 2026-10-07, the driver's call). The ladder used to REVERSE at the top and walk back
+// down 20 at a time. It no longer does: at the ceiling it simply STOPS there, and extra presses are a
+// no-op rather than a descent. Coming back down is L2 (score), B (stow) or R2 -- never L1. That removed
+// Scoring::stepDown_ and isSteppingDown() entirely.
+//
+// EACH PRESS IS RELATIVE TO WHERE THE ARM IS HEADING, not to a press count: advanceStep() steps from
+// the lift's own active target (or, with nothing commanded -- e.g. just after a D-pad nudge, which
+// cancels the target -- from the measured position). So a manual nudge is absorbed automatically and
+// the next L1 goes 20 deg above wherever the driver left the arm. Rapid taps still stack correctly,
+// because the base is the TARGET, not the lagging position.
+//
+//   from the handoff (-3.3):  16.7  36.7  56.7  76.7  96.7  106.9  106.9 ...
+//   from the hard stop:      -11.9   8.1  28.1  48.1  68.1   88.1  106.9 ...
 // WHAT THIS DOES NOT CHANGE: lift_preset::STACK_LEVELS is untouched and still means the measured scoring
 // heights -- auton::liftTo(Level::THREE), the brain's preset names and everything else still use them.
 // Only L1's own ladder is relative now.
@@ -200,8 +211,9 @@ inline constexpr double MAX = 111.9;
 // wherever a multiple of 20 happens to land (100 would be 7 deg short of it).
 //   The steps are too coarse / too fine: change L1_STEP_DEG. It needs no other number changed -- the
 //     ladder is generated from it.
-//   It should stop at the top instead of coming back down: that is a code change in
-//     Scoring::advanceStep(), not a constant.
+//   It should bounce back down at the top again: that is a code change in Scoring::advanceStep(),
+//     not a constant.
+// THE FLOOR is lift_preset::DOWN, so a step can never command the arm below its own hard stop.
 inline constexpr double L1_STEP_DEG = 20.0;                  // TUNE: arm degrees per L1 press
 inline constexpr double L1_STEP_CEILING_DEG =
     lift_preset::STACK_LEVELS[lift_preset::STACK_LEVEL_COUNT - 1];  // the top measured level (106.9)
@@ -308,7 +320,7 @@ inline constexpr double LIFT_COARSE_TOLERANCE_DEG = 10.0;       // TUNE: arrived
 //     term) -- and see the note on LIFT_DECEL_DEG_PER_S2 first, which is the bigger lever.
 inline constexpr double LIFT_APPROACH_ZONE_DEG = 4.0;        // TUNE: where the crawl starts (was 5)
 inline constexpr double LIFT_APPROACH_DEG_PER_S = 50.0;      // TUNE: fastest the crawl may be (was 28)
-inline constexpr double LIFT_APPROACH_MIN_DEG_PER_S = 12.0;  // TUNE: slowest -- no exponential tail (was 6)
+inline constexpr double LIFT_APPROACH_MIN_DEG_PER_S = 8.0;   // TUNE: slowest -- no exponential tail; red retune 2026-10-07 (was 12)
 inline constexpr double LIFT_APPROACH_KP_PER_S = 10.0;       // TUNE: crawl speed per degree left (1/s) (was 6)
 
 // --- The velocity loop (phases BRAKE, APPROACH and DESCEND) -----------------
@@ -324,8 +336,8 @@ inline constexpr double LIFT_APPROACH_KP_PER_S = 10.0;       // TUNE: crawl spee
 // (back-EMF alone is 12000/150 = 80 mV per deg/s), so a 9000 mV clamp physically could not sustain the
 // cruise -- the arm sagged to whatever 9000 mV holds, around 110 deg/s, for the whole middle of the
 // rise. The clamp was never what limits the braking either; LIFT_DECEL_DEG_PER_S2 is.
-inline constexpr float LIFT_VEL_KP = 30.0f;                  // TUNE: mV per (deg/s) of speed error
-inline constexpr float LIFT_VEL_KI = 400.0f;                 // TUNE: mV per (deg/s) of speed error, per second
+inline constexpr float LIFT_VEL_KP = 18.0f;                  // TUNE: mV per (deg/s) of speed error, red retune 2026-10-07 (was 30)
+inline constexpr float LIFT_VEL_KI = 240.0f;                 // TUNE: mV per (deg/s) per second, red retune 2026-10-07 (was 400)
 inline constexpr float LIFT_VEL_MAX_MV = 12000.0f;           // TUNE: most the velocity loop may push, either way
 // Hysteresis between DRIVE (full voltage) and BRAKE (the velocity loop). DRIVE ends the moment the arm
 // reaches the profile speed, and is only re-entered once the arm is this far BELOW it -- which is what
@@ -353,10 +365,10 @@ inline constexpr double LIFT_DRIVE_RESUME_DEG_PER_S = 20.0;  // TUNE
 // between arrival and parking, and (b) when a parked arm has drifted LIFT_REENGAGE_DEG and the hold wakes
 // up to pull it back. If the symptom is "it settles a bit low and stays there", LIFT_HOLD_KI or
 // LIFT_HOLD_DEADBAND_DEG is the knob, not this one.
-inline constexpr float LIFT_HOLD_KP = 200.0f;                // TUNE: mV per deg of sag (was 180)
-inline constexpr float LIFT_HOLD_KI = 400.0f;                // TUNE: mV per deg per second (learns gravity)
-inline constexpr float LIFT_HOLD_KD = 90.0f;                 // TUNE: mV per deg/s -- the anti-bounce term
-inline constexpr float LIFT_HOLD_MAX_MV = 7000.0f;           // TUNE: most the hold may push
+inline constexpr float LIFT_HOLD_KP = 100.0f;                // TUNE: mV per deg of sag, red retune 2026-10-07 (was 200)
+inline constexpr float LIFT_HOLD_KI = 200.0f;                // TUNE: mV per deg per second, red retune 2026-10-07 (was 400)
+inline constexpr float LIFT_HOLD_KD = 140.0f;                // TUNE: mV per deg/s -- the anti-bounce term, RAISED 2026-10-07 (was 90)
+inline constexpr float LIFT_HOLD_MAX_MV = 5000.0f;           // TUNE: most the hold may push, red retune 2026-10-07 (was 7000)
 // THE SETTLE BAND (was LIFT_HOLD_DEADBAND_DEG = 0.8, which is most of why the arm hunted at a level --
 // see "Settling instead of hunting" below). Inside it the hold applies NO position correction and
 // FREEZES its integral: it just keeps pushing the gravity voltage it has already learned. 4 deg is
@@ -415,7 +427,7 @@ inline constexpr int LIFT_PARK_COOLDOWN_MS = 300;            // TUNE
 // above is well under a second, and moveStart_ is set when the height is actually COMMANDED (Scoring's
 // CLAMPING wait happens before that, so this does not have to cover it).
 //   A real long move gets cut short and shows PARK(t/o): raise it.
-inline constexpr int LIFT_MOVE_TIMEOUT_MS = 1500;            // TUNE (was 2500)
+inline constexpr int LIFT_MOVE_TIMEOUT_MS = 3000;            // TUNE: half speed + ~32 deg more travel, 2026-10-07 (was 1500)
 
 // --- The descent to the bottom (L2, B, auton DOWN, and R2 in clamped mode) --
 // Three speed bands on the way down, as % of the free speed, so the arm walks itself onto its hard
@@ -462,7 +474,8 @@ inline constexpr int LIFT_MOVE_TIMEOUT_MS = 1500;            // TUNE (was 2500)
 inline constexpr double LIFT_DESCENT_TOP_PCT = 95.0;         // TUNE: ~142 deg/s (was 80)
 inline constexpr double LIFT_DESCENT_MID_PCT = 95.0;         // TUNE: ~142 deg/s
 inline constexpr double LIFT_DESCENT_SLOW_PCT = 30.0;        // TUNE: ~45 deg/s, the approach cruise (was 12% / 18 deg/s)
-inline constexpr double LIFT_DESCENT_SLOW_ZONE_DEG = 14.0;   // TUNE: approach zone starts this many deg above 0 (was 20)
+// DOWN-relative (2026-10-07): 14 deg ABOVE THE HARD STOP, wherever that is, = -17.9 now.
+inline constexpr double LIFT_DESCENT_SLOW_ZONE_DEG = lift_preset::DOWN + 14.0;  // TUNE: offset above the bottom
 inline constexpr double LIFT_DESCENT_MID_FRACTION = 0.5;     // TUNE: 0.5 = the mid band is the lower half of the fast travel
 inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 1200.0;// TUNE: how quickly the reference may change between bands (was 800)
 
@@ -480,8 +493,8 @@ inline constexpr double LIFT_DESCENT_RAMP_DEG_PER_S2 = 1200.0;// TUNE: how quick
 // 120% of free speed is not a speed the arm can reach on its own -- it is how you say "do not hold
 // back": the velocity loop saturates at its full 12000 mV of downward authority, which is the
 // "forcefully" the driver asked for.
-inline constexpr double LIFT_FAST_DESCENT_TOP_PCT = 105.0;   // TUNE: ~157 deg/s (normal: 80 -> 120)
-inline constexpr double LIFT_FAST_DESCENT_MID_PCT = 120.0;   // TUNE: ~180 deg/s (normal: 95 -> 142)
+inline constexpr double LIFT_FAST_DESCENT_TOP_PCT = 95.0;    // TUNE: ~143 deg/s, red retune 2026-10-07 (was 105)
+inline constexpr double LIFT_FAST_DESCENT_MID_PCT = 100.0;   // TUNE: ~150 deg/s = free speed, red retune 2026-10-07 (was 120)
 // AND A FIRMER RAMP, which is not optional at those speeds. Decelerating v1 -> v2 at rate a covers
 // (v1^2 - v2^2) / 2a degrees. Entering the approach zone at MID's ~180 deg/s and needing the 45 deg/s
 // cruise: at the NORMAL 1200 that takes (32400 - 2025) / 2400 = 12.7 deg -- more than the whole
@@ -541,11 +554,13 @@ inline constexpr int LIFT_FRONT_TOGGLE_MAX_WAIT_MS = 1500;   // TUNE: then go do
 //   Motors warm up while parked at the bottom: lower LIFT_SEAT_MV's magnitude (e.g. -1000), or
 //     LIFT_FINAL_FORCE_MS if the motors are warming during FINAL itself (unlikely at 1.5 s).
 //   Declares true SEAT while still visibly short: lower LIFT_SEAT_ZERO_DEG.
-inline constexpr float LIFT_SEAT_MV = -1500.0f;              // TUNE: constant downward seating voltage
+inline constexpr float LIFT_SEAT_MV = -800.0f;               // TUNE: constant downward seating voltage, red retune 2026-10-07 (was -1500)
 // Where DESCEND hands over to FINAL. Also doubles as the "close enough to re-check" threshold for
 // un-seating (see LIFT_SEAT_UNSEAT_DEG below) -- was a separate constant (LIFT_SEAT_DETECT_DEG, 6 deg)
 // before the 2026-10-02 retune moved the whole handover down to 3 so the fast bands run longer.
-inline constexpr double LIFT_FINAL_START_DEG = 3.0;          // TUNE: hand DESCEND over to FINAL this close to 0
+// DOWN-relative (2026-10-07): 3 deg above the hard stop = -28.9 now. L2_OUTTAKE_STOP_DEG is defined as
+// this constant, so it follows automatically and needs no separate edit.
+inline constexpr double LIFT_FINAL_START_DEG = lift_preset::DOWN + 3.0;  // TUNE: hand DESCEND over to FINAL this close to the bottom
 inline constexpr double LIFT_FINAL_DEG_PER_S = 20.0;         // TUNE: constant creep speed for the last stretch (was 12)
 // RAISED 5000 -> 7000 (2026-10-03). The driver's reset complaint was "more speed/power to go down to
 // reset", and this is the "power" half: FINAL is the only phase with real authority below
@@ -553,7 +568,7 @@ inline constexpr double LIFT_FINAL_DEG_PER_S = 20.0;         // TUNE: constant c
 // cup caught in the intake or plain six-bar/chain friction -- which is exactly what SEAT(short) means.
 // 7000 is the same cap L2_PRESS_MAX_MV uses to press a pin onto a stack without crumpling it, so it is a
 // force this mechanism is already known to survive; it is still well under DESCEND's full 12000.
-inline constexpr float LIFT_FINAL_MAX_MV = 7000.0f;          // TUNE: magnitude, downward authority during FINAL (was 5000)
+inline constexpr float LIFT_FINAL_MAX_MV = 3500.0f;          // TUNE: magnitude, downward authority during FINAL, red retune 2026-10-07 (was 7000)
 // FINAL forces at the above speed/authority for exactly this long, then hands to SEAT regardless of
 // where it ended up (see LIFT_SEAT_ZERO_DEG for how that is judged). ~1.2 deg of this 1.5 s is normally
 // spent just closing the remaining 3 deg at LIFT_FINAL_DEG_PER_S; the rest is pure forcing time against
@@ -610,7 +625,8 @@ inline constexpr double LIFT_SEAT_TEMP_LIMIT_C = 50.0;       // safety net, not 
 //     stillness test never passed, so raise LIFT_REST_STILL_DEG_PER_S.
 inline constexpr int LIFT_REST_AFTER_MS = 300;               // TUNE: still-at-the-stop time before coasting; 0 = never
 inline constexpr double LIFT_REST_STILL_DEG_PER_S = 3.0;     // TUNE: what counts as "not moving" for the above
-inline constexpr double LIFT_REST_WAKE_DEG = 4.0;            // TUNE: rising past this while resting = re-seat it
+// DOWN-relative (2026-10-07): 4 deg above the hard stop = -27.9 now.
+inline constexpr double LIFT_REST_WAKE_DEG = lift_preset::DOWN + 4.0;  // TUNE: rising past this while resting = re-seat it
 inline constexpr int LIFT_REST_MAX_WAKES = 3;                // TUNE: then stay in SEAT instead of pulsing
 
 // --- The L1 GRAB at the intake handoff (see "SCORING WITH L2"'s sibling, "THE GRAB", in lift.hpp) --
@@ -752,7 +768,9 @@ inline constexpr double LIFT_PRECISE_TOLERANCE_DEG = 1.0;    // TUNE: INTAKE onl
 // above instead of a position move, and Scoring's score() treats an arm already here as "nothing to
 // score" (L2 is then a no-op). INTAKE (1.1) is inside it numerically but is always precise, so R1 keeps
 // its own exact approach and never seats.
-inline constexpr double LIFT_BOTTOM_GOAL_DEG = 5.0;          // TUNE
+// DOWN-relative (2026-10-07): 5 deg above the hard stop = -26.9 now. lift_preset::INTAKE (-3.3) is
+// comfortably ABOVE this, so R1's handoff is an ordinary precise position move and never a descent.
+inline constexpr double LIFT_BOTTOM_GOAL_DEG = lift_preset::DOWN + 5.0;  // TUNE
 // Hands over to HOLD once the arm is inside its band AND slower than this. It has to sit ABOVE
 // LIFT_APPROACH_MIN_DEG_PER_S or the crawl's floor speed would mean arrival never latches and every
 // move ended on the LIFT_APPROACH_TIMEOUT_MS instead. With kP = 6 /s, the reference is down to 12
@@ -768,13 +786,13 @@ inline constexpr double LIFT_BOTTOM_GOAL_DEG = 5.0;          // TUNE
 // opposing voltage, so the arrival is damped rather than bounced.
 //   Any bounce as it grabs the hold: raise LIFT_HOLD_KD first, then lower this (but never to or below
 //   LIFT_APPROACH_MIN_DEG_PER_S).
-inline constexpr double LIFT_STOPPED_DEG_PER_S = 25.0;       // TUNE: must stay > LIFT_APPROACH_MIN_DEG_PER_S (was 12)
+inline constexpr double LIFT_STOPPED_DEG_PER_S = 15.0;       // TUNE: must stay > LIFT_APPROACH_MIN_DEG_PER_S; red retune 2026-10-07 (was 25)
 // The final approach can't take longer than this (arm fighting something, loop badly tuned): the lift
 // hands over to HOLD, whose position term then pulls in whatever is left, gently.
 // SHORTENED 1500 -> 400 (2026-10-03). This is the backstop that stops the final crawl dragging on: it
 // hands over to the hold, whose position term pulls in whatever is left. With the retuned approach above
 // the crawl covers 4 deg in well under 200 ms, so 400 is a real backstop and not the normal path.
-inline constexpr int LIFT_APPROACH_TIMEOUT_MS = 400;         // TUNE (was 1500)
+inline constexpr int LIFT_APPROACH_TIMEOUT_MS = 700;         // TUNE: slower crawl at 8 deg/s floor, 2026-10-07 (was 400)
 // Velocity estimate: position differenced every tick, then this much of each new sample is blended in
 // (1.0 = raw, no filtering). The rotation sensor's quantisation is 0.0025 arm deg, i.e. 0.25 deg/s per
 // count, so there is nothing to filter out except task jitter -- and filtering costs LAG, which makes
@@ -907,7 +925,7 @@ inline constexpr int LIFT_TRACE_TAIL_MS = 500;
 // the "our arm always starts up too much" problem homing was written for. Everything below still
 // works and is still tuned; only this switch gates it.
 inline constexpr bool LIFT_HOME_ON_ENABLE = false;           // the driver's call, 2026-10-03
-inline constexpr float LIFT_HOME_MV = -4000.0f;              // TUNE: steady downward drive while homing (negative = down)
+inline constexpr float LIFT_HOME_MV = -2000.0f;              // TUNE: steady downward drive while homing, red retune 2026-10-07 (was -4000)
 // Don't start looking for "stopped" until the arm has been driving this long, so a sticky start isn't
 // mistaken for the bottom.
 inline constexpr int LIFT_HOME_MIN_DRIVE_MS = 250;           // TUNE
@@ -927,7 +945,7 @@ inline constexpr int LIFT_HOME_TIMEOUT_MS = 3000;            // TUNE
 // Default timeout for lift.moveTo() when the caller doesn't give one (autonomous safety net so a
 // stuck lift can't hang a routine forever). Pass a different value per call, or 0 to wait forever.
 // A blocking moveTo() called while homing waits for homing AND the move, so give it room for both.
-inline constexpr int LIFT_DEFAULT_TIMEOUT_MS = 2500;         // TUNE
+inline constexpr int LIFT_DEFAULT_TIMEOUT_MS = 4000;         // TUNE: half speed + ~32 deg more travel, 2026-10-07 (was 2500)
 
 // ---------------------------------------------------------------------------
 // Claw (pneumatic) + autoclamp sensor
@@ -1335,7 +1353,7 @@ inline constexpr double L2_SCORE_SPEED_PCT = 60.0;           // TUNE: ~90 deg/s
 //   The pin does not seat fully before the release: raise it (8000).
 //   A loaded arm still creeps under L2_CONTACT_STALL_DEG_PER_S with nothing under it: raise this
 //   further, or raise L2_CONTACT_NOSTART_MS so it has longer to prove it is still accelerating.
-inline constexpr float L2_PRESS_MAX_MV = 7000.0f;            // TUNE: magnitude, downward (was 5000)
+inline constexpr float L2_PRESS_MAX_MV = 3500.0f;            // TUNE: magnitude, downward, red retune 2026-10-07 (was 7000)
 // CONTACT DETECTION. Implemented by subsystems::ContactDetector (include/subsystems/contact_detector.hpp),
 // which is a PURE class with host-side tests in test/ -- run test/run.sh on the Mac after changing any
 // of these, it proves the thresholds against synthetic landings before anything is uploaded.
@@ -1495,7 +1513,8 @@ inline constexpr double L2_AUTO_RELEASE_DEG = 32.0;          // TUNE: arm degree
 //      needsClawRelease() -- see Lift::updateScore().
 // Below any plausible landing height and below L2_AUTO_RELEASE_DEG either way, so it can only ever
 // matter once a release (by any path) has already happened or the travel rule structurally cannot.
-inline constexpr double L2_RELEASE_FLOOR_DEG = 10.0;         // TUNE: arm degrees
+// DOWN-relative (2026-10-07): 10 deg above the hard stop = -21.9 now.
+inline constexpr double L2_RELEASE_FLOOR_DEG = lift_preset::DOWN + 10.0;  // TUNE: offset above the bottom
 // TWO L2 PRESSES PER SCORE (2026-10-02, the driver's own design):
 //   PRESS 1  press the pin down, detect the landing, open the jaws, keep pushing for
 //            L2_POST_RELEASE_PUSH_MS so they slide off, then RISE L2_CLEAR_RISE_DEG and HOLD there,
@@ -1533,7 +1552,7 @@ inline constexpr int SCORING_SETTLE_WAIT_MS = 3000;          // TUNE
 // 10.5 deg at the old ramp -- nearly the whole 14 -> 3 deg approach zone, leaving nothing in which to
 // slow to FINAL's handover -- but only 6.3 deg at 2000, which leaves a real cruise before the floor.
 // See startScoreReturn() in lift.cpp, and the same arithmetic spelled out on LIFT_FAST_DESCENT_*.
-inline constexpr double L2_RETURN_SPEED_PCT = 110.0;         // TUNE (was 95)
+inline constexpr double L2_RETURN_SPEED_PCT = 100.0;         // TUNE: red retune 2026-10-07 (was 110 -- unreachable)
 
 // ---------------------------------------------------------------------------
 // Autonomous — the auton API and its tick. See include/auton.hpp, include/periodic.hpp.
@@ -1550,9 +1569,10 @@ inline constexpr int AUTON_TICK_MS = 10;
 // can slow a routine down but can never hang it; each wait also returns whether it succeeded.
 // Homing has to cover LIFT_HOME_TIMEOUT_MS plus a little slack for the task to notice.
 inline constexpr int AUTON_HOME_TIMEOUT_MS = LIFT_HOME_TIMEOUT_MS + 500;
-// A lift move: the longest travel is DOWN -> level 5 (107 deg), which at the braked profile is well
-// under a second and a half; this leaves room for a macro's CLAMPING / pivot wait in front of it.
-inline constexpr int AUTON_LIFT_TIMEOUT_MS = 2500;
+// A lift move. RAISED 2026-10-07 with the red-cartridge retune: the longest travel is now DOWN (-31.9)
+// -> level 5 (106.9), i.e. ~139 deg rather than 107, and the arm does it at half the old free speed.
+// This still leaves room for a macro's CLAMPING / pivot wait in front of it.
+inline constexpr int AUTON_LIFT_TIMEOUT_MS = 4000;           // was 2500
 // A whole L2 score: PRESS (up to L2_AUTO_RELEASE_DEG of travel) + the release checks + up to
 // L2_MAX_UNSTICK_TRIES hops + the fast run home + FINAL's LIFT_FINAL_FORCE_MS.
 inline constexpr int AUTON_SCORE_TIMEOUT_MS = 6000;

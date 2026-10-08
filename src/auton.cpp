@@ -384,17 +384,21 @@ void intakeIn(double power) { requestIntake(Intake::Mode::IN, power); }
 void intakeOut(double power) { requestIntake(Intake::Mode::OUT, power); }
 void intakeStop() { requestIntake(Intake::Mode::STOP, 1.0); }
 
-void intakeInFor(int ms, double power) {
-    intakeIn(power);
+void intakeFor(int ms, Spin dir, double power) {
+    // Direction first, so a 0 ms call is an explicit "stop" rather than a brief twitch.
+    if (ms <= 0) {
+        intakeStop();
+        return;
+    }
+    if (dir == Spin::IN) intakeIn(power);
+    else intakeOut(power);
     wait(ms);
-    intakeStop();
+    intakeStop();  // never leave the request latched: the macros decide again from here
 }
 
-void intakeOutFor(int ms, double power) {
-    intakeOut(power);
-    wait(ms);
-    intakeStop();
-}
+void intakeInFor(int ms, double power) { intakeFor(ms, Spin::IN, power); }
+
+void intakeOutFor(int ms, double power) { intakeFor(ms, Spin::OUT, power); }
 
 // ---------------------------------------------------------------------------
 // The driver's macro operations

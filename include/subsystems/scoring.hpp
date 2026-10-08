@@ -98,6 +98,7 @@
  * If config::PIVOT_PISTON_PORT is ' ' the pivot steps are skipped.
  */
 
+#include "config.hpp"  // this header names config::lift_preset::DOWN in a member initialiser
 #include "pros/adi.hpp"
 #include "subsystems/claw.hpp"
 #include "subsystems/lift.hpp"
@@ -186,8 +187,6 @@ class Scoring {
      *  Since 2026-10-03 this counts L1 PRESSES on a fixed-step ladder, not config::lift_preset
      *  STACK_LEVELS entries -- see "L1's LADDER" in config.hpp. */
     int getLevel() const { return state_ == State::STACKING || state_ == State::CLAMPING ? level_ : 0; }
-    /** True while L1's ladder is working its way back DOWN (it reversed at the top). */
-    bool isSteppingDown() const { return stepDown_; }
     /** True for the whole L2 SCORE descent -- RELEASING with scoreToHome_ set -- from the first PRESS
      *  tick through REL/UNSTK/RETURN/SEAT, as distinct from RELEASING via scoreOrMatchload() (lowering
      *  to INTAKE instead) or L2's at-the-bottom clamp toggle, neither of which drop anything. main.cpp
@@ -262,10 +261,13 @@ class Scoring {
     bool pivotDone() const;
     bool liftArrived(double degrees) const;
     double levelHeight() const;
-    /** One L1 press on the fixed-step ladder: move L1_STEP_DEG further, reversing direction at the top
-     *  (L1_STEP_CEILING_DEG) and at the bottom. See "L1's LADDER" in config.hpp. */
+    /** One L1 press on the fixed-step ladder: L1_STEP_DEG FURTHER UP from wherever the lift is
+     *  currently heading, clamped to [lift_preset::DOWN, L1_STEP_CEILING_DEG]. UP ONLY since
+     *  2026-10-07 -- at the ceiling it stays there instead of reversing. See "L1's LADDER" in
+     *  config.hpp. */
     void advanceStep();
-    /** Put the ladder back at the bottom, heading up. */
+    /** Put the ladder back at the bottom. Only the rung NUMBER is state; advanceStep() takes its
+     *  height from the lift itself, so this does not pin where the next press goes. */
     void resetStep();
     double heightOf(State s) const;
 
@@ -277,10 +279,12 @@ class Scoring {
 
     State state_ = State::IDLE;
     State moveDest_ = State::INTAKE_POS;  // where MOVING ends up (IDLE means "go home to DOWN")
-    double commanded_ = -1.0;             // last lift target this class sent (-1 = none yet)
+    // Last lift target this class sent. NO MAGIC VALUE: since the bottom became -31.9 (2026-10-07)
+    // every double is a reachable height, so "none yet" is its own flag rather than a sentinel height.
+    double commanded_ = 0.0;
+    bool hasCommanded_ = false;
     int level_ = 1;        // which rung of L1's ladder (a press count, for the brain -- see getLevel())
-    double stepGoal_ = 0.0;  // the height that ladder is currently asking for
-    bool stepDown_ = false;  // the ladder reversed at the top and is working back down
+    double stepGoal_ = config::lift_preset::DOWN;  // the height that ladder is currently asking for
     bool scoreToHome_ = false;            // true while RELEASING on its way to score() rather than
                                            // scoreOrMatchload()'s INTAKE_POS destination
     bool grabRise_ = false;               // GRABBING: rise to a stack level afterwards (L1), or stay

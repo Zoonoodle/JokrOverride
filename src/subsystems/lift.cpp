@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 namespace subsystems {
 
@@ -206,14 +207,22 @@ void Lift::updateHoming(const std::uint32_t now) {
     const std::int32_t angleCentideg = foldCentideg(rotation_->get_angle());
     homeStopAngleDeg_ = angleCentideg / 100.0;
 
-    // Plausibility: the sensor's own calibrated absolute zero IS the bottom of the lift, so if we
-    // really are at the hard stop the folded absolute angle must be near 0. If it isn't, the arm is
-    // jammed on something partway down -- do NOT zero there, that would bake the jam into every
-    // preset. Keep zero()'s seed and report it instead.
-    if (std::fabs(homeStopAngleDeg_) <= config::LIFT_HOME_ZERO_WINDOW_DEG) {
-        rotation_->set_position(0);  // the ONE place in this class that may zero the sensor -- see zero()
+    // Plausibility: if we really are at the hard stop, the folded absolute angle must be near the
+    // bottom. If it isn't, the arm is jammed on something partway down -- do NOT zero there, that
+    // would bake the jam into every preset. Keep zero()'s seed and report it instead.
+    //
+    // THE BOTTOM IS NOT 0 ANY MORE (2026-10-07). It is lift_preset::DOWN (-31.9) in ARM degrees, and
+    // homeStopAngleDeg_ / LIFT_HOME_ZERO_WINDOW_DEG are both SENSOR degrees, so the arm-side constant
+    // is converted with LIFT_ROTATION_RATIO (4:1): -31.9 arm deg = -127.6 sensor deg.
+    // UNTESTED ON THE ROBOT -- homing is switched off (config::LIFT_HOME_ON_ENABLE is false), so this
+    // path does not run today. VERIFY BOTH LINES BEFORE TURNING HOMING BACK ON: if the window or the
+    // seed is wrong, homing will zero the sensor in the wrong place and every preset moves with it.
+    const double bottomSensorDeg = config::lift_preset::DOWN * config::LIFT_ROTATION_RATIO;
+    if (std::fabs(homeStopAngleDeg_ - bottomSensorDeg) <= config::LIFT_HOME_ZERO_WINDOW_DEG) {
+        // the ONE place in this class that may re-seed the sensor -- see zero()
+        rotation_->set_position(static_cast<std::int32_t>(std::lround(bottomSensorDeg * 100.0)));
         home_ = Home::DONE;
-        havePrevPosition_ = false;  // the position just jumped to 0 by decree; don't read that as a velocity
+        havePrevPosition_ = false;  // the position just jumped to the bottom by decree; not a velocity
     } else {
         home_ = Home::FAILED;
     }
@@ -361,8 +370,9 @@ void Lift::setTarget(double degrees, bool precise) {
     goal_ = clamped;
     precise_ = wantPrecise;
     // A non-precise goal at the bottom is not a position move at all: it is the banded descent that
-    // ends SEATED on the hard stop (L2, B, auton DOWN, R2). INTAKE is numerically inside
-    // LIFT_BOTTOM_GOAL_DEG but is always precise, so R1 keeps its own exact approach and never seats.
+    // ends SEATED on the hard stop (L2, B, auton DOWN, R2). Since 2026-10-07 the bottom is -31.9 and
+    // LIFT_BOTTOM_GOAL_DEG is -26.9, so INTAKE (-3.3) is comfortably ABOVE the threshold and is an
+    // ordinary precise move -- it no longer relies on the precise_ flag to escape being a descent.
     descent_ = !precise_ && goal_ <= config::LIFT_BOTTOM_GOAL_DEG;
     const std::uint32_t now = pros::millis();
     const double position = getPosition();
@@ -1270,7 +1280,12 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
         // all; it keeps getting LIFT_FINAL_MAX_MV of push until it either moves or the cap gives up on it.
         const bool forcedLongEnough =
             now - phaseStart_ >= static_cast<std::uint32_t>(config::LIFT_FINAL_FORCE_MS);
-        const bool atZero = std::fabs(position) <= config::LIFT_SEAT_ZERO_DEG;
+        // MEASURED FROM THE HARD STOP, not from a bare 0 (2026-10-07): the bottom is
+        // lift_preset::DOWN (-31.9) and LIFT_SEAT_ZERO_DEG is the WINDOW around it. Comparing
+        // fabs(position) against the window here is what made the half-finished version of this change
+        // dangerous -- it declared SEAT at position 0, ~32 deg above the real stop.
+        const bool atZero =
+            std::fabs(position - config::lift_preset::DOWN) <= config::LIFT_SEAT_ZERO_DEG;
         if (atZero && std::fabs(velocity_) <= config::LIFT_FINAL_STEADY_DEG_PER_S) {
             if (finalSteadySince_ == 0) finalSteadySince_ = now;
         } else {
@@ -1633,7 +1648,10 @@ void Lift::trace(std::uint32_t now, char phase, double position, double mv, bool
     s.ms = now;
     s.phase = phase;
     s.pos10 = toI16(position * 10.0);
-    s.goal10 = active_ ? toI16(goal_ * 10.0) : static_cast<std::int16_t>(-1);
+    // "No target" sentinel. It used to be -1, which meant goal 0 -- fine when 0 was the bottom and
+    // nothing commanded a negative height. The bottom is now -31.9, so -1 is a REACHABLE goal (-0.1
+    // deg) and the sentinel has to sit outside the whole range: INT16_MIN is -3276.8 deg.
+    s.goal10 = active_ ? toI16(goal_ * 10.0) : std::numeric_limits<std::int16_t>::min();
     s.vel = toI16(velocity_);
     s.mv = toI16(mv);
     s.ratio = toI16(aux.ratioPct);

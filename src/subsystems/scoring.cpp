@@ -37,8 +37,10 @@ bool Scoring::pivotDone() const {
 
 void Scoring::command(double degrees, bool precise) {
     // Only send a target when it changes, so the driver's Up/Down fine-tune isn't overwritten every loop.
-    if (degrees == commanded_) return;
+    // hasCommanded_ rather than a sentinel height: every double is now a reachable height.
+    if (hasCommanded_ && degrees == commanded_) return;
     commanded_ = degrees;
+    hasCommanded_ = true;
     lift_.setTarget(degrees, precise);
 }
 
@@ -58,36 +60,35 @@ bool Scoring::liftArrived(double degrees) const {
 double Scoring::levelHeight() const { return stepGoal_; }
 
 void Scoring::resetStep() {
-    stepGoal_ = 0.0;
-    stepDown_ = false;
+    stepGoal_ = preset::DOWN;
     level_ = 1;
 }
 
 void Scoring::advanceStep() {
     const double step = config::L1_STEP_DEG;
     const double ceiling = config::L1_STEP_CEILING_DEG;
-    // Reverse at BOTH ends, so the ladder is a bounce rather than a dead end -- a driver who has walked
-    // it to the top and wants to come back down presses the same button, and one who walks it all the
-    // way back down can go up again without reaching for anything else.
-    if (!stepDown_) {
-        if (stepGoal_ >= ceiling - 0.01) {
-            stepDown_ = true;                              // at the top: this press starts coming down
-            stepGoal_ = std::max(stepGoal_ - step, 0.0);
-        } else {
-            // The last step up lands ON the top level rather than at the nearest multiple of the step,
-            // so the top of the ladder is a real measured scoring height.
-            stepGoal_ = std::min(stepGoal_ + step, ceiling);
-        }
-    } else {
-        if (stepGoal_ <= 0.01) {
-            stepDown_ = false;                             // back at the bottom: go up again
-            stepGoal_ = std::min(stepGoal_ + step, ceiling);
-        } else {
-            stepGoal_ = std::max(stepGoal_ - step, 0.0);
-        }
-    }
-    // The rung number is for the brain only; it is derived so it can never disagree with the height.
-    level_ = std::max(1, static_cast<int>(std::lround(stepGoal_ / step)));
+
+    // UP ONLY (2026-10-07, the driver's call): "move it up 20 degrees each time". The ladder used to
+    // reverse at the top and walk back down; it now STOPS at the ceiling, and further presses are a
+    // no-op. Coming down is L2 / B / R2, never L1.
+    //
+    // THE STEP IS RELATIVE TO WHERE THE LIFT IS HEADING, not to a stored rung. Using the lift's own
+    // active TARGET (not its position) is what makes rapid L1 taps stack correctly -- the arm is still
+    // flying when the second tap lands, so its position lags, but its target is already the first
+    // rung. With nothing commanded -- which is exactly the state the D-pad override leaves behind,
+    // because manual control calls Lift::cancel() and that clears active_ -- fall back to the measured
+    // position, so the next press steps 20 deg above wherever the driver left the arm. That makes the
+    // manual handoff automatic and needs no extra bookkeeping in Lift.
+    const double base = lift_.hasActiveTarget() ? lift_.getTarget() : lift_.getPosition();
+
+    // The last step up lands ON the top measured level rather than at the nearest multiple of the
+    // step, so the top of the ladder is a real scoring height. The low clamp means a step can never
+    // command the arm below its own hard stop.
+    stepGoal_ = std::clamp(base + step, preset::DOWN, ceiling);
+
+    // The rung number is for the brain only; it is derived from the height so the two cannot disagree,
+    // and it is counted FROM THE BOTTOM (which is -31.9, not 0).
+    level_ = std::max(1, static_cast<int>(std::lround((stepGoal_ - preset::DOWN) / step)));
 }
 
 double Scoring::heightOf(State s) const {
@@ -149,7 +150,7 @@ void Scoring::handleClampEvent() {
         // handoff" and runs the ordinary GRAB (which finds the jaws already shut, skips the close,
         // pushes, then rises to level 1). commanded_ is dropped because the arm is no longer at the
         // height this class asked for.
-        commanded_ = -1.0;
+        hasCommanded_ = false;
         // AND THEN GO UP BY ITSELF (config::AUTOCLAMP_INTAKE_AUTO_STACK, driver 2026-10-07). The
         // INTAKE_POS case in update() watches the push and enters STACKING on level 1 the tick it
         // ends -- no L1 press needed. Set here rather than acted on here because the push has to
@@ -185,14 +186,14 @@ void Scoring::handleClampEvent() {
     // The arm is already at (or above) the software top: there is no room to hop into, and MAX is BELOW
     // an arm the D-pad has pushed past it. Do nothing rather than turn the hop into a descent.
     if (goal <= here + 0.1) return;
-    commanded_ = -1.0;  // this class is not tracking the height any more; the hop is the lift's move
+    hasCommanded_ = false;  // this class is not tracking the height any more; the hop is the lift's move
     lift_.startClampRise(goal);
 }
 
 void Scoring::enter(State next) {
     state_ = next;
     stateStart_ = pros::millis();
-    commanded_ = -1.0;
+    hasCommanded_ = false;
     // Any state change cancels a pending auto-rise: if the driver pressed L1/L2/R1/B between the
     // autoclamp's push and its automatic trip to level 1, their button wins. The INTAKE_POS handler
     // clears this itself before entering STACKING, so this never eats its own transition.
@@ -235,7 +236,7 @@ void Scoring::enter(State next) {
             }
             break;
         case State::SCORED:
-            resetStep();  // the next L1 starts from the bottom of the ladder again
+            resetStep();  // rung counter back to 1; the next L1 steps up from wherever the arm is
             break;       // the lift is holding above the stack; wait for the next button
         case State::RETURNING:
             // L2 press 2 (or B from SCORED): the fast run home that ends SEATED on the hard stop.
@@ -258,7 +259,7 @@ bool Scoring::inHandoffZone() const {
 // ---------------------------------------------------------------------------
 void Scoring::reset() {
     state_ = State::IDLE;
-    commanded_ = -1.0;
+    hasCommanded_ = false;
     // reset() sets state_ directly instead of going through enter(), so the pending auto-rise has to
     // be cleared here too -- the manual override (D-pad) calls this every tick it is held, and must
     // not be followed by an automatic trip to level 1 the moment it is let go.
@@ -298,12 +299,12 @@ void Scoring::goToIntake() {
         return;
     }
     if (state_ == State::INTAKE_POS) {
-        commanded_ = -1.0;  // re-tap snaps it back to INTAKE after a manual nudge
+        hasCommanded_ = false;  // re-tap snaps it back to INTAKE after a manual nudge
         command(preset::INTAKE);
         return;
     }
     if (state_ == State::MOVING && moveDest_ == State::INTAKE_POS) {
-        commanded_ = -1.0;  // already heading there, just re-send it
+        hasCommanded_ = false;  // already heading there, just re-send it
         return;
     }
     moveTo(State::INTAKE_POS);
@@ -312,7 +313,7 @@ void Scoring::goToIntake() {
 void Scoring::stepUp() {
     switch (state_) {
         case State::CLAMPING:
-        case State::STACKING: advanceStep(); break;  // one more L1_STEP_DEG (reversing at the ends)
+        case State::STACKING: advanceStep(); break;  // L1_STEP_DEG further up, stopping at the ceiling
         case State::RELEASING:
         case State::GRABBING:
         case State::LIFT_SETTLE:
@@ -322,16 +323,16 @@ void Scoring::stepUp() {
             // just closes the jaws and rises: the arm first FORCES ITSELF DOWN onto the pin while the
             // jaws close around it, and only then rises to level 1. The intake stops for the whole
             // push. Everything about the push is config::L1_GRAB_*; see "THE GRAB" in lift.hpp.
-            // The ladder starts at its FIRST rung (L1_STEP_DEG), not at 0 -- resetStep() alone would
-            // ask STACKING for height 0, i.e. no rise at all.
-            resetStep();
+            // advanceStep() is the first rung: L1_STEP_DEG above where the lift is heading, which here
+            // is the handoff (-3.3), so STACKING is asked for 16.7. It seeds itself from the lift, so
+            // no resetStep() is needed in front of it any more -- that used to be required back when
+            // the ladder counted from a stored 0.
             advanceStep();
             grabRise_ = true;
             enterWhenSettled(State::GRABBING);
             break;
         default:
-            resetStep();
-            advanceStep();  // the first rung, for the same reason as the INTAKE_POS case above
+            advanceStep();  // the first rung: L1_STEP_DEG above wherever the arm is heading right now
             // The claw can already be CLAMPED here -- L2's down-state clamp (score(), above) shuts it
             // with the arm still at the bottom, well before this tap lands. CLAMPING's
             // CLAW_CLOSE_TIME_MS wait exists so the lift doesn't pull out of jaws that are still
@@ -395,12 +396,12 @@ void Scoring::scoreOrMatchload() {
     }
     if (state_ == State::RELEASING) return;
     if (state_ == State::MATCHLOAD_POS) {
-        commanded_ = -1.0;  // re-tap snaps it back to MATCHLOAD after a manual nudge
+        hasCommanded_ = false;  // re-tap snaps it back to MATCHLOAD after a manual nudge
         command(preset::MATCHLOAD);
         return;
     }
     if (state_ == State::MOVING && moveDest_ == State::MATCHLOAD_POS) {
-        commanded_ = -1.0;
+        hasCommanded_ = false;
         return;
     }
     moveTo(State::MATCHLOAD_POS);
@@ -460,16 +461,21 @@ void Scoring::update() {
             // THE AUTOCLAMP'S OWN TRIP TO LEVEL 1. handleClampEvent() above started the forced push
             // down onto the pin and set autoStackAfterPush_; the push owns the lift while it runs, so
             // wait for it to finish (Lift::isGrabbing() covers startClampPush -- it IS a GRAB) and
-            // only then rise. resetStep() + advanceStep() is the FIRST rung of L1's ladder, exactly
-            // what an L1 press from the handoff asks for -- resetStep() alone would ask for height 0,
-            // i.e. no rise at all. STACKING then commands the height and swings the pivot OUT to the
-            // scoring position once the arm has arrived (interlock 2).
+            // only then rise. advanceStep() is the FIRST rung of L1's ladder, exactly what an L1 press
+            // from the handoff asks for. STACKING then commands the height and swings the pivot OUT to
+            // the scoring position once the arm has arrived (interlock 2).
+            //
+            // WHERE THE FIRST RUNG LANDS UNDER UP-ONLY STEPPING (checked 2026-10-07): the push leaves
+            // the lift with an active target, because Lift::startPush() sets goal_ = the position the
+            // push STARTED from -- the handoff, -3.3 -- and never moves it (the forcing is voltage, not
+            // a goal). So advanceStep()'s base is -3.3 and the rung is 16.7, which is the same place an
+            // L1 press from the handoff goes. It is NOT the pushed-down position, which is what would
+            // have made this rise short.
             if (autoStackAfterPush_ && !lift_.isGrabbing()) {
                 autoStackAfterPush_ = false;
                 // Nothing in the jaws after all (the pin was knocked out by the push): stay down and
                 // keep waiting at the handoff rather than rising with an empty claw.
                 if (!claw_.isClamped()) break;
-                resetStep();
                 advanceStep();
                 enter(State::STACKING);
             }

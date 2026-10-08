@@ -61,6 +61,37 @@ void Lift::initState() {
     //     own all-time count, straight through.
     //
     // set_reversed() is still applied once in the constructor, so every read is consistently signed.
+    //
+    // THE ONE-OFF STARTUP UNWRAP (driver's option A, 2026-10-07). The sensor's counter comes up
+    // holding its SINGLE-TURN angle, [0, 90) arm degrees at the 4:1 ratio, so an arm resting below 0
+    // reports as a large positive number -- "it thinks our like -30 area = 100". Read it ONCE here and,
+    // if it is at or above LIFT_STARTUP_WINDOW_TOP_DEG, carry a fixed -90 arm (one whole sensor turn)
+    // offset on every later read. THE SENSOR IS NEVER WRITTEN. Full reasoning, and what still reads
+    // wrong, under "STARTUP UNWRAP" in config.hpp.
+    startupOffsetDeg_ = 0.0;
+    sensorBad_ = false;
+    lastGoodPosition_ = 0.0;
+    if (rotation_) {
+        // Bounded retry: a sensor still waking up at program start answers PROS_ERR for a few ms, and
+        // giving up instantly would leave the offset unresolved for the whole run.
+        const std::uint32_t deadline = pros::millis() + config::LIFT_SENSOR_START_RETRY_MS;
+        std::int32_t raw = rotation_->get_position();
+        while (raw == PROS_ERR && pros::millis() < deadline) {
+            pros::delay(5);
+            raw = rotation_->get_position();
+        }
+        if (raw == PROS_ERR) {
+            // Never answered. Leave the offset at 0 and latch the fault: update() will brake and the
+            // brain shows SENSOR BAD, which is far better than silently trusting a bad frame.
+            sensorBad_ = true;
+        } else {
+            const double armDeg = raw / 100.0 / config::LIFT_ROTATION_RATIO;
+            if (armDeg >= config::LIFT_STARTUP_WINDOW_TOP_DEG) {
+                startupOffsetDeg_ = -360.0 / config::LIFT_ROTATION_RATIO;  // -90 arm deg
+            }
+            lastGoodPosition_ = armDeg + startupOffsetDeg_;
+        }
+    }
     active_ = false;
     goal_ = 0.0;
     precise_ = descent_ = false;
@@ -114,18 +145,21 @@ double Lift::getMotorPosition() const {
 
 double Lift::getSensorPosition() const {
     if (!rotation_) return 0.0;
-    // THE ALL-TIME POSITION, STRAIGHT THROUGH. centidegrees -> sensor degrees -> arm degrees, with
-    // nothing subtracted, folded, offset or reset anywhere in this program (driver, 2026-10-07).
-    //
-    // get_position(), NOT get_angle(), and that is the whole point. get_angle() is the sensor's
-    // single-turn absolute angle, 0..360 sensor degrees = only 90 ARM degrees at LIFT_ROTATION_RATIO
-    // 4, while the arm travels lift_preset::DOWN..MAX = -31.9..111.9 = 143.8 arm = 575.2 SENSOR
-    // degrees, i.e. about 1.6 sensor turns. An angle therefore cannot tell some arm heights apart at
-    // all (the hard stop, -31.9 arm = -127.6 sensor, is the same angle as about +58 arm). Only
-    // get_position() counts turns, so only get_position() can describe the whole range -- which is
-    // what makes "start auton with the lift up and have it read its real height" possible.
-    return rotation_->get_position() / 100.0 / config::LIFT_ROTATION_RATIO;
+    const std::int32_t raw = rotation_->get_position();
+    // THE SENSOR STOPPED ANSWERING. PROS_ERR is INT32_MAX, so dividing it through would report about
+    // 5.4 million arm degrees and every loop would chase it. Hold the last good reading instead and
+    // latch sensorBad_; update() turns that into the lift's ordinary FAULT, which brakes and stops.
+    if (raw == PROS_ERR) {
+        sensorBad_ = true;
+        return lastGoodPosition_;
+    }
+    // THE ALL-TIME POSITION plus the one-off startup unwrap (0 or -90 arm). Nothing is ever written
+    // back to the sensor -- see "STARTUP UNWRAP" in config.hpp.
+    lastGoodPosition_ = raw / 100.0 / config::LIFT_ROTATION_RATIO + startupOffsetDeg_;
+    return lastGoodPosition_;
 }
+
+
 
 double Lift::getTemperature() const {
     double hottest = 0.0;
@@ -1395,6 +1429,20 @@ void Lift::update() {
     if (dt < 0.001) dt = 0.001;
     lastUpdate_ = now;
     const double position = getPosition();
+
+    // THE SENSOR IS NOT ANSWERING. getSensorPosition() has latched sensorBad_ and is holding the last
+    // good reading, so `position` is stale, not garbage -- but a stale position must not drive a loop.
+    // Turn it into the lift's ordinary FAULT: brake, drop the output, and stop. isFaulted() already
+    // makes every macro let go and the brain already shows FAULT (plus SENSOR BAD, see screen.cpp).
+    if (sensorBad_) {
+        if (active_) cancel();
+        faulted_ = true;
+        motors_.brake();
+        lastOutput_ = 0.0;
+        lastVRef_ = 0.0;
+        trace(now, 'F', position, 0.0, true);
+        return;
+    }
 
     // Velocity, every tick in every mode, so it is already warm when a move starts: differenced
     // position, with LIFT_VEL_FILTER of each new sample blended in.

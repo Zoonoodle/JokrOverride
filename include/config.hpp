@@ -82,6 +82,38 @@ inline constexpr bool LIFT_ROTATION_REVERSED = false;        // TODO(team): chec
 // degrees in brackets next to the converted arm degrees so this can be checked by hand.
 inline constexpr double LIFT_ROTATION_RATIO = 4.0;           // confirmed: sensor is on the 12T motor axle
 
+// ---------------------------------------------------------------------------
+// STARTUP UNWRAP — a patch over the 4:1 geometry. DELETE IT IF THE SENSOR MOVES.
+// ---------------------------------------------------------------------------
+// THE PROBLEM. The rotation sensor's position counter is initialised from its SINGLE-TURN absolute
+// angle, which is [0, 360) sensor degrees = [0, 90) ARM degrees at LIFT_ROTATION_RATIO 4. The arm
+// travels lift_preset::DOWN..MAX = -39..137.7 = 176.7 arm degrees, nearly two sensor turns, so at
+// program start the reading is only ever `true_arm_angle mod 90`. Start the arm below 0 and the
+// bottom reports as a large POSITIVE number instead -- the driver, 2026-10-07: "if lift starts in a
+// position that reads lower than 0 degrees due to rotation sensor, the value gets jumbled and now it
+// thinks our like -30 area = 100". The arithmetic: -39 reads +51.0, -30 reads +60.0, -5 reads +85.0,
+// -2.2 reads +87.8. (Above +90 wraps the same way: 132.7 would read +42.7.)
+//
+// THE PATCH. Lift::initState() reads the sensor ONCE at program start and, if the arm degrees come
+// back at or above LIFT_STARTUP_WINDOW_TOP_DEG, keeps a fixed software offset of one whole sensor turn
+// (-90 arm) for every later read. NOTHING IS EVER WRITTEN TO THE SENSOR -- no set_position, no reset;
+// the counter keeps accumulating on its own, so once running the arm tracks its full range normally.
+//
+// WHAT READS RIGHT: any start position in [-45, +45). That is where the arm physically rests with the
+// motors unpowered, so in practice always.
+// WHAT READS WRONG: a start above +45, which comes back 90 arm degrees low. DO NOT POWER ON WITH THE
+// ARM UP AT A STACK LEVEL. There is no fix for that at this gear ratio -- one sensor turn is only 90
+// arm degrees and the arm needs 176.7, so no single window can cover it.
+//
+// THE REAL FIX, which makes all of this unnecessary: move the sensor onto the 48T OUTPUT axle, set
+// LIFT_ROTATION_RATIO to 1.0, and the whole 176.7-degree travel fits inside one sensor turn -- the
+// single-turn absolute angle then resolves every position, forever, power cycles included. When that
+// happens, DELETE this constant and the unwrap in Lift::initState().
+inline constexpr double LIFT_STARTUP_WINDOW_TOP_DEG = 45.0;  // TUNE: arm deg; >= this unwraps by -90
+// The startup read is retried this long before giving up, so a sensor that is still waking up at
+// program start does not cost the whole frame. On giving up the offset stays 0 and the lift faults.
+inline constexpr int LIFT_SENSOR_START_RETRY_MS = 250;       // TUNE
+
 // Preset heights, in DEGREES OF THE LIFT ARM (what lift.getPosition() returns -- rotation sensor
 // centidegrees already divided by LIFT_ROTATION_RATIO, see the lift gearing note above). 0 = fully
 // down (where the robot is turned on). Measured straight off the brain's LIFT line in 7 reference

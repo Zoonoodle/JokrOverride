@@ -71,10 +71,20 @@ void draw() {
     // homing state (HOMING / HOMED / HOME FAIL @ <angle>) and the R1/R2 mode. If a lift button seems
     // to do nothing, this line says why.
     {
-        char status[14] = "";
-        if (lift.isFaulted()) std::snprintf(status, sizeof(status), " FAULT");
+        char status[20] = "";
+        // SENSOR BAD comes FIRST: it is the one fault that makes every other number on this line
+        // stale, so it must not be hidden behind a generic FAULT.
+        if (lift.isSensorBad()) std::snprintf(status, sizeof(status), " SENSOR BAD");
+        else if (lift.isFaulted()) std::snprintf(status, sizeof(status), " FAULT");
         else if (lift.isScoreStuck()) std::snprintf(status, sizeof(status), " SCORE STUCK");
         else if (lift.isBlocked()) std::snprintf(status, sizeof(status), " BLOCKED");
+
+        // THE STARTUP UNWRAP, shown only when it actually fired, so the driver can tell at a glance
+        // whether the arm powered on inside the wrapped half-turn. Blank when the offset is 0.
+        char wrap[12] = "";
+        if (lift.startupOffsetDeg() != 0.0) {
+            std::snprintf(wrap, sizeof(wrap), " wrap%+.0f", lift.startupOffsetDeg());
+        }
 
         char home[24] = "";
         switch (lift.getHomeState()) {
@@ -89,12 +99,12 @@ void draw() {
         }
 
         if (lift.hasActiveTarget()) {
-            pros::screen::print(pros::E_TEXT_MEDIUM, 1, "LIFT  %.1f -> %.1f  %s  %s%s%s  R:%s     ",
+            pros::screen::print(pros::E_TEXT_MEDIUM, 1, "LIFT  %.1f -> %.1f  %s  %s%s%s%s  R:%s   ",
                                 lift.getPosition(), lift.getTarget(), lift.activePresetName(),
-                                lift.phaseName(), status, home, rModeName());
+                                lift.phaseName(), status, wrap, home, rModeName());
         } else {
-            pros::screen::print(pros::E_TEXT_MEDIUM, 1, "LIFT  %.1f -> none%s%s  R:%s          ",
-                                lift.getPosition(), status, home, rModeName());
+            pros::screen::print(pros::E_TEXT_MEDIUM, 1, "LIFT  %.1f -> none%s%s%s  R:%s        ",
+                                lift.getPosition(), status, wrap, home, rModeName());
         }
     }
 

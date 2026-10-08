@@ -207,9 +207,15 @@
  * LIFT_HOME_MV until the raw sensor stops changing (less than LIFT_HOME_STILL_DEG
  * of SENSOR movement across LIFT_HOME_STILL_MS, checked only after
  * LIFT_HOME_MIN_DRIVE_MS of driving), then -- only if the sensor's absolute angle
- * is within LIFT_HOME_ZERO_WINDOW_DEG of its calibrated zero -- set_position(0)
- * and stop pushing. If it stops somewhere else, or times out, it stops pushing,
- * keeps zero()'s seed and reports HOME FAIL rather than zeroing to a wrong place.
+ * is within LIFT_HOME_ZERO_WINDOW_DEG of its calibrated zero -- report HOME DONE
+ * and stop pushing. If it stops somewhere else, or times out, it reports HOME FAIL.
+ *
+ * HOMING NO LONGER WRITES THE SENSOR (2026-10-07). It used to set_position(0) at the
+ * stop; nothing in this program resets the lift's position any more, so homing can
+ * only CHECK and report, which leaves it with nothing to accomplish --
+ * config::LIFT_HOME_ON_ENABLE is false and must stay false. The wrap it was written
+ * for is handled instead by the startup unwrap in initState(); see "STARTUP UNWRAP"
+ * in config.hpp for what that fixes and what it cannot.
  *
  * Homing is the ONE deliberate exception to "nothing moves at startup", and it is
  * kept narrow on purpose: it never runs from initialize(). main.cpp requests it at
@@ -426,6 +432,13 @@ class Lift {
     bool isBlocked() const { return blocked_; }
     /** True if the runaway guard tripped. */
     bool isFaulted() const { return faulted_; }
+    /** The one-off startup unwrap, in ARM degrees: 0 normally, -90 when the arm powered on inside the
+     *  wrapped part of the sensor's single turn. See "STARTUP UNWRAP" in config.hpp. */
+    double startupOffsetDeg() const { return startupOffsetDeg_; }
+    /** True once the rotation sensor has stopped answering (PROS_ERR). The position then HOLDS its
+     *  last good value instead of dividing an error code through, and the lift faults so it stops
+     *  chasing garbage. Latched: it needs a power cycle or a re-plug plus a new command to clear. */
+    bool isSensorBad() const { return sensorBad_; }
 
     /** Hottest lift motor, deg C. The seat's own temperature guard uses this; it is no longer on the
      *  brain screen (every live number moved to the LIFT_TRACE terminal output -- see screen.hpp). */
@@ -747,6 +760,10 @@ class Lift {
 
     // runaway guard
     bool faulted_ = false;
+    // --- the startup unwrap and the sensor-failure guard (see config.hpp "STARTUP UNWRAP") ---
+    double startupOffsetDeg_ = 0.0;        // added to every sensor read; 0 or -90 arm degrees
+    mutable double lastGoodPosition_ = 0.0;  // held and returned while the sensor is not answering
+    mutable bool sensorBad_ = false;         // PROS_ERR seen; mutable because the read path is const
 
     // trace
     TraceSample trace_[kTraceSize] = {};

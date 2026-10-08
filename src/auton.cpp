@@ -757,6 +757,14 @@ void moveB(double distance, bool forwards, bool decreasing, int maxSpeed, int mi
     // motion may be in flight underneath it. And it is an AUTON move -- the driver loop owns the drive
     // in opcontrol, so refuse unless the auton tick is up.
     if (!running()) {
+        // SAY SO ON THE BRAIN, not just the terminal. This refusal looks exactly like a dead robot --
+        // moveB returns before it writes a single volt, and before the result line below -- so without
+        // this the only symptom is "the bot doesn't move" with a blank line 9. The usual cause is a
+        // moveB call placed ABOVE auton::begin() in autonomous(): the tick task does not exist yet, so
+        // running() is false. The guard itself is deliberate and stays: moveB writes leftDrive and
+        // rightDrive directly, so it must never run while the driver loop owns the drive.
+        pros::screen::print(pros::E_TEXT_MEDIUM, 9,
+                            "!! MOVEB REFUSED: auton::begin() first    ");
         std::printf("moveB refused: not in autonomous (auton::begin() has not run)\n");
         return;
     }

@@ -1019,9 +1019,13 @@ void Lift::endScoreClear(std::uint32_t now, double position) {
     scoredAbove_ = false;  // nothing is held above a stack any more
     descendRequest_ = false;
     blocked_ = false;
-    // setTarget() clears scoreCycle_ too, so the autoclamp comes back on as the descent starts -- the
-    // same moment press 2 used to give it back (see the note in startScoreReturn()).
     setTarget(config::lift_preset::DOWN);
+    // KEEP THE AUTOCLAMP INHIBITED ALL THE WAY DOWN. setTarget() clears scoreCycle_, which would hand
+    // the autoclamp back the instant the descent starts -- with the jaws open, travelling down right
+    // past the pin that was just placed, which it would then re-grab. Press 2 used to be the thing
+    // that gave it back, and there is no press 2 any more, so the inhibit is re-asserted here and
+    // enterSeat() ends it at the bottom.
+    scoreCycle_ = true;
     // setTarget() picked the config descent bands; keep the SCORING speed for both fast bands instead,
     // so the run to the bottom is the continuation of the press and not a separate, faster descent.
     // The slow zone, FINAL and SEAT are untouched.
@@ -1197,51 +1201,26 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             freeSince_ = 0;
             if (stuckSince_ == 0) stuckSince_ = now;
         }
-        if (releaseSettled && position <= config::L2_RELEASE_FLOOR_DEG) {
-            // Safety floor for THIS phase (separate job from the travel/floor release rules in PRESS,
-            // same constant on purpose -- see config.hpp): the jaws haven't resolved free-or-stuck yet
-            // but the arm is nearly at the bottom anyway -- stop treating this as a press and hand over
-            // to the fast run-home descent right here. Gated on clawReleased_ (acknowledged, or
-            // L2_RELEASE_ACK_MS has elapsed) so a PRESS-side floor release landing exactly ON this same
-            // height can never race Scoring out of ever seeing needsClawRelease() -- endScore() clears
-            // clawReleaseWanted_, and without this gate that could happen before Scoring's own 10 ms
-            // loop ever polled it.
-            // The jaws are open and we are as low as this press should ever go: skip the extra
-            // post-release push (there is nowhere left to push) and go straight to the clear rise.
+        // ONE EXIT, AND IT ALWAYS GOES DOWN. The release has settled, so carry straight on to the
+        // bottom at the scoring speed -- which is the whole of what a one-press score does.
+        //
+        // THIS REPLACES A FREED-vs-STUCK ARBITRATION THAT WAS THE BUG. That code asked "is the claw
+        // hooked on the pin?" by watching whether the arm was still moving, and it only made sense
+        // back when the next move was a RISE, where a hooked claw would have dragged the pin up with
+        // it. But the arm has just pressed a pin DOWN onto a stack, so it is STOPPED at the moment of
+        // release: freeSince_ stayed 0, stuckSince_ started at the first RELEASE tick, and at
+        // L2_STUCK_MS (250 ms) the "stuck" branch won every time -- two L2_UNSTICK_UP_DEG hops upward
+        // and then enterHold(), holding the arm at the release height and never descending. That is
+        // exactly "after it releases cup/pin, it stays in that position", in driver and in auton,
+        // because both run this same code.
+        //
+        // The question is moot now: the arm continues in the direction it was ALREADY travelling, so a
+        // hooked claw cannot drag anything up, and if it is still touching the pin it slides off on the
+        // way down -- which is what the old post-release push did anyway. Phase::UNSTICK and
+        // scoreStuck_ are no longer reachable from here; they are left in place as inert safety net
+        // rather than ripped out of the enum, phase names and trace in a bug fix.
+        if (releaseSettled) {
             endScoreClear(now, position);
-            return;
-        }
-        if (jawsOpen && releaseSettled && freeSince_ != 0 &&
-            now - freeSince_ >= static_cast<std::uint32_t>(config::L2_FREE_MS)) {
-            // THE CLAW CAME OFF THE PIN and the arm is running freely again. One-press score: carry
-            // straight on down to the bottom at the same speed -- no post-release push, no rise. Note
-            // this is only reached from the FREED check; a claw still hooked on the pin goes to UNSTICK
-            // below instead, so the descent can never drag a pin down with it.
-            endScoreClear(now, position);
-            return;
-        }
-        if (jawsOpen && stuckSince_ != 0 && now - stuckSince_ >= static_cast<std::uint32_t>(config::L2_STUCK_MS)) {
-            // Still stopped with the jaws open: the claw is hooked on the pin.
-            if (unstickTries_ < config::L2_MAX_UNSTICK_TRIES) {
-                ++unstickTries_;
-                phase_ = Phase::UNSTICK;
-                phaseStart_ = now;
-                pressRef_ = std::max(velocity_, 0.0);
-                unstickGoal_ = std::min(position + config::L2_UNSTICK_UP_DEG, config::lift_preset::MAX);
-                freeSince_ = 0;
-                stuckSince_ = 0;
-                velI_ = gravityMv_;
-                const double mv = runVelocityLoop(pressRef_, dt, config::LIFT_VEL_MAX_MV, config::LIFT_VEL_MAX_MV);
-                trace(now, 'U', position, mv, true, aux);
-                return;
-            }
-            // Out of tries. Stop, hold where it is, and report it -- never keep grinding.
-            scoreStuck_ = true;
-            score_ = false;
-            clawReleaseWanted_ = false;
-            blocked_ = true;  // so nothing mistakes this for an arrival at DOWN
-            enterHold(now, position);
-            runHold(now, dt, position);
             return;
         }
     }

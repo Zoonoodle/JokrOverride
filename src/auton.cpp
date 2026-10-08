@@ -8,6 +8,7 @@
 #include "pros/distance.hpp"
 #include "pros/error.h"
 #include "pros/rtos.hpp"
+#include "pros/screen.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -771,13 +772,18 @@ void moveB(double distance, bool forwards, bool decreasing, int maxSpeed, int mi
     const std::uint32_t startTime = pros::millis();
     std::uint32_t settleStartTime = 0;
     bool isSettled = false;
+    // WHY THE MOVE ENDED, for the report on the brain when it is over. "SETTLED" is the only good one.
+    const char* outcome = "TIMED OUT";
+    double lastSeen = -1.0;  // the final sensor reading, mm; -1 if it never got a valid one
     while (true) {
         if (pros::millis() - startTime > static_cast<std::uint32_t>(timeOutMs)) break;
         const std::int32_t currentDistance = robot::backDistance.get();
         if (currentDistance == PROS_ERR) {
             std::printf("Back distance sensor error\n");
+            outcome = "SENSOR ERR";
             break;
         }
+        lastSeen = static_cast<double>(currentDistance);
         if (currentDistance >= config::MOVEB_OUT_OF_RANGE_MM) {
             // KEPT AS-IS from the old library: nothing in range, so drive blind at full commanded
             // speed until something comes into range or timeOutMs ends the move.
@@ -797,6 +803,7 @@ void moveB(double distance, bool forwards, bool decreasing, int maxSpeed, int mi
                 settleStartTime = pros::millis();
                 isSettled = true;
             } else if (pros::millis() - settleStartTime >= static_cast<std::uint32_t>(settleTime)) {
+                outcome = "SETTLED";
                 break;
             }
         } else {
@@ -819,7 +826,21 @@ void moveB(double distance, bool forwards, bool decreasing, int maxSpeed, int mi
     }
     robot::leftDrive.move(0);
     robot::rightDrive.move(0);
-    std::printf("moveB complete\n");
+
+    // THE RESULT, where it can actually be read. Brain line 9 (LIFT0 owns 8, warnings own 5-7) and
+    // the terminal get the same figures, and the line STAYS until the next moveB -- so after a run at
+    // the wall the miss is still on screen to tune against. See "TUNING moveB" in config.hpp.
+    //   err is SIGNED in the same sense the loop uses: negative = stopped SHORT, positive = went PAST.
+    const double finalError = lastSeen < 0.0 ? 0.0
+                              : (decreasing ? lastSeen - distance : distance - lastSeen);
+    const std::uint32_t took = pros::millis() - startTime;
+    char seen[12];
+    if (lastSeen < 0.0) std::snprintf(seen, sizeof(seen), "--");
+    else std::snprintf(seen, sizeof(seen), "%.0f", lastSeen);
+    pros::screen::print(pros::E_TEXT_MEDIUM, 9, "MOVEB tgt %.0f got %s err %+.0fmm %lums %s    ",
+                        distance, seen, finalError, static_cast<unsigned long>(took), outcome);
+    std::printf("moveB done: target %.0fmm got %smm error %+.0fmm in %lums %s\n", distance, seen,
+                finalError, static_cast<unsigned long>(took), outcome);
 }
 
 int backDistanceMm() { return robot::backDistance.get(); }

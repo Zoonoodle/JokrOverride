@@ -1823,12 +1823,35 @@ inline constexpr int AUTON_CALIBRATE_TIMEOUT_MS = 3000;
 // omnis, so the same power produces a different speed and the same error produces a different
 // overshoot.
 inline constexpr int8_t BACK_DISTANCE_PORT = 14;             // confirmed 2026-10-03
-inline constexpr double MOVEB_KP = 0.28;                     // TUNE: power per mm of error
-inline constexpr double MOVEB_KD = 0.68;                     // TUNE: power per mm of error change per tick
-inline constexpr double MOVEB_TOLERANCE_MM = 5.0;            // TUNE: inside this counts as there
-inline constexpr int MOVEB_SETTLE_MS = 55;                   // TUNE: ...held this long = done
-inline constexpr int MOVEB_DEFAULT_MIN_SPEED = 15;           // TUNE: used when the caller passes minSpeed <= 0
-inline constexpr int MOVEB_OUT_OF_RANGE_MM = 9910;           // at/above this the sensor sees nothing
-inline constexpr int MOVEB_LOOP_MS = 20;                     // TUNE: the old library's loop period
+// ===========================================================================
+// TUNING moveB — THESE FOUR KNOBS, AND HOW TO TURN THEM
+// ===========================================================================
+// HOW TO TUNE IT: point the robot's BACK at a wall and run one move, e.g.
+//     auton::moveB(1050, true, false, 90, 20, 1500);
+// When it finishes, brain line 9 shows what happened:
+//     MOVEB tgt 1050 got 1043 err  -7mm 820ms SETTLED
+// "err" is the signed miss in mm: NEGATIVE = it stopped SHORT of the target, POSITIVE = it went PAST.
+// Run it again and change ONE knob at a time. The same line prints to the terminal too.
+//
+//   SYMPTOM                             WHAT TO CHANGE
+//   stops short every time, err small   lower MOVEB_TOLERANCE_MM (it is being allowed to stop early)
+//   stops short, err large, SETTLED     raise MOVEB_KP
+//   crawls the last bit / TIMED OUT     raise MOVEB_KP, or raise the minSpeed argument
+//   overshoots or hits the wall         raise MOVEB_KD first, then lower MOVEB_KP
+//   oscillates / hunts around target    raise MOVEB_KD; if it still hunts, lower MOVEB_KP
+//   whole move too slow                 raise the maxSpeed argument, then MOVEB_KP
+//   stops at a different place each run  raise MOVEB_SETTLE_MS (it is calling it done too eagerly)
+//
+// TUNE IN THIS ORDER: MOVEB_KP until it reaches the target without being painfully slow, then
+// MOVEB_KD until it stops overshooting, then MOVEB_TOLERANCE_MM / MOVEB_SETTLE_MS for how fussy
+// "arrived" is. maxSpeed and minSpeed are per-call ARGUMENTS, not constants -- change them in the
+// route, not here.
+inline constexpr double MOVEB_KP = 0.28;                     // TUNE: drive power per mm of error. UP = pulls harder / reaches further, too much = overshoot and hunting
+inline constexpr double MOVEB_KD = 0.68;                     // TUNE: braking per mm/tick of closing speed. UP = less overshoot and less hunting, too much = sluggish and twitchy
+inline constexpr double MOVEB_TOLERANCE_MM = 5.0;            // TUNE: how close counts as arrived. UP = stops sooner and sloppier, DOWN = more accurate but can time out
+inline constexpr int MOVEB_SETTLE_MS = 55;                   // TUNE: must stay inside tolerance this long. UP = more repeatable, slower to finish
+inline constexpr int MOVEB_DEFAULT_MIN_SPEED = 15;           // TUNE: floor power, used when the caller passes minSpeed <= 0
+inline constexpr int MOVEB_OUT_OF_RANGE_MM = 9910;           // at/above this the sensor sees nothing (not a tuning knob)
+inline constexpr int MOVEB_LOOP_MS = 20;                     // the loop period; leave it alone unless MOVEB_KD stops making sense
 
 }  // namespace config

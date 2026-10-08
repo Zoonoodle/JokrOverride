@@ -197,6 +197,12 @@ class Scoring {
     /** Run one step. Call every loop (10 ms). */
     void update();
 
+    /** Tell this class whether an AUTON routine is running, every tick, from periodic::tick(). It only
+     *  picks the clamp hop's delay (CLAMP_RISE_DELAY_AUTON_MS vs _DRIVER_MS). Fed from Inputs::auton
+     *  rather than pros::competition::is_autonomous() so a route run from the brain menu, which has no
+     *  field switch, still counts as auton. */
+    void setAutonMode(bool auton) { autonMode_ = auton; }
+
     State getState() const { return state_; }
     /** Which rung of L1's ladder the arm is on (1 = the first L1_STEP_DEG step), 0 when not stacking.
      *  Since 2026-10-03 this counts L1 PRESSES on a fixed-step ladder, not config::lift_preset
@@ -296,7 +302,7 @@ class Scoring {
     /** Put the ladder back at the bottom. Only the rung NUMBER is state; advanceStep() takes its
      *  height from the lift itself, so this does not pin where the next press goes. */
     void resetStep();
-    /** Run the delayed clamp hop: once CLAMP_RISE_DELAY_MS has passed since an autoclamp grab outside
+    /** Run the delayed clamp hop: once this mode's delay has passed since an autoclamp grab outside
      *  the intake sequence, rise CLAMP_RISE_DEG from wherever the arm is then. Called every tick. */
     void serviceClampHop();
     double heightOf(State s) const;
@@ -320,9 +326,13 @@ class Scoring {
     bool grabRise_ = false;               // GRABBING: rise to a stack level afterwards (L1), or stay
                                            // exactly where the push ended (auton::grab())
     // A clamp outside the intake sequence has fired and owes the arm a CLAMP_RISE_DEG hop, once
-    // CLAMP_RISE_DELAY_MS has passed. 0 = nothing pending. Cleared by enter() and reset(), which is
+    // pendingHopDelayMs_ has passed. 0 = nothing pending. Cleared by enter() and reset(), which is
     // what makes any driver input cancel it.
     std::uint32_t pendingHopAt_ = 0;
+    // The delay chosen for THIS pending hop, captured when the clamp fired so the mode cannot change
+    // under it: CLAMP_RISE_DELAY_AUTON_MS or CLAMP_RISE_DELAY_DRIVER_MS.
+    int pendingHopDelayMs_ = 0;
+    bool autonMode_ = false;  // set every tick by periodic::tick() from Inputs::auton
     // autoStackAfterPush_ IS GONE (2026-10-07). The "push, then rise to level 1 by itself" flag was
     // replaced by the real GRAB_SETTLE -> GRAB_PUSH -> GRAB_RISE states, which the clamp event enters
     // directly. Being a STATE rather than a flag is what makes "any driver input cancels it" free:

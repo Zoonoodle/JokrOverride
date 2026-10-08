@@ -164,6 +164,9 @@ void tick(const Inputs& in) {
     // driver's measured numbers -- a human aiming the claw wants the shorter reach, a route that drives
     // to a surveyed spot needs to commit from further out). Same deal: passed, never latched.
     robot::claw.setAutonMode(in.auton);
+    // Scoring needs the same fact, for the clamp hop's per-mode delay (0 in auton, 200 ms in driver --
+    // see CLAMP_RISE_DELAY_AUTON_MS). From here rather than is_autonomous() so a brain-menu run counts.
+    robot::scoring.setAutonMode(in.auton);
 
     // ...AND THE ENABLE ITSELF, every tick, for the same reason all three above are passed every tick.
     // THE BUG THIS FIXES (the driver, 2026-10-08): "when I start driver (raw, without doing auton),

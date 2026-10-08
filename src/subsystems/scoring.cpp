@@ -190,21 +190,27 @@ void Scoring::handleClampEvent() {
             break;
     }
 
-    // DON'T RISE YET. Let the jaws hold what they just caught for CLAMP_RISE_DELAY_MS before moving --
-    // only the TIME is recorded here. serviceClampHop(), called every tick from update(), does the
-    // rise when the delay is up, and re-checks the conditions then because 400 ms is long enough for
-    // them to change. Clearing this one timestamp is all it takes to cancel, which is why enter() and
-    // reset() can do it for free on any button.
+    // RECORD THE HOP, and the delay this mode wants. serviceClampHop(), called from update()
+    // immediately after this, does the rise once the delay is up and re-checks the conditions then,
+    // because the driver's 200 ms is long enough for them to change. In AUTON the delay is 0, so that
+    // call fires the rise on THIS VERY TICK -- no wait at all, which is the point. Clearing this one
+    // timestamp is all it takes to cancel, which is why enter() and reset() can do it for free.
     pendingHopAt_ = pros::millis();
+    pendingHopDelayMs_ =
+        autonMode_ ? config::CLAMP_RISE_DELAY_AUTON_MS : config::CLAMP_RISE_DELAY_DRIVER_MS;
 }
 
 void Scoring::serviceClampHop() {
     if (pendingHopAt_ == 0) return;
-    if (pros::millis() - pendingHopAt_ < static_cast<std::uint32_t>(config::CLAMP_RISE_DELAY_MS)) return;
+    if (pros::millis() - pendingHopAt_ < static_cast<std::uint32_t>(pendingHopDelayMs_)) return;
     pendingHopAt_ = 0;  // one-shot, whatever happens below
 
     // THE GRIP DID NOT HOLD. Knocked out, or shaken loose during the wait: stay down rather than lift
-    // an empty claw and pretend we have something.
+    // an empty claw and pretend we have something. KEPT UNCONDITIONALLY, including for auton's 0-delay
+    // path, where it can only ever pass: Claw::clampFrom() sets state_ = CLAMPED synchronously before
+    // it raises the event, so isClamped() is already true on the tick the event is consumed. It costs
+    // one comparison and stays a real guard for the driver's 200 ms wait, which is worth more than a
+    // branch that could only behave identically.
     if (!claw_.isClamped()) return;
     // Re-check what the delay may have changed. The STATE cannot have changed without enter() clearing
     // this, so only the lift's own business needs re-testing.

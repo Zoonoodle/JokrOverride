@@ -815,7 +815,7 @@ inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 // IT WAITS FIRST (driver, 2026-10-07): "whenever auto clamp actually grabs ANYWHERE besides inside the
 // intake (that's special), we need lift to move up 7.5 degrees from where it is automatically, but
 // delay it so it clamps for 400ms before doing that movement." So the arm stays exactly where the
-// clamp caught it for CLAMP_RISE_DELAY_MS, letting the jaws take a real grip on the cup or pin, and
+// clamp caught it for the mode's delay below, letting the jaws take a real grip on the cup or pin, and
 // only then rises CLAMP_RISE_DEG from wherever it is at THAT moment. Both numbers are below.
 //
 // WHAT TRIGGERS IT: a clamp the AUTOCLAMP DETECTOR made, outside the intake sequence -- picking up
@@ -835,11 +835,21 @@ inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 //   - an EMPTY CLAW at the end of the delay (the pin was knocked out while it waited): no rise.
 // ANY DRIVER INPUT CANCELS IT, during the delay or the rise, because the pending hop is cleared by
 // Scoring::enter() and Scoring::reset() -- which every button goes through.
+//
+// THE DELAY IS PER MODE (driver, 2026-10-07): "when auto clamp grabs in auton, it needs to lift up
+// immediately. When autoclamp grabs in driver ... it lifts up after 200ms." Auton has no time to
+// spare, so 0 means the rise starts on the SAME TICK as the clamp -- handleClampEvent() records the
+// hop and serviceClampHop() runs immediately after it in Scoring::update(), so a 0 delay never waits
+// for the next tick. Which value is used is decided WHEN THE CLAMP FIRES and then held, from
+// Scoring::setAutonMode(), which periodic::tick() feeds from Inputs::auton -- NOT from
+// pros::competition::is_autonomous(), because an auton route run from the brain menu has no field
+// switch and would otherwise be treated as driver control.
 //   It does not clear the thing it just gripped: raise CLAMP_RISE_DEG.
 //   It lifts far enough to matter / fights the next move: lower it (1-2 deg still moves, see above).
-//   It rises before the grip is solid and drops the cup: raise CLAMP_RISE_DELAY_MS.
+//   It rises before the grip is solid and drops the cup: raise CLAMP_RISE_DELAY_DRIVER_MS.
 inline constexpr double CLAMP_RISE_DEG = 7.5;                // TUNE: arm deg, RELATIVE, up only (8 -> 7.5)
-inline constexpr int CLAMP_RISE_DELAY_MS = 400;              // TUNE: hold still this long after the clamp
+inline constexpr int CLAMP_RISE_DELAY_AUTON_MS = 0;          // TUNE: 0 = same tick as the clamp
+inline constexpr int CLAMP_RISE_DELAY_DRIVER_MS = 200;       // TUNE: driver 2026-10-07 (was 400 both)
 
 // --- The D-pad manual override's speeds -------------------------------------
 // D-pad Up/Down are plain open-loop voltage straight into Lift::update(), ahead of everything else

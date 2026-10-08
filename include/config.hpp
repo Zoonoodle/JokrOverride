@@ -95,23 +95,40 @@ inline constexpr double LIFT_ROTATION_RATIO = 4.0;           // confirmed: senso
 // numbers carries that same constant offset. Re-measure against the brain's LIFT line (now reading
 // off the absolute zero) if anything here looks off on the real robot.
 namespace lift_preset {
-inline constexpr double DOWN = 0.0;                          // resting / start position (IMG_6088 read 0.1, i.e. ~0)
-// RAISED 1.1 -> 6.1 (2026-10-03, the driver: "make the intake state go up a 5 degrees more").
-// The old 1.1 came from photo IMG_6089 and was always suspect: 1.1 arm deg is only 4.4 sensor deg, about
-// a millimetre of end-effector travel on a six-bar, which is not a visible "lift to the handoff" at all
-// -- it was almost certainly a mis-read, or the photo was taken with the arm already resting at the
-// bottom. It was also smaller than the old LIFT_SETTLE_DEG (1.5), which is why R1 used to report
-// "arrived at INTAKE" without the arm moving. 6.1 is that number plus the driver's 5, set by eye on the
-// robot rather than re-measured from scratch, so it is a real improvement on a bad value rather than a
-// surveyed one. If it still does not line up: D-pad Up until the claw meets the handoff, read the brain's
-// LIFT line, and put THAT here.
-// TWO THINGS MOVE WITH IT, both deliberately relative so neither needed touching:
-//   - the pivot handoff zone is INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG, so it is now 6.1 .. 16.1;
-//   - INTAKE is auto-promoted to a PRECISE goal wherever it is commanded from (setTarget() matches it
-//     within half a degree), so it still gets the tight band and the slow final approach, and it is
-//     still never treated as a trip to the bottom. At 6.1 it is now also above LIFT_BOTTOM_GOAL_DEG (5)
-//     outright, so that promotion is no longer the only thing keeping it off the descent path.
-inline constexpr double INTAKE = 6.1;                        // driver-adjusted 2026-10-03 (was 1.1, photo-derived)
+// THE BOTTOM IS NO LONGER 0 (the driver, 2026-10-07: "The lift goes lower now too so it'll go lower
+// than 0; it's -31.9 now at the lowest position"). The arm's hard stop reads -31.9 on the brain's LIFT
+// line in the zero frame the rotation sensor is already calibrated to, and NOTHING about how or where
+// the lift is zeroed has changed -- Lift::zero() still seeds from the sensor's own persistent absolute
+// zero (see lift.cpp). What changed is only that this number is negative.
+//
+// EVERY "this many degrees above the bottom" THRESHOLD IS NOW WRITTEN AS `DOWN + <offset>` rather than
+// as a bare height, so there is exactly one place the bottom is stated. The ones that moved with it:
+// LIFT_BOTTOM_GOAL_DEG, LIFT_DESCENT_SLOW_ZONE_DEG, LIFT_FINAL_START_DEG, LIFT_REST_WAKE_DEG and
+// L2_RELEASE_FLOOR_DEG. LIFT_SEAT_ZERO_DEG is a WINDOW and stays a plain width; the code now measures
+// it from DOWN instead of from 0 (lift.cpp, FINAL's atZero test).
+// If the hard stop is ever re-measured, change THIS line and nothing else.
+// REVERTED 2026-10-07 from a half-finished change to -31.9. DO NOT set this negative on its own:
+// the rest of the lift still measures the bottom from 0, not from this constant --
+// LIFT_BOTTOM_GOAL_DEG, LIFT_DESCENT_SLOW_ZONE_DEG, LIFT_FINAL_START_DEG, LIFT_REST_WAKE_DEG,
+// L2_RELEASE_FLOOR_DEG, and the `atZero` test in lift.cpp (fabs(position) <= LIFT_SEAT_ZERO_DEG).
+// With DOWN at -31.9 a trip to the bottom declares SEAT about 32 deg ABOVE the hard stop and starts
+// the FINAL forcing push from there. Moving the bottom off 0 means changing all of those together.
+inline constexpr double DOWN = 0.0;                          // the hard stop / zero frame
+// THE INTAKE HANDOFF. History: 1.1 (photo-derived) -> 6.1 (driver, 2026-10-03) -> -3.3 (driver,
+// 2026-10-07). If it ever stops lining up: D-pad Up/Down until the claw meets the handoff, read the
+// brain's LIFT line, and put THAT here. One thing moves with it automatically and needed no touching --
+// the pivot handoff zone is INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG, so it is now -3.3 .. 6.7.
+// RE-MEASURED -3.3 (2026-10-07, the driver: "lift position for intaking is -3.3"), read straight off
+// the brain's LIFT line with the claw lined up at the handoff. It is ABOVE the bottom (-31.9) by 28.6
+// deg, so R1 from a seated arm is now a real rise of nearly 30 degrees, not the 6 it used to be.
+// IT IS STILL THE ONE PRECISE HEIGHT, and now precise in BOTH directions: the arm reaches it coming UP
+// from the hard stop as well as coming DOWN from a stack level, and the same slow final approach
+// applies either way (see LIFT_PRECISE_APPROACH_* below). setTarget() still auto-promotes any goal
+// within half a degree of this number to PRECISE, so no call site can forget, and -3.3 is far above
+// LIFT_BOTTOM_GOAL_DEG (now -26.9) so it is never mistaken for a trip to the bottom.
+// REVERTED 2026-10-07 to 6.1 along with DOWN above: -3.3 was measured in a zero frame where the
+// bottom was -31.9, and it is below the bottom in this one. Re-measure it if DOWN moves properly.
+inline constexpr double INTAKE = 6.1;                        // driver-measured handoff height
 inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covered by the reference photos yet
 // FRONT TOGGLE: the height the arm goes to at the start of the match route to flip the front toggle,
 // then comes straight back down from (fast -- see auton::liftDownFast()). Deliberately its OWN
@@ -1114,6 +1131,15 @@ inline constexpr int AUTOCLAMP_INTAKE_RANGE_MM = 75;         // TUNE: the trigge
 //   The pin gets pushed out / the intake is levered off the floor: LOWER it (or L1_GRAB_PUSH_PCT).
 //   The pin isn't seated in the jaws by the time the push ends: raise it.
 inline constexpr int AUTOCLAMP_INTAKE_PUSH_MS = 300;         // TUNE: ms of forced push down after the clamp
+// AFTER THE PUSH, GO STRAIGHT TO LEVEL 1 (driver, 2026-10-07). The autoclamp taking a pin at the
+// handoff used to end with the arm holding where the push stopped, waiting for an L1 press to do
+// anything else. With this on, the instant the push finishes the macro enters STACKING on the FIRST
+// rung of L1's ladder (L1_STEP_DEG) by itself -- the same state, height and pivot behaviour an L1
+// press from the handoff produces, so the pivot swings OUT to the scoring position once the arm has
+// arrived (see PIVOT_RISE_WAIT_MS). An L1 press after it still steps on up the ladder as normal.
+// Anything the driver presses in the meantime cancels it, because every state change clears the flag.
+//   You want the arm to stay down at the handoff after an autoclamp: set this false.
+inline constexpr bool AUTOCLAMP_INTAKE_AUTO_STACK = true;
 
 // ---------------------------------------------------------------------------
 // Field-facing distance sensors (brain screen, and moveB's feedback)
@@ -1250,6 +1276,18 @@ inline constexpr double PIVOT_HANDOFF_ZONE_DEG = 10.0;       // TUNE
 // How long the pivot takes to finish swinging. NOTE: until the port swap this timer was watching the
 // CLAW cylinder, so it has never actually been measured against the pivot. 250 ms is a safe guess.
 inline constexpr int PIVOT_TIME_MS = 250;                    // TUNE: never measured on the real pivot
+// THE PIVOT WAITS FOR THE ARM TO GET THERE (driver, 2026-10-07). On the way UP to a level the pivot
+// used to swing OUT as soon as the arm rose out of the handoff zone, i.e. part way through the rise,
+// while the arm was still moving. The driver's rule is the opposite: leave the pivot exactly where it
+// is until the LIFT HAS FINISHED getting into position, then swing it. So STACKING now waits for
+// liftArrived() and this is only the BACKSTOP behind it -- if the arm never reports arrival (blocked,
+// parked short, a target it cannot reach) the pivot swings anyway after this long, so a level can
+// never be left with the pivot stuck BACK. The driver's own estimate was "shouldn't take more than
+// 1 second"; the lift's own LIFT_MOVE_TIMEOUT_MS normally resolves a stuck move well before this.
+//   The pivot swings before the arm has stopped: this is not the cause -- raise LIFT_TOLERANCE_DEG's
+//   strictness or check liftArrived(); this timer only fires when arrival never happens.
+//   A blocked arm sits too long with the pivot BACK: lower it.
+inline constexpr int PIVOT_RISE_WAIT_MS = 1000;              // TUNE: ms before the pivot gives up waiting
 // THIS IS THE L1 DELAY. The first L1 tap closes the jaws and waits here before the lift is given any
 // target at all (Scoring::update(), case CLAMPING) -- interlock: the arm must not pull out of an open
 // claw. So the gap between pressing L1 and the arm moving is at least this long, by design.

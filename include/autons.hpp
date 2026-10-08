@@ -19,6 +19,17 @@ enum class Route {
     ODOM_TEST,  // the two straight-line odometry test moves
     MATCH,      // the real match route (template)
     SKILLS,     // the skills route (template)
+
+    // --- added 2026-10-07 -------------------------------------------------
+    MATCHLOAD_FINISH,  // matchload cycle then finish: the one the driver asked for by name.
+                       // STRUCTURE IS REAL, FIELD COORDINATES ARE PLACEHOLDERS -- see the
+                       // MATCHLOAD_* constants at the top of autons.cpp before running it.
+    MATCH_ALT,         // a second match route to iterate on without touching the working MATCH
+
+    // Lift/claw/pivot only -- NO drivetrain motion, so both are safe to run on a stand.
+    PIVOT_TEST,     // checks the pivot now waits for the arm to arrive before swinging OUT
+    AUTOCLAMP_TEST, // checks an autoclamp at the handoff rises to level 1 and swings the pivot OUT
+
     NONE,       // do nothing at all
 };
 

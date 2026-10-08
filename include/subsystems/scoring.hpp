@@ -27,8 +27,10 @@
  *                 config::PIVOT_BACK_AT_MATCHLOAD -- not currently wired to a driver button;
  *                 scoreOrMatchload() still reaches it for auton or a future button.
  *   CLAMPING      jaws closing; waits CLAW_CLOSE_TIME_MS so the lift doesn't pull out of an open claw
- *   STACKING      holding a pin, lift at STACK_LEVELS[level-1], pivot OUT (it swings OUT once the arm
- *                 has risen out of the handoff zone, INTAKE + PIVOT_HANDOFF_ZONE_DEG, or has arrived)
+ *   STACKING      holding a pin, lift at L1's ladder height, pivot OUT -- but it does NOT swing until
+ *                 the lift has FINISHED getting there (liftArrived(), backstopped by
+ *                 PIVOT_RISE_WAIT_MS). Entered by an L1 press, and also by the autoclamp on its own
+ *                 once its handoff push ends (config::AUTOCLAMP_INTAKE_AUTO_STACK).
  *   RELEASING     L2/score() with something held above the bottom -- THE SENSING SCORER. The jaws
  *                 stay SHUT and Lift::startScore() takes over the motion: it presses the pin down
  *                 onto the stack, watches the rotation sensor for the landing, and tells this class
@@ -65,11 +67,17 @@
  *
  * Interlocks:
  *   1. The arm never leaves the handoff until the jaws have had CLAW_CLOSE_TIME_MS to shut (CLAMPING).
- *   2. The handoff zone (lift_preset::INTAKE up to INTAKE + PIVOT_HANDOFF_ZONE_DEG) times the pivot:
- *      heading to or at the intake it is BACK inside the zone and OUT above it, so on R1 it swings
- *      BACK as the arm comes down into the zone and on L1 it swings OUT as the arm rises out of it (or
- *      when the arm arrives at the level, whichever is first -- it can never leave a level waiting).
- *      This only times the swing, it never gates the lift: the lift starts rising the same tick
+ *   2. The pivot's timing, which differs by direction since 2026-10-07.
+ *      GOING UP (STACKING) THE PIVOT WAITS FOR THE ARM: it is left exactly where it is until the lift
+ *      has FINISHED getting into position (liftArrived()), and only then swings OUT to the scoring
+ *      position. config::PIVOT_RISE_WAIT_MS is the backstop if arrival never comes (blocked, parked
+ *      short), so a level can never be left with the pivot stuck BACK. Until 2026-10-07 it swung the
+ *      moment the arm rose out of the handoff zone -- part way up, with the arm still moving.
+ *      COMING DOWN (MOVING to INTAKE) it is still placed by height: BACK inside the handoff zone
+ *      (lift_preset::INTAKE up to INTAKE + PIVOT_HANDOFF_ZONE_DEG) and OUT above it, so on R1 it
+ *      swings BACK as the arm comes down into the zone, not only once the lift reports "arrived" --
+ *      a slightly short stop still gets the pivot BACK in time for the handoff.
+ *      Neither case gates the lift: the lift starts rising the same tick
  *      CLAMPING ends. It replaces the old PIVOT_CLEAR interlock and L2 descent floor, which were
  *      written for the opposite pivot meaning and would have forbidden the very positions the driver
  *      wants (pivot BACK near the bottom at INTAKE, OUT at the bottom after L2). There is no height at
@@ -236,7 +244,10 @@ class Scoring {
      * THE CLAMP REACTION, run once at the top of every update() tick. It always CONSUMES
      * Claw::takeClampEvent(), so an event can never queue, and then does exactly one of three things:
      *   - at the R1 handoff, for a clamp the AUTOCLAMP made: Lift::startClampPush() -- force the claw
-     *     down onto the pin for config::AUTOCLAMP_INTAKE_PUSH_MS and hold there ("move down a bit");
+     *     down onto the pin for config::AUTOCLAMP_INTAKE_PUSH_MS and hold there ("move down a bit").
+     *     It also sets autoStackAfterPush_, so when that push ends the INTAKE_POS case in update()
+     *     takes the arm up to level 1 and the pivot OUT to the scoring position on its own, with no
+     *     L1 press (config::AUTOCLAMP_INTAKE_AUTO_STACK);
      *   - nothing at all, if the rise would fight something that already owns the lift (see the skip
      *     list in the implementation) or if the clamp was a manual one at the handoff;
      *   - otherwise: Lift::startClampRise() -- up config::CLAMP_RISE_DEG from wherever the arm is.
@@ -274,6 +285,10 @@ class Scoring {
                                            // scoreOrMatchload()'s INTAKE_POS destination
     bool grabRise_ = false;               // GRABBING: rise to a stack level afterwards (L1), or stay
                                            // exactly where the push ended (auton::grab())
+    bool autoStackAfterPush_ = false;     // the autoclamp pushed at the handoff and the macro owes
+                                           // itself a trip to level 1 once the push ends -- see
+                                           // config::AUTOCLAMP_INTAKE_AUTO_STACK. Cleared by every
+                                           // state change and by reset(), so any button cancels it.
     State pendingAfterSettle_ = State::IDLE;  // what LIFT_SETTLE is waiting to start
     std::uint32_t stateStart_ = 0;
     std::uint32_t pivotMovedAt_ = 0;

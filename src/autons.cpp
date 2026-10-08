@@ -43,7 +43,13 @@ namespace autons {
 // ===========================================================================
 // >>> THE ONE LINE TO CHANGE: which route autonomous() runs. <<<
 // ===========================================================================
-constexpr Route SELECTED = Route::MATCH;  // LIFT_TEST, ODOM_TEST, MATCH, SKILLS, NONE
+constexpr Route SELECTED = Route::MATCH;
+// LIFT_TEST, ODOM_TEST, MATCH, SKILLS, MATCHLOAD_FINISH, MATCH_ALT, PIVOT_TEST, AUTOCLAMP_TEST, NONE
+//
+// PIVOT_TEST and AUTOCLAMP_TEST drive NO wheels -- safe to run on a stand, and they are what to run
+// to check the two 2026-10-07 behaviour changes (pivot waits for the arm; an autoclamp at the handoff
+// goes to level 1 on its own). MATCHLOAD_FINISH's field coordinates are PLACEHOLDERS -- see the ML_*
+// constants below before running it.
 
 namespace {
 
@@ -68,6 +74,30 @@ constexpr double SKILLS_START_X = 0.0;       // TODO(team): map the real startin
 constexpr double SKILLS_START_Y = 0.0;       // TODO(team)
 constexpr double SKILLS_START_THETA = 0.0;   // TODO(team)
 constexpr double SKILLS_START_LEFT_MM = 0.0; // TODO(team): measure, 0 = no start alignment
+
+// MATCHLOAD_FINISH's start. Same front wall as MATCH until measured otherwise.
+constexpr double MATCHLOAD_START_X = 0.0;        // TODO(team): confirm for this route's start spot
+constexpr double MATCHLOAD_START_Y = 0.0;        // TODO(team)
+constexpr double MATCHLOAD_START_THETA = 0.0;    // TODO(team)
+constexpr double MATCHLOAD_START_LEFT_MM = MATCH_START_LEFT_MM;  // TODO(team): re-measure if it differs
+
+// ===========================================================================
+// MATCHLOAD_FINISH's FIELD NUMBERS -- every one of these is a PLACEHOLDER.
+// ===========================================================================
+// These are the only things standing between this route and a real run. They are deliberately
+// gathered here instead of being buried in the route so they can be measured and typed in one go.
+// NOTHING BELOW WAS MEASURED ON THE FIELD -- drive the robot there by hand, read the pose off the
+// brain, and type what you see. Until then the route will go to the wrong places.
+constexpr double ML_STATION_X = 0.0;      // TODO(team): in front of the matchload station
+constexpr double ML_STATION_Y = -12.0;    // TODO(team)
+constexpr double ML_STATION_HEADING = 0.0;  // TODO(team): facing the station
+constexpr double ML_STACK_X = -14.0;      // TODO(team): the stack this route scores on
+constexpr double ML_STACK_Y = -18.0;      // TODO(team)
+constexpr double ML_STACK_HEADING = 165.0;  // TODO(team)
+constexpr double ML_CLEAR_X = -12.0;      // TODO(team): backed clear of the stack
+constexpr double ML_CLEAR_Y = -32.0;      // TODO(team)
+/** How many matchload -> score cycles to try. */
+constexpr int ML_CYCLES = 2;              // TUNE
 
 // ---------------------------------------------------------------------------
 // LIFT_TEST — lift only. No drivetrain motion at all.
@@ -300,6 +330,141 @@ chassis.moveToPoint(-39, -16.5, 2000, {.forwards = false, .maxSpeed = 60});
     // score, moveB back to a wall to re-square, repeat.
 }
 
+// ---------------------------------------------------------------------------
+// PIVOT_TEST — lift / claw / pivot only. NO drivetrain motion: safe on a stand.
+// ---------------------------------------------------------------------------
+// WHAT TO WATCH (brain CLAW line shows OUT / BACK, LIFT line shows the height and phase):
+// the pivot must stay BACK for the WHOLE rise and only snap OUT once the LIFT line settles on the
+// level. If it swings while the arm is still moving, config::PIVOT_RISE_WAIT_MS fired early or
+// liftArrived() is reporting too soon. See interlock 2 in subsystems/scoring.hpp.
+void pivotTest() {
+    auton::waitHome();
+    if (!auton::liftHomed()) auton::liftDownAndWait();
+
+    // Put the pivot BACK by hand first, otherwise it is already OUT (its power-on position) and
+    // STACKING's swing would be a no-op with nothing to see.
+    auton::pivotBack(true);
+    auton::wait(500);
+
+    // STACKING bails out and heads back to the handoff if the jaws are empty, so give it something
+    // to "hold". Nothing is in the claw on a stand -- this just makes the state machine proceed.
+    auton::clawGrip();
+
+    auton::stepUpAndWait();   // rung 1: the pivot must stay BACK until the LIFT line settles
+    auton::wait(kTestHoldMs);
+
+    auton::pivotBack(true);   // put it BACK again and do it once more, one rung higher
+    auton::wait(500);
+    auton::stepUpAndWait();   // rung 2: same thing to watch
+    auton::wait(kTestHoldMs);
+
+    auton::clawOpen();
+    auton::liftDownAndWait();
+}
+
+// ---------------------------------------------------------------------------
+// AUTOCLAMP_TEST — lift / claw / pivot only. NO drivetrain motion: safe on a stand.
+// ---------------------------------------------------------------------------
+// HOW TO RUN IT: start the mode, and when the arm has settled at the handoff (brain STATE line reads
+// INTAKE) put a pin into the jaws by hand, or let the intake feed one in.
+// WHAT SHOULD THEN HAPPEN, with no button pressed at all:
+//   1. the jaws shut on it the instant the sensor sees it (AUTOCLAMP_INTAKE_CONFIRM_MS);
+//   2. the arm forces DOWN onto it for AUTOCLAMP_INTAKE_PUSH_MS (LIFT line: GRAB);
+//   3. the arm then rises to level 1 BY ITSELF (config::AUTOCLAMP_INTAKE_AUTO_STACK);
+//   4. the pivot swings OUT to the scoring position once the arm has arrived, not before.
+// If step 3 never happens, AUTOCLAMP_INTAKE_AUTO_STACK is false or a button cancelled it.
+void autoclampTest() {
+    auton::waitHome();
+    if (!auton::liftHomed()) auton::liftDownAndWait();
+
+    auton::autoclamp(true);
+    auton::goToIntakeAndWait();   // INTAKE_POS: pivot BACK, jaws open and armed
+
+    // Wait for the pin to be put in. This only STOPS waiting early; the clamp itself is asynchronous
+    // and needs nothing from here.
+    auton::waitUntilClamped(15000);
+
+    // Now watch the automatic push -> level 1 -> pivot OUT happen on its own.
+    auton::waitLift();
+    auton::wait(kTestHoldMs);
+    auton::wait(kTestHoldMs);
+
+    auton::clawOpen();
+    auton::liftDownAndWait();
+}
+
+// ---------------------------------------------------------------------------
+// MATCHLOAD_FINISH — matchload cycle, then finish. The route the driver asked for by name.
+// ---------------------------------------------------------------------------
+// !! THE FIELD COORDINATES IN THIS ROUTE ARE PLACEHOLDERS (the ML_* constants above). The SHAPE is
+// real and every call compiles and is the same code path the matching driver button uses, but the
+// positions were never measured. Measure them before running this anywhere near a real field.
+//
+// The shape: start -> grip the preload and score it -> then loop { go to the matchload station with
+// the jaws open so the autoclamp takes a pin -> let the macro carry it to level 1 by itself -> drive
+// to the stack -> score -> back clear } -> finish with the arm down and seated.
+void matchloadFinishAuto() {
+    auton::startPose(MATCHLOAD_START_X, MATCHLOAD_START_Y, MATCHLOAD_START_THETA,
+                     MATCHLOAD_START_LEFT_MM);
+
+    // --- The preload -------------------------------------------------------
+    auton::clawGrip();               // grip the pin the robot started with
+    auton::liftToFrontToggleAndWait();
+    auton::liftDownFast();
+
+    // --- The matchload cycles ---------------------------------------------
+    // The autoclamp is already ON (config::AUTOCLAMP_ON_IN_AUTON) and asynchronous, so arriving at
+    // the station with the jaws open is all it takes to pick a pin up.
+    for (int cycle = 0; cycle < ML_CYCLES; ++cycle) {
+        auton::autoclamp(true);
+        auton::goToIntake();         // jaws open, pivot BACK, arm down at the handoff
+
+        chassis.turnToHeading(ML_STATION_HEADING, 700);
+        chassis.moveToPoint(ML_STATION_X, ML_STATION_Y, 1500, {.forwards = false, .maxSpeed = 60});
+        chassis.waitUntilDone();
+
+        // Take a pin. If nothing arrives in time, stop cycling rather than drive to the stack with
+        // an empty claw and score nothing.
+        if (!auton::waitUntilClamped(2000)) break;
+
+        // NOTHING TO DO HERE. The autoclamp's own push runs and then the macro takes the arm to
+        // level 1 and swings the pivot OUT by itself (AUTOCLAMP_INTAKE_AUTO_STACK). Just wait for
+        // the arm to finish arriving before driving at the stack.
+        auton::waitLift();
+
+        // --- Score it ------------------------------------------------------
+        chassis.turnToHeading(ML_STACK_HEADING, 700);
+        chassis.moveToPoint(ML_STACK_X, ML_STACK_Y, 1500, {.forwards = false, .maxSpeed = 80});
+        chassis.waitUntilDone();
+        auton::scoreAndWait();       // press 1: press onto the stack, release at the landing, hold above
+
+        // --- Back clear, arm down, go again --------------------------------
+        chassis.moveToPoint(ML_CLEAR_X, ML_CLEAR_Y, 1000);
+        chassis.waitUntilDone();
+        auton::liftDownFast();
+    }
+
+    // Hand over to the driver in a known state: arm down and pressed onto its stop.
+    auton::liftDownAndWait();
+}
+
+// ---------------------------------------------------------------------------
+// MATCH_ALT — a second match route, so MATCH can stay the one that works.
+// ---------------------------------------------------------------------------
+// Copy of the MATCH opening only, deliberately left short: build the rest here and flip SELECTED
+// between MATCH and MATCH_ALT to compare them without editing either one.
+void matchAltRoute() {
+    auton::startPose(MATCH_START_X, MATCH_START_Y, MATCH_START_THETA, MATCH_START_LEFT_MM);
+    auton::clawGrip();
+
+    auton::liftToFrontToggleAndWait();
+    chassis.moveToPoint(0, 3, 500);
+    chassis.waitUntilDone();
+    auton::liftDownFast();
+
+    // TODO(team): the rest of this route.
+}
+
 }  // namespace
 
 Route selected() { return SELECTED; }
@@ -307,8 +472,10 @@ Route selected() { return SELECTED; }
 double expectedLeftMm() {
     switch (SELECTED) {
         case Route::MATCH: return MATCH_START_LEFT_MM;
+        case Route::MATCH_ALT: return MATCH_START_LEFT_MM;
         case Route::SKILLS: return SKILLS_START_LEFT_MM;
-        default: return 0.0;  // the test routes do not align
+        case Route::MATCHLOAD_FINISH: return MATCHLOAD_START_LEFT_MM;
+        default: return 0.0;  // the lift/pivot/odom test routes do not align
     }
 }
 
@@ -318,6 +485,10 @@ const char* selectedName() {
         case Route::ODOM_TEST: return "ODOM_TEST";
         case Route::MATCH: return "MATCH";
         case Route::SKILLS: return "SKILLS";
+        case Route::MATCHLOAD_FINISH: return "MATCHLOAD_FIN";
+        case Route::MATCH_ALT: return "MATCH_ALT";
+        case Route::PIVOT_TEST: return "PIVOT_TEST";
+        case Route::AUTOCLAMP_TEST: return "AUTOCLAMP_TEST";
         case Route::NONE: return "NONE";
     }
     return "?";
@@ -329,6 +500,10 @@ void run() {
         case Route::ODOM_TEST: odomTest(); break;
         case Route::MATCH: matchRoute(); break;
         case Route::SKILLS: skillsRoute(); break;
+        case Route::MATCHLOAD_FINISH: matchloadFinishAuto(); break;
+        case Route::MATCH_ALT: matchAltRoute(); break;
+        case Route::PIVOT_TEST: pivotTest(); break;
+        case Route::AUTOCLAMP_TEST: autoclampTest(); break;
         case Route::NONE: break;
     }
 }

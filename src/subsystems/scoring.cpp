@@ -150,6 +150,11 @@ void Scoring::handleClampEvent() {
         // pushes, then rises to level 1). commanded_ is dropped because the arm is no longer at the
         // height this class asked for.
         commanded_ = -1.0;
+        // AND THEN GO UP BY ITSELF (config::AUTOCLAMP_INTAKE_AUTO_STACK, driver 2026-10-07). The
+        // INTAKE_POS case in update() watches the push and enters STACKING on level 1 the tick it
+        // ends -- no L1 press needed. Set here rather than acted on here because the push has to
+        // FINISH first: the arm is still forcing down onto the pin this tick.
+        autoStackAfterPush_ = config::AUTOCLAMP_INTAKE_AUTO_STACK;
         return;
     }
 
@@ -188,6 +193,10 @@ void Scoring::enter(State next) {
     state_ = next;
     stateStart_ = pros::millis();
     commanded_ = -1.0;
+    // Any state change cancels a pending auto-rise: if the driver pressed L1/L2/R1/B between the
+    // autoclamp's push and its automatic trip to level 1, their button wins. The INTAKE_POS handler
+    // clears this itself before entering STACKING, so this never eats its own transition.
+    autoStackAfterPush_ = false;
     switch (next) {
         case State::IDLE: resetStep(); break;  // arrived home after score() lowers to DOWN (reset() sets IDLE directly, without going through enter())
         case State::INTAKE_POS:
@@ -250,6 +259,10 @@ bool Scoring::inHandoffZone() const {
 void Scoring::reset() {
     state_ = State::IDLE;
     commanded_ = -1.0;
+    // reset() sets state_ directly instead of going through enter(), so the pending auto-rise has to
+    // be cleared here too -- the manual override (D-pad) calls this every tick it is held, and must
+    // not be followed by an automatic trip to level 1 the moment it is let go.
+    autoStackAfterPush_ = false;
     resetStep();
 }
 
@@ -443,8 +456,26 @@ void Scoring::update() {
 
     const std::uint32_t elapsed = pros::millis() - stateStart_;
     switch (state_) {
-        case State::IDLE:
         case State::INTAKE_POS:
+            // THE AUTOCLAMP'S OWN TRIP TO LEVEL 1. handleClampEvent() above started the forced push
+            // down onto the pin and set autoStackAfterPush_; the push owns the lift while it runs, so
+            // wait for it to finish (Lift::isGrabbing() covers startClampPush -- it IS a GRAB) and
+            // only then rise. resetStep() + advanceStep() is the FIRST rung of L1's ladder, exactly
+            // what an L1 press from the handoff asks for -- resetStep() alone would ask for height 0,
+            // i.e. no rise at all. STACKING then commands the height and swings the pivot OUT to the
+            // scoring position once the arm has arrived (interlock 2).
+            if (autoStackAfterPush_ && !lift_.isGrabbing()) {
+                autoStackAfterPush_ = false;
+                // Nothing in the jaws after all (the pin was knocked out by the push): stay down and
+                // keep waiting at the handoff rather than rising with an empty claw.
+                if (!claw_.isClamped()) break;
+                resetStep();
+                advanceStep();
+                enter(State::STACKING);
+            }
+            break;
+
+        case State::IDLE:
         case State::MATCHLOAD_POS:
             break;  // waiting for the driver (autoclamp, if on, runs in claw.update())
 
@@ -508,10 +539,16 @@ void Scoring::update() {
             }
             const double h = levelHeight();
             command(h);  // the lift starts rising now, every time -- the pivot never gates it
-            // Interlock 2: the pivot swings BACK -> OUT once the pin has risen out of the handoff
-            // zone, or once the arm has arrived at the level (so a level can never be left waiting
-            // for it). From IDLE (pivot already OUT) this is a no-op.
-            if (!inHandoffZone() || liftArrived(h)) setPivot(true);
+            // Interlock 2: THE PIVOT WAITS FOR THE ARM (driver, 2026-10-07). It used to swing OUT the
+            // moment the pin rose out of the handoff zone -- part way up, with the arm still moving.
+            // Now it is left exactly where it is until the lift has FINISHED getting into position,
+            // and only then swings to the scoring position. config::PIVOT_RISE_WAIT_MS is the backstop
+            // behind that: if arrival never comes (blocked, parked short, an unreachable target) the
+            // pivot still swings, so a level can never be left with the pivot stuck BACK.
+            // From IDLE (pivot already OUT) all of this is a no-op.
+            if (liftArrived(h) || elapsed >= static_cast<std::uint32_t>(config::PIVOT_RISE_WAIT_MS)) {
+                setPivot(true);
+            }
             break;
         }
 

@@ -43,7 +43,7 @@ namespace autons {
 // ===========================================================================
 // >>> THE ONE LINE TO CHANGE: which route autonomous() runs. <<<
 // ===========================================================================
-constexpr Route SELECTED = Route::MATCH;
+constexpr Route SELECTED = Route::MATCHLOAD_FINISH;
 // LIFT_TEST, ODOM_TEST, MATCH, SKILLS, MATCHLOAD_FINISH, MATCH_ALT, PIVOT_TEST, AUTOCLAMP_TEST, NONE
 //
 // PIVOT_TEST and AUTOCLAMP_TEST drive NO wheels -- safe to run on a stand, and they are what to run
@@ -157,7 +157,7 @@ pros::delay(300);
     pros::delay(400);
        auton::liftDownFast();
    chassis.waitUntilDone();
-   
+    
    pros::delay(600);
       chassis.moveToPoint(0, -16, 1500, {.forwards = false, .maxSpeed = 70});
    
@@ -295,7 +295,7 @@ pros::delay(500);
     chassis.turnToHeading(35, 700);
     auton::liftDownFast();
     auton::autoclamp(true);
-    
+     
     chassis.moveToPoint(-16, -35, 2000, {.forwards = false, .maxSpeed = 60});
     
     // chassis.waitUntil(21);
@@ -404,48 +404,54 @@ void autoclampTest() {
 // the jaws open so the autoclamp takes a pin -> let the macro carry it to level 1 by itself -> drive
 // to the stack -> score -> back clear } -> finish with the arm down and seated.
 void matchloadFinishAuto() {
-    auton::startPose(MATCHLOAD_START_X, MATCHLOAD_START_Y, MATCHLOAD_START_THETA,
-                     MATCHLOAD_START_LEFT_MM);
+    
 
     // --- The preload -------------------------------------------------------
-    auton::clawGrip();               // grip the pin the robot started with
-    auton::liftToFrontToggleAndWait();
-    auton::liftDownFast();
+    auton::clawGrip();   
 
-    // --- The matchload cycles ---------------------------------------------
-    // The autoclamp is already ON (config::AUTOCLAMP_ON_IN_AUTON) and asynchronous, so arriving at
-    // the station with the jaws open is all it takes to pick a pin up.
-    for (int cycle = 0; cycle < ML_CYCLES; ++cycle) {
-        auton::autoclamp(true);
-        auton::goToIntake();         // jaws open, pivot BACK, arm down at the handoff
+    chassis.swingToHeading(9.5, lemlib::DriveSide::RIGHT, 800);
+    chassis.moveToPoint(2.8, -16.5, 1000, {.forwards = false, .maxSpeed = 90});
+     auton::liftPushUpFor(350);
+    chassis.waitUntilDone();
+ auton::liftPushFor(400);
+ pros::delay(200);
+    chassis.moveToPoint(3.0, -15.5, 500);
+    pros::delay(300);
+    auton::clawOpen();
+    //score piun
 
-        chassis.turnToHeading(ML_STATION_HEADING, 700);
-        chassis.moveToPoint(ML_STATION_X, ML_STATION_Y, 1500, {.forwards = false, .maxSpeed = 60});
-        chassis.waitUntilDone();
 
-        // Take a pin. If nothing arrives in time, stop cycling rather than drive to the stack with
-        // an empty claw and score nothing.
-        if (!auton::waitUntilClamped(2000)) break;
+    chassis.moveToPoint(13, -5.2, 1000);
+    chassis.turnToPoint(11, -37.6, 500);
+    chassis.moveToPoint(11, -37.6, 2000, {.forwards = false, .maxSpeed = 60});
+      auton::autoclamp(true);
+    //move to first cup
+    chassis.waitUntilDone();
+    chassis.swingToPoint(1.5, -32, lemlib::DriveSide::LEFT, 700);
+    pros::delay(400);
+      auton::liftTo(auton::Level::ONE);
+    chassis.moveToPoint(1.5, -32, 1200, {.forwards = false, .maxSpeed = 80});
+  chassis.waitUntilDone();
+auton::scoreAndWait();  
+chassis.moveToPoint(4.6, -43.5, 1000);
+chassis.turnToPoint(-14.3,33.7, 500);
+auton::liftDownFast();
+auton::autoclamp(true);
+chassis.moveToPoint(-14.3, 33.7, 2000, {.forwards = false, .maxSpeed = 60});
+chassis.waitUntilDone();
+chassis.turnToPoint(-6.3, -26, 500);
+auton::liftTo(auton::Level::TWO);
 
-        // NOTHING TO DO HERE. The autoclamp's own push runs and then the macro takes the arm to
-        // level 1 and swings the pivot OUT by itself (AUTOCLAMP_INTAKE_AUTO_STACK). Just wait for
-        // the arm to finish arriving before driving at the stack.
-        auton::waitLift();
+chassis.moveToPoint(-6.3, -26, 1200, {.forwards = false, .maxSpeed = 80});
+//score second
+chassis.waitUntilDone();
+auton::scoreAndWait();
 
-        // --- Score it ------------------------------------------------------
-        chassis.turnToHeading(ML_STACK_HEADING, 700);
-        chassis.moveToPoint(ML_STACK_X, ML_STACK_Y, 1500, {.forwards = false, .maxSpeed = 80});
-        chassis.waitUntilDone();
-        auton::scoreAndWait();       // press 1: press onto the stack, release at the landing, hold above
+chassis.moveToPoint(-32, -31, 1500);
+chassis.waitUntilDone();
+chassis.turnToHeading(90, 600);
 
-        // --- Back clear, arm down, go again --------------------------------
-        chassis.moveToPoint(ML_CLEAR_X, ML_CLEAR_Y, 1000);
-        chassis.waitUntilDone();
-        auton::liftDownFast();
-    }
 
-    // Hand over to the driver in a known state: arm down and pressed onto its stop.
-    auton::liftDownAndWait();
 }
 
 // ---------------------------------------------------------------------------

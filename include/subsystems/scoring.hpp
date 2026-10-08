@@ -115,8 +115,10 @@ class Scoring {
         // --- THE INTAKE SEQUENCE (driver, 2026-10-07). R1 and every auton intake call enter
         // INTAKE_APPROACH; the states run in order and end holding -2.2 in INTAKE_POS.
         // See "THE INTAKE SEQUENCE" in config.hpp for the numbers and the pivot polarity.
-        INTAKE_APPROACH,  // (a) pivot DISENGAGED, lift to INTAKE_PIVOT_TRIGGER_DEG (13.5)
-        INTAKE_DESCEND,   // (b)+(c) pivot ENGAGED on arrival at 13.5, then precise descent to -2.2
+        INTAKE_APPROACH,   // (a) pivot DISENGAGED, lift to INTAKE_PIVOT_TRIGGER_DEG (13.5)
+        INTAKE_PIVOT_WAIT, // (b) HOLDING 13.5: pivot engaged, then wait INTAKE_PIVOT_SETTLE_MS for it
+                           //     to retract fully in before any descent starts
+        INTAKE_DESCEND,    // (c) precise descent to -2.2
         // ...and INTAKE_POS is (d): hold -2.2 steadily, until a clamp or a button.
 
         // --- THE INTAKE AUTOCLAMP GRAB. Entered by the clamp event itself, runs to level 1 on its
@@ -231,7 +233,7 @@ class Scoring {
         // live from the moment R1 starts the sequence, through the descent, and all through the
         // whole sequence. The approach step is included deliberately: a cup can arrive early.
         return state_ == State::INTAKE_POS || state_ == State::INTAKE_APPROACH ||
-               state_ == State::INTAKE_DESCEND ||
+               state_ == State::INTAKE_PIVOT_WAIT || state_ == State::INTAKE_DESCEND ||
                (state_ == State::MOVING && moveDest_ == State::INTAKE_POS && inHandoffZone());
     }
     /** True while the automatic grab that follows an intake autoclamp is running (settle, push down,

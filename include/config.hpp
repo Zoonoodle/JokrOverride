@@ -195,8 +195,11 @@ inline constexpr double MAX = 137.7;
 //
 // THREE STEPS, one per Scoring state (see scoring.hpp):
 //   (a) INTAKE_APPROACH  pivot DISENGAGED, lift to INTAKE_PIVOT_TRIGGER_DEG (13.5)
-//   (b)                  the tick the lift ARRIVES at 13.5 -- from above OR below -- engage the pivot.
-//                        No delay: the cylinder is fast, so the same tick commands step (c).
+//   (b) INTAKE_PIVOT_WAIT  the tick the lift ARRIVES at 13.5 -- from above OR below -- engage the
+//                        pivot, and then HOLD 13.5 for INTAKE_PIVOT_SETTLE_MS while it retracts fully
+//                        in. The lift is actively holding that height for the whole wait; nothing
+//                        descends until the pivot is really home (driver, 2026-10-07: "keep it there,
+//                        let pivot retract in, wait for like 500ms, THEN move slowly down to -2.2").
 //   (c) INTAKE_DESCEND   lift to lift_preset::INTAKE (-2.2), as a PRECISE move so it walks in slowly
 //                        and steadily rather than running at it (see LIFT_PRECISE_TOLERANCE_DEG).
 //   (d) INTAKE_POS       HOLD at -2.2, steadily, until something clamps or the driver cancels.
@@ -206,6 +209,9 @@ inline constexpr double MAX = 137.7;
 // toward the intake to receive a cup = pivot BACK = setPivot(false) = pivotOut_ false, and with
 // PIVOT_OUT_IS_ADI_HIGH false that is the ADI pin HIGH. Disengaged = setPivot(true) = OUT = pin LOW.
 inline constexpr double INTAKE_PIVOT_TRIGGER_DEG = 13.5;     // TUNE: step (a)/(b) -- engage the pivot here
+// How long step (b) holds 13.5 after engaging the pivot, so the cylinder is fully retracted in
+// before the descent starts. Raise it if the claw is still swinging in as the arm starts down.
+inline constexpr int INTAKE_PIVOT_SETTLE_MS = 500;           // TUNE: driver 2026-10-07
 // Backstops, so a jammed arm can never leave the sequence stuck in one step forever. On a timeout the
 // step gives up and moves to the next one, which is always safe here (both are downward).
 inline constexpr int INTAKE_APPROACH_TIMEOUT_MS = 3000;      // TUNE: step (a) waiting for 13.5

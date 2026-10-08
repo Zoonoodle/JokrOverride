@@ -181,6 +181,7 @@ void Scoring::handleClampEvent() {
         case State::GRAB_PUSH:
         case State::GRAB_RISE:
         case State::INTAKE_APPROACH:  // unreachable: isAtIntakeHandoff() took these above
+        case State::INTAKE_PIVOT_WAIT:
         case State::INTAKE_DESCEND:
             return;
         case State::IDLE:
@@ -255,11 +256,16 @@ void Scoring::enter(State next) {
             setPivot(true);
             command(config::INTAKE_PIVOT_TRIGGER_DEG);
             break;
-        case State::INTAKE_DESCEND:
-            // (b) happened on the transition into this state: the pivot is ENGAGED the tick the arm
-            // arrived at 13.5, with no delay, because the cylinder is fast.
-            // (c) now walk down to -2.2. PRECISE makes it the slow, steady approach rather than a run.
+        case State::INTAKE_PIVOT_WAIT:
+            // (b) ENGAGE THE PIVOT AND STAY PUT. The arm keeps actively holding 13.5 -- the height is
+            // re-commanded here, not left to whatever INTAKE_APPROACH last sent -- while the cylinder
+            // retracts fully in. update() starts the descent only after INTAKE_PIVOT_SETTLE_MS.
             setPivot(false);
+            command(config::INTAKE_PIVOT_TRIGGER_DEG);
+            break;
+        case State::INTAKE_DESCEND:
+            // (c) the pivot is already engaged and settled, so now walk down to -2.2. PRECISE makes it
+            // the slow, steady approach rather than a run at it.
             command(preset::INTAKE, true);
             break;
 
@@ -370,7 +376,7 @@ void Scoring::goToIntake() {
     // Already running the sequence: a re-tap is a no-op rather than a restart, so it cannot throw the
     // arm back up to 13.5 once it is already down at -2.2.
     if (state_ == State::INTAKE_POS || state_ == State::INTAKE_APPROACH ||
-        state_ == State::INTAKE_DESCEND) {
+        state_ == State::INTAKE_PIVOT_WAIT || state_ == State::INTAKE_DESCEND) {
         return;
     }
     // R1 AND EVERY AUTON INTAKE CALL START HERE -- one shared path (driver, 2026-10-07). Step (a) of
@@ -547,6 +553,14 @@ void Scoring::update() {
             if (liftArrived(config::INTAKE_PIVOT_TRIGGER_DEG) || lift_.isBlocked() ||
                 lift_.isFaulted() ||
                 elapsed >= static_cast<std::uint32_t>(config::INTAKE_APPROACH_TIMEOUT_MS)) {
+                enter(State::INTAKE_PIVOT_WAIT);
+            }
+            break;
+
+        case State::INTAKE_PIVOT_WAIT:
+            // (b) holding 13.5 with the pivot engaged. The only exit is the timer: the pivot has no
+            // sensor, so INTAKE_PIVOT_SETTLE_MS is how we know it is in.
+            if (elapsed >= static_cast<std::uint32_t>(config::INTAKE_PIVOT_SETTLE_MS)) {
                 enter(State::INTAKE_DESCEND);
             }
             break;
@@ -739,6 +753,7 @@ const char* Scoring::stateName() const {
         case State::INTAKE_POS: return "INTAKE";
         case State::MATCHLOAD_POS: return "MATCHLOAD";
         case State::INTAKE_APPROACH: return "IN>13.5";
+        case State::INTAKE_PIVOT_WAIT: return "IN PIV";
         case State::INTAKE_DESCEND: return "IN>-2.2";
         case State::GRAB_SETTLE: return "GRAB SET";
         case State::GRAB_PUSH: return "GRAB DN";

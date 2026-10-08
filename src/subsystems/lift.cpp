@@ -1181,6 +1181,13 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         }
         const bool jawsOpen = clawReleased_ &&
                               now - clawReleasedAt_ >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS);
+        // THE 200 ms PAUSE BEFORE ANY DESCENT (L2_RELEASE_SETTLE_MS). Measured from when the jaws were
+        // told to open, so it overlaps CLAW_OPEN_TIME_MS instead of stacking on top of it. BOTH ways
+        // out of this phase require it, so the run to the bottom can never start with the jaws still
+        // closed on the pin.
+        const bool releaseSettled =
+            clawReleased_ &&
+            now - clawReleasedAt_ >= static_cast<std::uint32_t>(config::L2_RELEASE_SETTLE_MS);
         // With the jaws open the arm either moves or it does not -- nothing subtle to detect, so this
         // is a plain speed test rather than the full detector.
         if (descendSpeed >= config::L2_CONTACT_STALL_DEG_PER_S) {
@@ -1190,7 +1197,7 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             freeSince_ = 0;
             if (stuckSince_ == 0) stuckSince_ = now;
         }
-        if (clawReleased_ && position <= config::L2_RELEASE_FLOOR_DEG) {
+        if (releaseSettled && position <= config::L2_RELEASE_FLOOR_DEG) {
             // Safety floor for THIS phase (separate job from the travel/floor release rules in PRESS,
             // same constant on purpose -- see config.hpp): the jaws haven't resolved free-or-stuck yet
             // but the arm is nearly at the bottom anyway -- stop treating this as a press and hand over
@@ -1204,7 +1211,7 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             endScoreClear(now, position);
             return;
         }
-        if (jawsOpen && freeSince_ != 0 &&
+        if (jawsOpen && releaseSettled && freeSince_ != 0 &&
             now - freeSince_ >= static_cast<std::uint32_t>(config::L2_FREE_MS)) {
             // THE CLAW CAME OFF THE PIN and the arm is running freely again. One-press score: carry
             // straight on down to the bottom at the same speed -- no post-release push, no rise. Note

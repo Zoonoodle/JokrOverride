@@ -439,11 +439,19 @@ void score() {
 
 bool waitScore(int timeoutMs) {
     const std::uint32_t start = pros::millis();
-    // Press 1 is over once the sequence has stopped AND, if it ended in the clear rise, that rise has
-    // settled into its hold. (An L2 at the bottom is just a claw toggle: every test is false at once
-    // and this returns true immediately, as it always did.)
-    while (robot::scoring.isScorePending() || robot::scoring.isScoreDescent() || robot::lift.isScoring() ||
-           (robot::lift.isScoredAbove() && !robot::lift.isSettled())) {
+    // THE SCORE IS DONE WHEN THE PIN IS OFF AND THE ARM IS ON ITS WAY DOWN -- not when it reaches the
+    // bottom (driver, 2026-10-07: "score and wait takes too long rn"). Lift::isScoring() covers
+    // PRESS + RELEASE + the L2_RELEASE_SETTLE_MS pause and goes false the tick the descent is
+    // commanded, so this returns there and the route can drive away while the arm runs home on its own.
+    //
+    // WHAT WAS WAITED ON BEFORE, and why it got slow: isScoreDescent() stays true for the whole of
+    // Scoring::RELEASING, which since the one-press score (2026-10-07) runs all the way to DOWN --
+    // so this used to block for the full descent AND the FINAL forcing window AND the seat. The
+    // isScoredAbove() term is dead too: nothing holds above a stack any more.
+    // A route that really does want the arm parked at the bottom first calls auton::waitLiftSeated().
+    // (An L2 at the bottom is just a claw toggle: both tests are false at once and this returns true
+    // immediately, as it always did.)
+    while (robot::scoring.isScorePending() || robot::lift.isScoring()) {
         if (robot::lift.isScoreStuck() || robot::lift.isFaulted()) return false;
         if (timeoutMs <= 0 || pros::millis() - start >= static_cast<std::uint32_t>(timeoutMs)) return false;
         pros::delay(10);

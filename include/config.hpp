@@ -1669,6 +1669,14 @@ inline constexpr int L2_CONTACT_IGNORE_MS = 80;              // TUNE (was 60)
 // this plain speed test rather than the full detector: with the jaws open the arm either moves or it
 // does not, and there is nothing subtle to catch.
 inline constexpr int L2_FREE_MS = 100;                       // TUNE
+// THE PAUSE AFTER THE RELEASE, before the arm starts down (the driver, 2026-10-07: "after it releases
+// pin, it should move 200ms later"). Measured from the moment the jaws were told to open
+// (clawReleasedAt_), so it covers CLAW_OPEN_TIME_MS (200) rather than adding to it -- the cylinder is
+// opening for the whole window. Both ways out of Phase::RELEASE wait for it, so the arm cannot start
+// descending with the jaws still on the pin.
+//   It drags the pin down with it: raise this.
+//   The pause is dead time you want back: lower it (the jaws still need CLAW_OPEN_TIME_MS to open).
+inline constexpr int L2_RELEASE_SETTLE_MS = 200;             // TUNE: driver 2026-10-07
 // ...and conversely, this long below that speed with the jaws open means the claw is hooked on the pin.
 inline constexpr int L2_STUCK_MS = 250;                      // TUNE
 // If the release is never acknowledged (Scoring not running, e.g. an auton that never calls

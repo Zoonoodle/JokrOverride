@@ -324,7 +324,7 @@ void Scoring::stepUp() {
             // jaws close around it, and only then rises to level 1. The intake stops for the whole
             // push. Everything about the push is config::L1_GRAB_*; see "THE GRAB" in lift.hpp.
             // advanceStep() is the first rung: L1_STEP_DEG above where the lift is heading, which here
-            // is the handoff (-3.3), so STACKING is asked for 16.7. It seeds itself from the lift, so
+            // is the handoff (23.0), so STACKING is asked for 43.0. It seeds itself from the lift, so
             // no resetStep() is needed in front of it any more -- that used to be required back when
             // the ladder counted from a stored 0.
             advanceStep();
@@ -467,8 +467,8 @@ void Scoring::update() {
             //
             // WHERE THE FIRST RUNG LANDS UNDER UP-ONLY STEPPING (checked 2026-10-07): the push leaves
             // the lift with an active target, because Lift::startPush() sets goal_ = the position the
-            // push STARTED from -- the handoff, -3.3 -- and never moves it (the forcing is voltage, not
-            // a goal). So advanceStep()'s base is -3.3 and the rung is 16.7, which is the same place an
+            // push STARTED from -- the handoff, 23.0 -- and never moves it (the forcing is voltage, not
+            // a goal). So advanceStep()'s base is 23.0 and the rung is 43.0, which is the same place an
             // L1 press from the handoff goes. It is NOT the pushed-down position, which is what would
             // have made this rise short.
             if (autoStackAfterPush_ && !lift_.isGrabbing()) {

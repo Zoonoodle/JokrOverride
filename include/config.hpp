@@ -115,20 +115,28 @@ namespace lift_preset {
 // still read 0 makes the lift declare SEAT about 32 deg ABOVE the stop and start FINAL's forcing push
 // from there, so the two go together or not at all.
 inline constexpr double DOWN = -31.9;                        // the hard stop, measured on the robot 2026-10-07 (was 0.0)
-// THE INTAKE HANDOFF. History: 1.1 (photo-derived) -> 6.1 (driver, 2026-10-03) -> -3.3 (driver,
-// 2026-10-07). If it ever stops lining up: D-pad Up/Down until the claw meets the handoff, read the
-// brain's LIFT line, and put THAT here. One thing moves with it automatically and needed no touching --
-// the pivot handoff zone is INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG, so it is now -3.3 .. 6.7.
-// RE-MEASURED -3.3 (2026-10-07, the driver: "lift position for intaking is -3.3"), read straight off
-// the brain's LIFT line with the claw lined up at the handoff. It is ABOVE the bottom (-31.9) by 28.6
-// deg, so R1 from a seated arm is now a real rise of nearly 30 degrees, not the 6 it used to be.
+// THE INTAKE HANDOFF. History: 1.1 (photo-derived) -> 6.1 (driver, 2026-10-03) -> -3.3 -> 23.0
+// (driver, 2026-10-07: "intake position is actually 23"). If it ever stops lining up: D-pad Up/Down
+// until the claw meets the handoff, read the brain's LIFT line, and put THAT here.
+// It is ABOVE the bottom (-31.9) by 54.9 deg, so R1 from a seated arm is a long rise, and it is well
+// above LIFT_BOTTOM_GOAL_DEG (-26.9) so it is never mistaken for a trip to the bottom.
 // IT IS STILL THE ONE PRECISE HEIGHT, and it is precise in BOTH directions with no code change: the
 // slow walk-in is Lift::speedProfile(), which works off the UNSIGNED distance to the goal and uses the
 // direction only to pick the cruise-speed cap, so the arm crawls the last degrees in exactly the same
 // way coming UP from the hard stop as coming DOWN from a stack level. setTarget() still auto-promotes
-// any goal within half a degree of this number to PRECISE, so no call site can forget, and -3.3 is far
-// above LIFT_BOTTOM_GOAL_DEG (now -26.9) so it is never mistaken for a trip to the bottom.
-inline constexpr double INTAKE = -3.3;                       // driver-measured 2026-10-07 (was 6.1)
+// any goal within half a degree of this number to PRECISE, so no call site can forget.
+//
+// THREE THINGS MOVED WITH IT at 23 (they did not matter at -3.3):
+//  1. The pivot handoff zone is INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG = 23 .. 33, which now
+//     OVERLAPS stack level 1 (31.0). Harmless: Scoring::inHandoffZone() is only consulted while the
+//     MOVE DESTINATION IS the handoff (scoring.cpp, the MOVING case), so descending to level 1 never
+//     swings the pivot BACK. Passing down through 33..23 on the way to the handoff is the intent.
+//  2. L1_AUTO_INTAKE_UNTIL_DEG had to move -- see it below. At 20 it sat BELOW the handoff, so the
+//     sweep ended on the tick it started and never ran at all.
+//  3. lift_preset::MATCHLOAD (15.0) is now BELOW the handoff rather than above it. Nothing in the code
+//     depends on their order (PIVOT_BACK_AT_MATCHLOAD is false, so the pivot stays OUT there), but
+//     15.0 was tuned when the handoff was 6.1 and is worth re-checking on the robot.
+inline constexpr double INTAKE = 23.0;                       // driver-measured 2026-10-07 (was -3.3)
 inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covered by the reference photos yet
 // FRONT TOGGLE: the height the arm goes to at the start of the match route to flip the front toggle,
 // then comes straight back down from (fast -- see auton::liftDownFast()). Deliberately its OWN
@@ -150,7 +158,7 @@ inline constexpr double FRONT_TOGGLE = 45.0;                 // TUNE: arm degree
 //     auton::liftToFirstScoreAndWait();
 //     auton::clawOpen();
 //     auton::liftPushFor(300);   // press down while the jaws clear the pin
-// It is deliberately kept clear of lift_preset::INTAKE (6.1) by more than the half-degree window
+// It is deliberately kept clear of lift_preset::INTAKE (23.0) by more than the half-degree window
 // setTarget() uses to auto-promote a goal to PRECISE, so this stays an ordinary, fast position move.
 inline constexpr double FIRST_SCORE = 9.0;                   // TUNE: arm degrees (driver, 2026-10-03)
 // L1 taps: tap 1 -> level 1, tap 2 -> level 2 ... tap 5 -> level 5 (stays at 5, the top). One entry
@@ -201,7 +209,7 @@ inline constexpr double MAX = 111.9;
 // the next L1 goes 20 deg above wherever the driver left the arm. Rapid taps still stack correctly,
 // because the base is the TARGET, not the lagging position.
 //
-//   from the handoff (-3.3):  16.7  36.7  56.7  76.7  96.7  106.9  106.9 ...
+//   from the handoff (23.0):  43.0  63.0  83.0 103.0 106.9  106.9 ...
 //   from the hard stop:      -11.9   8.1  28.1  48.1  68.1   88.1  106.9 ...
 // WHAT THIS DOES NOT CHANGE: lift_preset::STACK_LEVELS is untouched and still means the measured scoring
 // heights -- auton::liftTo(Level::THREE), the brain's preset names and everything else still use them.
@@ -768,7 +776,7 @@ inline constexpr double LIFT_PRECISE_TOLERANCE_DEG = 1.0;    // TUNE: INTAKE onl
 // above instead of a position move, and Scoring's score() treats an arm already here as "nothing to
 // score" (L2 is then a no-op). INTAKE (1.1) is inside it numerically but is always precise, so R1 keeps
 // its own exact approach and never seats.
-// DOWN-relative (2026-10-07): 5 deg above the hard stop = -26.9 now. lift_preset::INTAKE (-3.3) is
+// DOWN-relative (2026-10-07): 5 deg above the hard stop = -26.9 now. lift_preset::INTAKE (23.0) is
 // comfortably ABOVE this, so R1's handoff is an ordinary precise position move and never a descent.
 inline constexpr double LIFT_BOTTOM_GOAL_DEG = lift_preset::DOWN + 5.0;  // TUNE
 // Hands over to HOLD once the arm is inside its band AND slower than this. It has to sit ABOVE
@@ -1227,7 +1235,16 @@ inline constexpr float INTAKE_MV = 12000.0f;
 // its way up anyway, without the driver having to hold R1 at the same time as tapping L1.
 //   Cups get left behind / it stops sweeping too early: raise it.
 //   The intake is still running when the arm is clear of the floor: lower it.
-inline constexpr double L1_AUTO_INTAKE_UNTIL_DEG = 20.0;     // TUNE: arm degrees
+//
+// HANDOFF-RELATIVE SINCE 2026-10-07, and it HAD to become so when the handoff moved to 23. As a bare
+// 20 it was BELOW the handoff, so an L1 from the handoff began with the arm already past the
+// threshold: periodic.cpp's `done = liftPos > L1_AUTO_INTAKE_UNTIL_DEG` was true on the sweep's very
+// first tick and the rollers never turned at all on the most common path. Written as INTAKE + 20 it is
+// 43.0, i.e. the sweep covers the whole first L1 step up from the handoff (23 -> 43).
+// NOT YET DRIVEN: 20 deg of rise was the old intent, carried over. Tune it on the robot.
+// From a SEATED arm (-31.9) the rise to the first rung (-11.9) never reaches 43, so that sweep ends on
+// L1_AUTO_INTAKE_MAX_MS below instead -- which is exactly what that safety net is for.
+inline constexpr double L1_AUTO_INTAKE_UNTIL_DEG = lift_preset::INTAKE + 20.0;  // TUNE: 43.0
 // Safety net: the rollers stop after this long no matter what, so a rise that never gets to
 // L1_AUTO_INTAKE_UNTIL_DEG (jam, BLOCKED lift, a preset below it) can't leave them spinning.
 inline constexpr int L1_AUTO_INTAKE_MAX_MS = 1500;           // TUNE

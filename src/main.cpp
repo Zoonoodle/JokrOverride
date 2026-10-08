@@ -257,20 +257,26 @@ void opcontrol() {
     // the claw nor the pivot nor the lift, so whatever height auton left the arm holding is kept.
     scoring.reset();
 
-    // NO PIVOT SWING AND NO HOMING HERE EITHER. This used to call scoring.pivotOut() -- firing the
-    // pivot cylinder to its OUT position -- and lift.requestHome(), which drives the arm down into its
-    // hard stop to find zero. Both are physical resets at the start of a mode, so both are gone
-    // (driver, 2026-10-07). The pivot keeps whatever position it is in, including one auton left it in,
-    // and the arm keeps its height.
+    // HOME HERE TOO, BUT NEVER TWICE IN ONE MATCH (the driver, 2026-10-07: "have it run during
+    // opcontrol for now BUT if it ran in auton, dont run it in opcontrol"). This needs no mode flag
+    // and no bookkeeping: Lift::requestHome() only acts from Home::IDLE, and robot::lift is one
+    // long-lived object whose home_ state survives the auton -> driver switch. So a real match homes
+    // in autonomous(), leaves home_ at DONE (or FAILED), and this call is a no-op; a practice run
+    // straight into driver control finds home_ still IDLE and homes here instead.
     //
-    // THE SOFTWARE STATE IS STILL CONSISTENT, with nothing moving to make it so: Scoring's pivotOut_
-    // and Claw's state_/level_ live on the one long-lived object each, so they already describe where
-    // the cylinders physically are when driver control takes over from auton. There is nothing to
-    // re-seed -- only scoring.reset() above was needed, and that moves nothing.
+    // Non-blocking, exactly as in auton: it returns at once and the arm finds its stop underneath the
+    // drive loop below. Holding the D-pad cancels it. It moves ONLY the lift -- no pivot, no claw.
+    // (If homing was cancelled during auton it is not retried here either: home_ is CANCELLED, not
+    // IDLE. Press the D-pad down to put the arm on its stop by hand if that ever happens.)
     //
-    // Homing is no longer requested ANYWHERE automatically (config::LIFT_HOME_ON_ENABLE has been false
-    // since 2026-10-03 and this was the last caller, so in practice nothing changes today). A route or
-    // a debug build that really wants it calls robot::lift.requestHome() itself.
+    // Called straight on the lift rather than through auton::homeLift(), which is the same request
+    // wrapped in the auton mutex: driver control has no business taking that lock, and this keeps the
+    // driver path independent of the auton API.
+    lift.requestHome();
+    // THE REST OF THE SOFTWARE STATE NEEDS NO RE-SEEDING, and nothing else moves: Scoring's pivotOut_
+    // and Claw's state_/level_ live on one long-lived object each, so they already describe where the
+    // cylinders physically are when driver control takes over from auton. Only scoring.reset() above
+    // was needed, and that moves nothing.
 
     // The autoclamp is ON for the whole of driver control by default, every time opcontrol starts:
     // whenever the jaws are open, anything that sits at or inside config::AUTOCLAMP_RANGE_DRIVER_MM for

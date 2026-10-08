@@ -29,11 +29,11 @@ static lemlib::OdomSensors sensors(&verticalWheel, nullptr, nullptr, nullptr, im
 // Drive PID: tune these numbers right here.
 static lemlib::ControllerSettings lateral(6,    // proportional gain (kP)
                                           0,    // integral gain (kI)
-                                          16,   // derivative gain (kD)
+                                          15,   // derivative gain (kD)
                                           0,    // anti windup
                                           1,    // small error range, in inches
                                           150,  // small error range timeout, ms
-                                          3,    // large error range, in inches
+                                          4,    // large error range, in inches
                                           500,  // large error range timeout, ms
                                           0     // maximum acceleration (slew)
 );

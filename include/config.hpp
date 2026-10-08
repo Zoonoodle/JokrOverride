@@ -919,7 +919,7 @@ inline constexpr int LIFT_DEFAULT_TIMEOUT_MS = 2500;         // TUNE
 // is physically the PIVOT cylinder, and the port it called the pivot ('D') is physically the CLAW.
 // The user found this on the robot; the ports below are the corrected, physical assignment, and every
 // polarity note here was re-derived from scratch afterwards (see the derivation under each constant).
-inline constexpr char CLAW_PISTON_PORT = 'D';                // physically the claw (was 'C', which is the pivot)
+inline constexpr char CLAW_PISTON_PORT = 'C';                // physically the claw (was 'C', which is the pivot)
 // Which ADI level CLOSES the jaws.
 //
 // DERIVATION. Every build this robot has ever run wrote BOTH ADI pins LOW at construction (the claw
@@ -1170,7 +1170,9 @@ inline constexpr int START_ALIGN_REAPPLY_WINDOW_MS = 4000;   // how long that on
 // ---------------------------------------------------------------------------
 // Intake (ONE motor)
 // ---------------------------------------------------------------------------
-// Negative = reversed. If R1 spits cups out instead of pulling them in, flip the sign.
+// Do NOT try to fix the roller direction by flipping this sign -- it was tried and the rollers
+// kept spinning the same way. The direction lives in Intake::set() (src/subsystems/intake.cpp),
+// where IN and OUT are swapped on purpose. Flip them there.
 inline constexpr int8_t INTAKE_PORT = 12;
 inline constexpr float INTAKE_MV = 12000.0f;
 
@@ -1214,7 +1216,7 @@ inline constexpr int L2_OUTTAKE_MAX_MS = 3000;               // TUNE
 // Pivot + claw timing. See include/subsystems/scoring.hpp.
 // ---------------------------------------------------------------------------
 // If the claw/wrist flips with its own cylinder, set the port. ' ' = no pivot actuator.
-inline constexpr char PIVOT_PISTON_PORT = 'C';               // physically the pivot (was 'D', which is the claw)
+inline constexpr char PIVOT_PISTON_PORT = 'B';               // physically the pivot (was 'D', which is the claw)
 // THE PIVOT HAS TWO POSITIONS, named for where the end effector physically is (the driver's words):
 //   OUT  = swung out. Where it sits at power-on, at every stack level while scoring, and in the
 //          default down position after L2 / B. In the code, pivot OUT == true.

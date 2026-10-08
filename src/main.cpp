@@ -40,8 +40,10 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *    D-pad Up or Down cancels it. Nothing waits for it -- you can drive straight away.)
  *
  *   Left stick Y / Right stick X   arcade drive
- *   D-pad Up (hold)    lift up, full power, plain manual control (same feel as plain motor power)
- *   D-pad Down (hold)  lift down, full power, plain manual control
+ *   D-pad Up (hold)    lift up at LIFT_MANUAL_UP_PCT (100%), plain manual control
+ *   D-pad Down (hold)  lift down at LIFT_MANUAL_DOWN_PCT (50%) -- HALF SPEED on purpose, the driver's
+ *                      call 2026-10-03: gravity already helps on the way down and it ends against the
+ *                      hard stop, so full voltage down is a drop rather than a nudge
  *               Holding either immediately cancels the intake macro / any preset target and
  *               takes manual control. Letting go brakes and holds right there -- it does NOT
  *               resume whatever preset or macro step was active before.
@@ -163,7 +165,12 @@ void disabled() {
     }
 }
 
-void competition_initialize() {}
+void competition_initialize() {
+
+    // Grip the preloaded pin before the match (user's choice, 2026-10-03). Through the Claw's own
+    // method, so its state machine knows the jaws are CLAMPED and nothing opens them again later.
+    claw.clamp();
+}
 
 void autonomous() {
     // COMMON SETUP, in one place, so no route can forget any of it. The route itself is in
@@ -179,15 +186,19 @@ void autonomous() {
     //    commands no motion.
     auton::begin();
 
-    // 2. The autoclamp is OFF for auton by default; a route turns it on where it wants it with
-    //    auton::autoclamp(true). (In driver control it is on by default -- see opcontrol().)
-    auton::autoclamp(false);
+    // 2. The autoclamp is ON for auton by default too (config::AUTOCLAMP_ON_IN_AUTON, 2026-10-03 -- it
+    //    used to be hard-off here and every route had to remember auton::autoclamp(true)). It is
+    //    asynchronous: the auton tick above is what watches the sensor, so a route never blocks on it and
+    //    nothing has to be called to get it. A route that does not want it calls auton::autoclamp(false).
+    //    (Driver control enables it the same way from AUTOCLAMP_ON_IN_DRIVER -- see opcontrol().)
+    auton::autoclamp(config::AUTOCLAMP_ON_IN_AUTON);
 
-    // 3. Home the lift, at the start of EVERY route. This is the first ENABLED mode of a match, so
-    //    this is the one place it happens (opcontrol()'s own call is only for a driver-skills run with
-    //    no auton). requestHome() returns immediately and the homing runs inside the lift's own task,
-    //    so the arm finds its hard stop while the route drives; a lift command from the route queues
-    //    behind it on its own. On success the arm ends SEATED on the stop, not on a passive brake.
+    // 3. Pivot OUT (the power-on / travel position) and ask the lift to home. HOMING IS CURRENTLY
+    //    SWITCHED OFF -- config::LIFT_HOME_ON_ENABLE is false, the driver's decision 2026-10-03,
+    //    because the arm is set at its hard stop every time and zero()'s absolute-angle seed is
+    //    already correct -- so this records HOME SKIPPED and the route starts lifting immediately,
+    //    with nothing driving the arm down first. Setting that constant back to true restores the
+    //    old behaviour here and in opcontrol() at once; nothing else has to change.
     auton::homeLift();
 
     // 4. Odometry/IMU calibration, BOUNDED. A drive move needs a heading, so wait for it -- but never
@@ -208,6 +219,12 @@ void autonomous() {
 }
 
 void opcontrol() {
+    // chassis.moveToPoint(0, -14, 1000, {.forwards = false, .maxSpeed = 60});
+    // auton::autoclamp(true);  // driver control starts with the autoclamp ON, just like auton (config::AUTOCLAMP_ON_IN_DRIVER)
+    // pros::delay(100000); 
+    
+    // let the lift PID task start and zero() the rotation sensor before reading it on the brain
+    auton::liftDownFast();
     master.print(0, 0, "DRIVER ON       ");
 
     // Take the per-loop logic back from the auton tick BEFORE anything else: end() blocks until that
@@ -216,6 +233,13 @@ void opcontrol() {
     // It never touches the lift, so a seated or held arm stays exactly where auton left it.
     auton::end();
     periodic::reset();  // a second enabled mode never inherits a half-open macro window
+    // ...and neither does the intake macro. Autonomous is killed by the field switch wherever it
+    // happens to be, so Scoring can be left mid-sequence -- STACKING, RELEASING, MOVING, SCORED. Its
+    // state machine would then carry straight on the moment this loop starts ticking it and command
+    // the lift with nobody touching a button (a STACKING with the claw already open, for instance,
+    // immediately heads for the INTAKE handoff). reset() drops it back to IDLE; it touches neither
+    // the claw nor the pivot nor the lift, so whatever height auton left the arm holding is kept.
+    scoring.reset();
 
     // Home the lift if autonomous() didn't already (driver skills, or a practice run straight into
     // driver control). requestHome() is a no-op once a run has homed, failed or been cancelled, so a
@@ -225,7 +249,7 @@ void opcontrol() {
     lift.requestHome();
 
     // The autoclamp is ON for the whole of driver control by default, every time opcontrol starts:
-    // whenever the jaws are open, anything that sits at or inside config::AUTOCLAMP_RANGE_MM for
+    // whenever the jaws are open, anything that sits at or inside config::AUTOCLAMP_RANGE_DRIVER_MM for
     // AUTOCLAMP_CONFIRM_MS gets gripped. Y still toggles it mid-match, and the brain's CLAW line shows
     // what it is doing (OFF / ARMED / SEEING / CLEAR?). See README "Autoclamp".
     scoring.setAutoclamp(config::AUTOCLAMP_ON_IN_DRIVER);
@@ -241,7 +265,8 @@ void opcontrol() {
         const int turn = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
         chassis.arcade(forward, turn);
 
-        // --- Lift manual override: D-pad Up/Down, full power, plain manual control (see button map
+        // --- Lift manual override: D-pad Up/Down, plain manual control at LIFT_MANUAL_UP_PCT /
+        // LIFT_MANUAL_DOWN_PCT (100% / 50% -- down is half speed on purpose, see config.hpp) (see button map
         // above). Holding either cancels the intake macro / any preset target so they can never
         // fight over the motors; scoring.reset() below just stops the macro from re-issuing lift
         // commands, it doesn't touch the claw or pivot where they physically are. ---
@@ -249,10 +274,10 @@ void opcontrol() {
         const bool down = master.get_digital(pros::E_CONTROLLER_DIGITAL_DOWN);
         if (up) {
             scoring.reset();
-            lift.driverPower(1.0);
+            lift.driverPower(config::LIFT_MANUAL_UP_PCT / 100.0);
         } else if (down) {
             scoring.reset();
-            lift.driverPower(-1.0);
+            lift.driverPower(-config::LIFT_MANUAL_DOWN_PCT / 100.0);
         }
 
         // --- R1 / R2: intake rollers, or (while a pin is clamped) manual lift up/down. The new-press

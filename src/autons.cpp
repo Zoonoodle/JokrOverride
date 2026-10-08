@@ -14,7 +14,15 @@
 //     nothing blocks on it -- and ends SEATED on the bottom. A lift command from a route queues
 //     behind homing on its own;
 //   - odometry/IMU calibration has finished (so chassis moves are safe);
-//   - the autoclamp is OFF. Turn it on in the route, where you want it: auton::autoclamp(true).
+//   - the autoclamp is ON (config::AUTOCLAMP_ON_IN_AUTON, 2026-10-03 -- it used to be off and every
+//     route had to remember auton::autoclamp(true)). It is ASYNCHRONOUS: the auton tick watches the
+//     claw's distance sensor, so a route never calls or waits for anything to get it. Whenever the jaws
+//     are open and something comes within config::AUTOCLAMP_RANGE_AUTON_MM (65 mm in auton) they shut on
+//     it, and the arm then
+//     hops up config::CLAMP_RISE_DEG -- except at the R1 intake handoff, where it fires instantly and
+//     forces the claw DOWN instead (config::AUTOCLAMP_INTAKE_PUSH_MS). auton::autoclamp(false) turns it
+//     off for a route that does not want it; auton::waitUntilClamped() is OPTIONAL and exists only to
+//     stop a drive at the instant of a clamp.
 //
 // THE TOOLS A ROUTE HAS. auton::* (include/auton.hpp) for every lift / claw / pivot / intake /
 // macro operation, each one going through the identical code path the matching driver button uses;
@@ -35,7 +43,7 @@ namespace autons {
 // ===========================================================================
 // >>> THE ONE LINE TO CHANGE: which route autonomous() runs. <<<
 // ===========================================================================
-constexpr Route SELECTED = Route::ODOM_TEST;  // LIFT_TEST, ODOM_TEST, MATCH, SKILLS, NONE
+constexpr Route SELECTED = Route::MATCH;  // LIFT_TEST, ODOM_TEST, MATCH, SKILLS, NONE
 
 namespace {
 
@@ -51,9 +59,9 @@ constexpr int kTestHoldMs = 2000;
 // closer = -x. See README "Start alignment" for how to measure these numbers (set the robot in its
 // spot, read `DIST L` on the brain a few times, type what you see here).
 // These are FIELD positions, not robot constants, which is why they live next to the routes.
-constexpr double MATCH_START_X = 0.0;        // TODO(team): map the real starting point
-constexpr double MATCH_START_Y = 0.0;        // TODO(team): map the real starting point
-constexpr double MATCH_START_THETA = 0.0;    // TODO(team): the heading it is set at
+constexpr double MATCH_START_X = 0.0;        // the route starts at the origin (driver, 2026-10-03)
+constexpr double MATCH_START_Y = 0.0;
+constexpr double MATCH_START_THETA = 0.0;
 constexpr double MATCH_START_LEFT_MM = 1570.0;  // measured on the robot 2026-10-03
 
 constexpr double SKILLS_START_X = 0.0;       // TODO(team): map the real starting point
@@ -73,6 +81,9 @@ void liftTest() {
     // not sitting on a passive brake. On HOME FAIL it stops pushing, keeps zero()'s seed, and the
     // brain shows HOME FAIL plus the angle it saw; the rest of this still runs off that seed.
     auton::waitHome();
+    // Homing is off on this robot (config::LIFT_HOME_ON_ENABLE), so nothing has put the arm in SEAT:
+    // command the trip to the bottom explicitly, which ends SEATED and then RESTs the same way.
+    if (!auton::liftHomed()) auton::liftDownAndWait();
     auton::wait(kTestHoldMs);  // 1. stay seated
 
     auton::liftToAndWait(auton::Level::ONE);  // 2. stack level 1, then the damped HOLD
@@ -107,20 +118,91 @@ void matchRoute() {
     // the pose; the brain's START line says what it did. This replaces chassis.setPose() -- do not
     // call both.
     auton::startPose(MATCH_START_X, MATCH_START_Y, MATCH_START_THETA, MATCH_START_LEFT_MM);
+    auton::clawGrip();  // grip the preloaded pin (ADI D HIGH = closed); same timing as a raw pin write
+
+auton::liftToFrontToggle();
+//   auton::liftPushUpFor(1000);
+pros::delay(300);
+    chassis.moveToPoint(0,3, 500);
+    pros::delay(400);
+       auton::liftDownFast();
+   chassis.waitUntilDone();
+   
+   pros::delay(600);
+      chassis.moveToPoint(0, -16, 1500, {.forwards = false, .maxSpeed = 70});
+   
 
     
+     chassis.turnToHeading(90, 550);
+    auton::liftPushUpFor(350);  // was liftMotors.move(50)/delay(300)/move(0) -- 50 on the old -127..127
+                                // scale is ~40% of volts, which is AUTON_LIFT_PUSH_UP_PCT. Swap this for
+                                // auton::liftToFirstScoreAndWait() if you want a repeatable 9 deg instead
+                                // of a timed push (see auton.hpp).
+    chassis.moveToPoint(-14, -16, 1000, {.forwards = false, .maxSpeed = 70});
+   chassis.moveToPoint(-12.5, -16, 300);
+//    lift.move(-40);
+ auton::liftPushFor(400);
+pros::delay(200);
+    auton::clawOpen();
+   
+    // chassis.moveToPoint(chassis.getPose().x-2, chassis.getPose().y, 500, {.forwards = false, .maxSpeed = 70});
+ pros::delay(300);
+ auton::liftPushUpFor(250);
+    chassis.moveToPoint(-1, -14, 1000);
+    // lift.move(0);
+    chassis.turnToHeading(40, 700);
+    auton::liftDownFast();
+    auton::autoclamp(true);
+    
+    chassis.moveToPoint(-17, -35, 2000, {.forwards = false, .maxSpeed = 60});
+    
+    // chassis.waitUntil(21);
+    // auton::clawGrip();
+    chassis.waitUntilDone();
+    auton::liftTo(auton::Level::ONE);
+   pros::delay(500);
+    chassis.turnToHeading(165, 700);
+    chassis.moveToPoint(-18, -21, 1500, {.forwards = false, .maxSpeed = 80});
+chassis.waitUntilDone();
+                     // finish driving up to the stack
+auton::scoreAndWait();                        // press down to contact, release, push 100 ms, rise and hold
+chassis.moveToPoint(-15, -34, 1000);
+pros::delay(500);                    // back clear of the pins, claw still up
+auton::liftDownFast();
 
-    // Drive into a pin and stop the moment the claw grabs it. .async = true hands the move to
-    // LemLib's own task, so this one can watch the claw; waitUntilClamped's second argument cancels
-    // that motion at the instant of the clamp, so the robot does not keep pushing.
-    // auton::autoclamp(true);
-    // chassis.moveToPoint(0, 24, 2000, {.async = true});
+chassis.turnToHeading(135, 600);
+auton::autoclamp(true);
+chassis.moveToPoint(-40, -19, 2000, {.forwards = false, .maxSpeed = 55});
+
+
+    chassis.waitUntilDone();
+    auton::liftTo(auton::Level::TWO);
+pros::delay(500);
+    chassis.turnToHeading(265, 700);
+    chassis.moveToPoint(-27, -15, 1500, {.forwards = false, .maxSpeed = 80});
+    auton::scoreAndWait();
+    auton::liftDownAndWait();    
+    // The autoclamp needs NOTHING from a route: it is on by default and asynchronous, so simply driving
+    // at a pin with the jaws open grips it (and hops the arm up CLAMP_RISE_DEG) on its own.
+    // waitUntilClamped() is only for the extra step of STOPPING THE DRIVE at the instant of the clamp --
+    // .async = true hands the move to LemLib's own task so this one can watch the claw, and the second
+    // argument cancels that motion the moment the jaws shut, so the robot does not keep pushing.
+    // chassis.moveToPoint(0, 24, 2000);   // async by default in LemLib 0.5.6
     // if (!auton::waitUntilClamped(2000, true)) return;   // nothing grabbed: bail out rather than
     //                                                     // carry on with an empty claw
 
     // Or grab a pin the claw is already lined up on, without driving into it: the same force-down
     // push L1 does at the handoff, holding wherever it ends.
     // auton::grabAndWait();
+
+    // RUN THE LIFT AND THE DRIVE TOGETHER: command the lift, keep driving, wait only where the next
+    // step needs the arm to be there. (A second chassis move would block this task until the first
+    // finishes, so the lift command goes BETWEEN them -- see README "Blocking vs non-blocking".)
+    // chassis.moveToPoint(-17.5, -24, 1500, {.forwards = false});
+    // auton::liftTo(auton::Level::TWO);   // rises while the robot drives
+    // chassis.waitUntilDone();
+    // auton::waitLift();
+    // auton::scoreAndWait();
 
     // Stack it. stepUp() is L1: it clamps (already clamped here, so no wait) and rises a level,
     // sweeping the floor with the intake on the way up, exactly like the driver's button. From the
@@ -146,6 +228,73 @@ void matchRoute() {
 // SKILLS — the 60 s skills route. TEMPLATE.
 // ---------------------------------------------------------------------------
 void skillsRoute() {
+         auton::startPose(MATCH_START_X, MATCH_START_Y, MATCH_START_THETA, MATCH_START_LEFT_MM);
+    auton::clawGrip();  // grip the preloaded pin (ADI D HIGH = closed); same timing as a raw pin write
+
+auton::liftToFrontToggle();
+pros::delay(500);
+    chassis.moveToPoint(0,3, 500);
+    pros::delay(400);
+       auton::liftDownFast();
+   chassis.waitUntilDone();
+   pros::delay(300);
+      chassis.moveToPoint(0, -15, 1500, {.forwards = false, .maxSpeed = 70});
+   
+
+    
+     chassis.turnToHeading(90, 700);
+    auton::liftPushUpFor(250);  // was liftMotors.move(50)/delay(300)/move(0) -- 50 on the old -127..127
+                                // scale is ~40% of volts, which is AUTON_LIFT_PUSH_UP_PCT. Swap this for
+                                // auton::liftToFirstScoreAndWait() if you want a repeatable 9 deg instead
+                                // of a timed push (see auton.hpp).
+    chassis.moveToPoint(-14, -15, 1200, {.forwards = false, .maxSpeed = 70});
+   chassis.waitUntilDone();
+//    lift.move(-40);
+ auton::liftPushFor(400);
+ leftDrive.move(20);
+ rightDrive.move(20);
+ pros::delay(200);
+  leftDrive.move(0);
+ rightDrive.move(0);
+    auton::clawOpen();
+   
+    // chassis.moveToPoint(chassis.getPose().x-2, chassis.getPose().y, 500, {.forwards = false, .maxSpeed = 70});
+ pros::delay(300);
+    chassis.moveToPoint(-1, -14, 1000);
+    // lift.move(0);
+    chassis.turnToHeading(35, 700);
+    auton::liftDownFast();
+    auton::autoclamp(true);
+    
+    chassis.moveToPoint(-16, -35, 2000, {.forwards = false, .maxSpeed = 60});
+    
+    // chassis.waitUntil(21);
+    // auton::clawGrip();
+    chassis.waitUntilDone();
+    auton::liftTo(auton::Level::ONE);
+    chassis.turnToHeading(165, 700);
+    chassis.moveToPoint(-18, -21, 1500, {.forwards = false, .maxSpeed = 80});
+chassis.waitUntilDone();
+                     // finish driving up to the stack
+auton::scoreAndWait();                        // press down to contact, release, push 100 ms, rise and hold
+chassis.moveToPoint(-15, -34, 1000);
+pros::delay(500);                    // back clear of the pins, claw still up
+auton::liftDownFast();
+
+chassis.turnToHeading(135, 600);
+auton::autoclamp(true);
+chassis.moveToPoint(-39, -16.5, 2000, {.forwards = false, .maxSpeed = 60});
+
+
+    chassis.waitUntilDone();
+    auton::liftTo(auton::Level::TWO);
+
+    chassis.turnToHeading(265, 700);
+    chassis.moveToPoint(-27, -15, 1500, {.forwards = false, .maxSpeed = 80});
+    auton::scoreAndWait();  
+    chassis.waitUntilDone();
+    chassis.moveToPoint(-30, -20, 1000);
+    chassis.moveToPoint(-10, -48, 2000,{.maxSpeed = 80});
     // auton::startPose(SKILLS_START_X, SKILLS_START_Y, SKILLS_START_THETA, SKILLS_START_LEFT_MM);
     // Same tools as matchRoute(); usually a loop of: drive to a pin, waitUntilClamped, stepUp,
     // score, moveB back to a wall to re-square, repeat.

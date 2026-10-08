@@ -87,29 +87,31 @@ inline constexpr double LIFT_ROTATION_RATIO = 4.0;           // confirmed: senso
 // ---------------------------------------------------------------------------
 // THE PROBLEM. The rotation sensor's position counter is initialised from its SINGLE-TURN absolute
 // angle, which is [0, 360) sensor degrees = [0, 90) ARM degrees at LIFT_ROTATION_RATIO 4. The arm
-// travels lift_preset::DOWN..MAX = -39..137.7 = 176.7 arm degrees, nearly two sensor turns, so at
-// program start the reading is only ever `true_arm_angle mod 90`. Start the arm below 0 and the
-// bottom reports as a large POSITIVE number instead -- the driver, 2026-10-07: "if lift starts in a
-// position that reads lower than 0 degrees due to rotation sensor, the value gets jumbled and now it
-// thinks our like -30 area = 100". The arithmetic: -39 reads +51.0, -30 reads +60.0, -5 reads +85.0,
-// -2.2 reads +87.8. (Above +90 wraps the same way: 132.7 would read +42.7.)
+// travels lift_preset::DOWN..MAX = 48.5..228 = 179.5 arm degrees, almost two sensor turns, so at
+// program start the reading is only ever the true angle modulo 90, and some positions come back a
+// whole turn out.
+//
+// THE FRAME THESE NUMBERS ARE IN (2026-10-07). Every height in lift_preset was measured off the brain
+// with the arm resting where it normally powers on, which READS 79. That is the raw
+// get_position()/100/4 value, so the window has to be centred to leave 79 alone.
 //
 // THE PATCH. Lift::initState() reads the sensor ONCE at program start and, if the arm degrees come
-// back at or above LIFT_STARTUP_WINDOW_TOP_DEG, keeps a fixed software offset of one whole sensor turn
-// (-90 arm) for every later read. NOTHING IS EVER WRITTEN TO THE SENSOR -- no set_position, no reset;
-// the counter keeps accumulating on its own, so once running the arm tracks its full range normally.
+// back BELOW LIFT_STARTUP_WINDOW_BOTTOM_DEG, keeps a fixed offset of one whole sensor turn (+90 arm)
+// for every later read. NOTHING IS EVER WRITTEN TO THE SENSOR -- no set_position, no reset; the
+// counter keeps accumulating on its own, so once running the arm tracks its full range normally.
 //
-// WHAT READS RIGHT: any start position in [-45, +45). That is where the arm physically rests with the
-// motors unpowered, so in practice always.
-// WHAT READS WRONG: a start above +45, which comes back 90 arm degrees low. DO NOT POWER ON WITH THE
-// ARM UP AT A STACK LEVEL. There is no fix for that at this gear ratio -- one sensor turn is only 90
-// arm degrees and the arm needs 176.7, so no single window can cover it.
+// WHAT READS RIGHT: any start in [35, 125). That covers everything that matters -- the bottom /
+// matchload (48.5), the usual resting position (79), the intake height (70.5), the pivot height (100)
+// and level 1 (116.2).
+// WHAT READS WRONG: a start at or above 125, which comes back 90 arm degrees low. DO NOT POWER ON WITH
+// THE ARM UP AT A STACK LEVEL (level 2 and above are all past 125). There is no fix at this gear
+// ratio -- one sensor turn is 90 arm degrees and the arm needs 179.5, so no window can cover it.
 //
 // THE REAL FIX, which makes all of this unnecessary: move the sensor onto the 48T OUTPUT axle, set
-// LIFT_ROTATION_RATIO to 1.0, and the whole 176.7-degree travel fits inside one sensor turn -- the
+// LIFT_ROTATION_RATIO to 1.0, and the whole 179.5-degree travel fits inside one sensor turn -- the
 // single-turn absolute angle then resolves every position, forever, power cycles included. When that
 // happens, DELETE this constant and the unwrap in Lift::initState().
-inline constexpr double LIFT_STARTUP_WINDOW_TOP_DEG = 45.0;  // TUNE: arm deg; >= this unwraps by -90
+inline constexpr double LIFT_STARTUP_WINDOW_BOTTOM_DEG = 35.0;  // TUNE: arm deg; BELOW this unwraps by +90
 // The startup read is retried this long before giving up, so a sensor that is still waking up at
 // program start does not cost the whole frame. On giving up the offset stays 0 and the lift faults.
 inline constexpr int LIFT_SENSOR_START_RETRY_MS = 250;       // TUNE
@@ -146,7 +148,7 @@ namespace lift_preset {
 // FINAL's `atZero` test and homing's re-zero (both in lift.cpp). Setting this negative while those
 // still read 0 makes the lift declare SEAT about 32 deg ABOVE the stop and start FINAL's forcing push
 // from there, so the two go together or not at all.
-inline constexpr double DOWN = -39.0;                        // TUNE: the real bottom, driver 2026-10-07 (-31.9 -> -39.0)
+inline constexpr double DOWN = 48.5;                         // TUNE: re-measured 2026-10-07 (was -39.0)
 // THE INTAKE RESTING HEIGHT -- the bottom of the new intake sequence (driver, 2026-10-07). History:
 // 1.1 -> 6.1 -> -3.3 -> 23.0 -> -2.2. It is no longer a single "go here and park" handoff: R1 and every
 // auton intake call now run a FOUR-STEP sequence, and this constant is only the height step (c) ends
@@ -154,13 +156,13 @@ inline constexpr double DOWN = -39.0;                        // TUNE: the real b
 // Everything that keys off the handoff still keys off THIS number: the pivot handoff zone is
 // INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG = -2.2 .. 7.8, Scoring::heightOf(INTAKE_POS) is this, and
 // setTarget() still auto-promotes any goal within half a degree of it to PRECISE.
-inline constexpr double INTAKE = -2.2;                       // TUNE: driver-measured 2026-10-07 (was 23.0)
-inline constexpr double MATCHLOAD = 15.0;                    // TUNE: not covered by the reference photos yet
+inline constexpr double INTAKE = 70.5;                       // TUNE: re-measured 2026-10-07 (was -2.2)
+inline constexpr double MATCHLOAD = DOWN;                    // the matchload height IS the bottom (2026-10-07)
 // FRONT TOGGLE: the height the arm goes to at the start of the match route to flip the front toggle,
 // then comes straight back down from (fast -- see auton::liftDownFast()). Deliberately its OWN
 // constant rather than STACK_LEVELS[0] (31.0), which it is near: the two are tuned for different jobs
 // and must be able to move apart.
-inline constexpr double FRONT_TOGGLE = 45.0;                 // TUNE: arm degrees (30 -> 38 -> 45, driver 2026-10-03)
+inline constexpr double FRONT_TOGGLE = 132.5;                // PROVISIONAL -- RE-MEASURE (45.0 + 87.5 frame shift)
 // FIRST SCORE: a low "just off the floor" height for putting the FIRST pin down, where there is no stack
 // under it yet. The driver, 2026-10-03: "we also need a slightly lift up state for our first pin score,
 // we are doing level 1 rn but should be like 9 deg up" -- STACK_LEVELS[0] (31.0) is a whole stack's worth
@@ -178,7 +180,7 @@ inline constexpr double FRONT_TOGGLE = 45.0;                 // TUNE: arm degree
 //     auton::liftPushFor(300);   // press down while the jaws clear the pin
 // It is deliberately kept clear of lift_preset::INTAKE (-2.2) by more than the half-degree window
 // setTarget() uses to auto-promote a goal to PRECISE, so this stays an ordinary, fast position move.
-inline constexpr double FIRST_SCORE = 9.0;                   // TUNE: arm degrees (driver, 2026-10-03)
+inline constexpr double FIRST_SCORE = 96.5;                  // PROVISIONAL -- RE-MEASURE (9.0 + 87.5 frame shift)
 // L1 taps: tap 1 -> level 1, tap 2 -> level 2 ... tap 5 -> level 5 (stays at 5, the top). One entry
 // per pin-stack height.
 //
@@ -196,11 +198,11 @@ inline constexpr double FIRST_SCORE = 9.0;                   // TUNE: arm degree
 // absolute zero with homing working, which is why the top is 107 rather than 128.
 inline constexpr int STACK_LEVEL_COUNT = 5;
 inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
-    35.5,   // TUNE: driver-measured 2026-10-07 (level 1, was 31.0)
-    54.5,   // TUNE: driver-measured 2026-10-07 (level 2, was 59.0)
-    72.8,   // TUNE: driver-measured 2026-10-07 (level 3, was 74.6)
-    94.3,   // TUNE: driver-measured 2026-10-07 (level 4, was 87.3)
-    132.7,  // TUNE: driver-measured 2026-10-07 (level 5, the top, was 106.9)
+    116.2,  // TUNE: re-measured 2026-10-07 (level 1, was 35.5)
+    144.0,  // TUNE: re-measured 2026-10-07 (level 2, was 54.5)
+    160.0,  // TUNE: re-measured 2026-10-07 (level 3, was 72.8)
+    181.5,  // TUNE: re-measured 2026-10-07 (level 4, was 94.3)
+    223.0,  // TUNE: re-measured 2026-10-07 (level 5, the top -- THERE IS NO LEVEL 6)
 };
 // Software hard stop: top level (132.7) + 5 deg of margin -- raised with the levels, 2026-10-07
 // (111.9 -> 137.7). It is the ONLY ceiling that needed changing: L1_STEP_CEILING_DEG is derived from
@@ -208,7 +210,7 @@ inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
 // also doubles as "never command past here" -- raise it only once a higher level is actually measured
 // and added above, never just to let a bad preset through. (The D-pad is raw voltage and is NOT
 // clamped by this; it is only a limit on commanded heights.)
-inline constexpr double MAX = 137.7;
+inline constexpr double MAX = 228.0;
 }  // namespace lift_preset
 
 // ===========================================================================
@@ -240,10 +242,24 @@ inline constexpr double MAX = 137.7;
 // travel / scoring position)", which is the OPPOSITE of the driver's "engaged". Engaged = pulled IN
 // toward the intake to receive a cup = pivot BACK = setPivot(false) = pivotOut_ false, and with
 // PIVOT_OUT_IS_ADI_HIGH false that is the ADI pin HIGH. Disengaged = setPivot(true) = OUT = pin LOW.
-inline constexpr double INTAKE_PIVOT_TRIGGER_DEG = 13.5;     // TUNE: step (a)/(b) -- engage the pivot here
+inline constexpr double INTAKE_PIVOT_TRIGGER_DEG = 100.0;
 // How long step (b) holds 13.5 after engaging the pivot, so the cylinder is fully retracted in
 // before the descent starts. Raise it if the claw is still swinging in as the arm starts down.
 inline constexpr int INTAKE_PIVOT_SETTLE_MS = 500;           // TUNE: driver 2026-10-07
+// STEP (c)'s SPEED. "it has to go down very slowly to this height and stay there" (driver,
+// 2026-10-07). This caps the descent to 70.5 at a fraction of LIFT_FREE_SPEED_DEG_PER_S, on top of
+// the ordinary precise approach -- Lift::setTargetSlow() applies it as a ceiling in speedProfile(),
+// so the braking curve and the final walk-in still work exactly as tuned, just never faster than this.
+//   It still comes down too fast to catch a cup: lower it.
+//   It takes too long to get there: raise it (the precise approach then governs the last few degrees).
+inline constexpr double INTAKE_DESCEND_SPEED_PCT = 18.0;     // TUNE: % of free speed, ~27 deg/s
+// R1'S ROLLERS ARE GATED DURING THE SEQUENCE. "until intake is around 70-80 deg height, intake should
+// NOT spin when holding R1, so while the pivot is trying to activate at 100 and all that, intake does
+// NOT spin." So while the intake macro is running, R1 only reaches the rollers once the arm is at or
+// below this height -- nothing spins on the way to 100, through the pivot wait, or at the top of the
+// descent. It gates ONLY the driver's R1 while the macro owns the arm; an auton route's explicit
+// auton::intakeFor()/intakeIn() is untouched, and so is R1 at any other time.
+inline constexpr double INTAKE_ROLLERS_ENABLE_BELOW_DEG = 80.0;  // TUNE: arm degrees
 // Backstops, so a jammed arm can never leave the sequence stuck in one step forever. On a timeout the
 // step gives up and moves to the next one, which is always safe here (both are downward).
 inline constexpr int INTAKE_APPROACH_TIMEOUT_MS = 3000;      // TUNE: step (a) waiting for 13.5
@@ -270,9 +286,9 @@ inline constexpr int INTAKE_DESCEND_TIMEOUT_MS = 3000;       // TUNE: step (c) w
 // state, so stepUp()/score()/stow()/goToIntake() and the D-pad's reset() all leave it the moment they
 // are pressed, exactly as they leave any other state.
 inline constexpr int GRAB_SETTLE_MS = 1000;                  // TUNE: "give it a sec to settle"
-inline constexpr double GRAB_PUSH_DEPTH_DEG = -5.0;          // TUNE: push down into the cup/pin
+inline constexpr double GRAB_PUSH_DEPTH_DEG = lift_preset::INTAKE - 2.8;
 inline constexpr int GRAB_PUSH_TIMEOUT_MS = 1200;            // TUNE: backstop for the push down
-inline constexpr double PIVOT_RELEASE_UP_DEG = 3.0;          // TUNE: disengage the pivot passing this
+inline constexpr double PIVOT_RELEASE_UP_DEG = lift_preset::INTAKE + 5.2;
 inline constexpr int GRAB_RISE_TIMEOUT_MS = 4000;            // TUNE: backstop for the rise to level 1
 
 // ---------------------------------------------------------------------------
@@ -1448,7 +1464,7 @@ inline constexpr int L1_AUTO_INTAKE_MAX_MS = 1500;           // TUNE
 //   start of the press, not partway down. That is this constant as specified, not a bug.
 //   Pin/cup gets knocked loose too early: lower it. Rollers start too late to clear the handoff
 //   before the arm seats: raise it.
-inline constexpr double L2_OUTTAKE_BELOW_DEG = 40.0;         // TUNE: arm degrees
+inline constexpr double L2_OUTTAKE_BELOW_DEG = lift_preset::DOWN + 40.0;
 // % of full intake power (config::INTAKE_MV) the rollers run OUT at during the above. Lower than
 // R2's full-power outtake on purpose -- this runs unattended during a score, not under driver thumb.
 inline constexpr double L2_OUTTAKE_PCT = 60.0;               // TUNE: % of INTAKE_MV
@@ -1543,7 +1559,7 @@ inline constexpr int CLAW_OPEN_TIME_MS = 200;                // TUNE: never meas
 //   Slams the pin into the stack / knocks the tower: LOWER it (45, 35).
 //   Scoring feels slow: raise it, but contact detection gets less sensitive as the gap between
 //   "moving" and "stopped" shrinks relative to the noise.
-inline constexpr double L2_SCORE_SPEED_PCT = 60.0;           // TUNE: ~90 deg/s
+inline constexpr double L2_SCORE_SPEED_PCT = 90.0;           // TUNE: ~135 deg/s -- 1.5x, driver 2026-10-07 (was 60)
 // Most the loop may push DOWNWARD (magnitude, mV) while pressing. This is the crush limit: the
 // velocity loop has 12000 mV of authority and an integral that winds up, so without a cap it would
 // keep increasing the push until it moved -- i.e. flatten the stack. 7000 mV through the 4:1 is about
@@ -1724,7 +1740,7 @@ inline constexpr double L2_AUTO_RELEASE_DEG = 32.0;          // TUNE: arm degree
 inline constexpr double L2_RELEASE_FLOOR_DEG = lift_preset::DOWN + 10.0;  // TUNE: offset above the bottom
 // TWO L2 PRESSES PER SCORE (2026-10-02, the driver's own design):
 //   PRESS 1  press the pin down, detect the landing, open the jaws, keep pushing for
-//            L2_POST_RELEASE_PUSH_MS so they slide off, then RISE L2_CLEAR_RISE_DEG and HOLD there,
+//            then carry straight on DOWN to the bottom at the same speed and SEAT (one press),
 //            indefinitely. "this is so i am able to drive away with claw up above the pins without
 //            any chance of knocking over pins."
 //   PRESS 2  the ordinary fast run home: descend at L2_RETURN_SPEED_PCT, FINAL, SEAT at 0.
@@ -1735,12 +1751,10 @@ inline constexpr double L2_RELEASE_FLOOR_DEG = lift_preset::DOWN + 10.0;  // TUN
 // pin instead of lifting it back out of the cup.
 //   The pin comes back up with the claw: raise it (100 -> 200).
 //   The jaws grind on the pin / the stack gets pushed: lower it.
-inline constexpr int L2_POST_RELEASE_PUSH_MS = 300;          // TUNE: driver 2026-10-07 -- keep descending this long after the release (was 100)
 // How far the arm rises after that, relative to wherever it actually stopped, before it holds. It has
 // to clear the top of the stack by enough that driving away cannot knock a pin over.
 //   Still catches a pin on the way out: raise it.
 //   The arm is in the way of the next pickup: lower it.
-inline constexpr double L2_CLEAR_RISE_DEG = 25.0;            // TUNE: arm deg, RELATIVE; driver 2026-10-07 (was 20)
 // A score or a grab asked for while a lift MOVE IS STILL IN FLIGHT waits for the arm to arrive first,
 // then starts (Scoring::State::LIFT_SETTLE). That is what lets an auton route fire the lift and the
 // drivetrain off together -- `auton::liftTo(level); ...drive...; auton::scoreAndWait();` -- without the

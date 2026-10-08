@@ -62,12 +62,13 @@ void Lift::initState() {
     //
     // set_reversed() is still applied once in the constructor, so every read is consistently signed.
     //
-    // THE ONE-OFF STARTUP UNWRAP (driver's option A, 2026-10-07). The sensor's counter comes up
-    // holding its SINGLE-TURN angle, [0, 90) arm degrees at the 4:1 ratio, so an arm resting below 0
-    // reports as a large positive number -- "it thinks our like -30 area = 100". Read it ONCE here and,
-    // if it is at or above LIFT_STARTUP_WINDOW_TOP_DEG, carry a fixed -90 arm (one whole sensor turn)
-    // offset on every later read. THE SENSOR IS NEVER WRITTEN. Full reasoning, and what still reads
-    // wrong, under "STARTUP UNWRAP" in config.hpp.
+    // THE ONE-OFF STARTUP UNWRAP, re-centred for the 2026-10-07 frame. The sensor's counter comes up
+    // holding its SINGLE-TURN angle, [0, 90) arm degrees at the 4:1 ratio, so some start positions come
+    // back a whole turn out. Every height was measured with the arm resting where it powers on, which
+    // READS 79, so the window must leave 79 alone: read the sensor ONCE here and, if it comes back
+    // BELOW LIFT_STARTUP_WINDOW_BOTTOM_DEG (35), carry a fixed +90 arm (one whole sensor turn) offset
+    // on every later read. Window [35, 125). THE SENSOR IS NEVER WRITTEN. Full reasoning, and what
+    // still reads wrong, under "STARTUP UNWRAP" in config.hpp.
     startupOffsetDeg_ = 0.0;
     sensorBad_ = false;
     lastGoodPosition_ = 0.0;
@@ -86,8 +87,8 @@ void Lift::initState() {
             sensorBad_ = true;
         } else {
             const double armDeg = raw / 100.0 / config::LIFT_ROTATION_RATIO;
-            if (armDeg >= config::LIFT_STARTUP_WINDOW_TOP_DEG) {
-                startupOffsetDeg_ = -360.0 / config::LIFT_ROTATION_RATIO;  // -90 arm deg
+            if (armDeg < config::LIFT_STARTUP_WINDOW_BOTTOM_DEG) {
+                startupOffsetDeg_ = 360.0 / config::LIFT_ROTATION_RATIO;  // +90 arm deg
             }
             lastGoodPosition_ = armDeg + startupOffsetDeg_;
         }
@@ -401,6 +402,7 @@ void Lift::setTarget(double degrees, bool precise) {
         return;
     }
 
+    speedCapPct_ = 0.0;  // an ordinary move is never speed-capped; setTargetSlow() re-applies it after
     active_ = true;
     descendOwned_ = fromR2;
     descentFast_ = fromFast;
@@ -520,7 +522,7 @@ const char* Lift::phaseName() const {
         case Phase::BRAKE: return "BRAKE";
         case Phase::APPROACH: return "APPROACH";
         case Phase::HOLD:
-            // The latched hold L2 press 1 ends in: the arm is parked L2_CLEAR_RISE_DEG above the
+            // (No longer reachable: the one-press score runs straight to the bottom. Kept for the
             // stack with the jaws open, waiting for a second L2 to run home and seat.
             return scoredAbove_ ? "SCORED UP" : "HOLD";
         case Phase::PARK:
@@ -550,7 +552,6 @@ const char* Lift::phaseName() const {
             return "REL";
         case Phase::UNSTICK: return "UNSTK";
         case Phase::GRAB: return "GRAB";
-        case Phase::POSTPUSH: return "PUSH";
     }
     return "";
 }
@@ -572,6 +573,14 @@ void Lift::descendFast() {
     }
     fastRequest_ = true;
     setTarget(config::lift_preset::DOWN);
+}
+
+void Lift::setTargetSlow(double degrees, double maxPct) {
+    // A PRECISE move with a hard speed ceiling. setTarget() clears speedCapPct_, so it is applied
+    // after; if setTarget() decided this was the same move already running and returned early, the cap
+    // is simply re-asserted, which is what a re-command of the same slow goal should do.
+    setTarget(degrees, true);
+    speedCapPct_ = maxPct;
 }
 
 void Lift::descendManual(bool held) {
@@ -626,8 +635,14 @@ double Lift::speedProfile(double dist, double dir) const {
     const double decel = coarse_ ? config::LIFT_COARSE_DECEL_DEG_PER_S2 : config::LIFT_DECEL_DEG_PER_S2;
     const double tailMin =
         coarse_ ? config::LIFT_COARSE_MIN_DEG_PER_S : config::LIFT_APPROACH_MIN_DEG_PER_S;
-    const double cap = config::LIFT_FREE_SPEED_DEG_PER_S *
-                       (dir >= 0.0 ? config::LIFT_UP_SPEED_PCT : config::LIFT_DOWN_SPEED_PCT) / 100.0;
+    double cap = config::LIFT_FREE_SPEED_DEG_PER_S *
+                 (dir >= 0.0 ? config::LIFT_UP_SPEED_PCT : config::LIFT_DOWN_SPEED_PCT) / 100.0;
+    // A PER-MOVE CEILING, for the moves that have to be deliberately slow -- the intake descent to
+    // 70.5 (see setTargetSlow() and INTAKE_DESCEND_SPEED_PCT). 0 means "no extra cap". It only ever
+    // lowers the limit, so the braking curve and the final walk-in below are untouched.
+    if (speedCapPct_ > 0.0) {
+        cap = std::min(cap, config::LIFT_FREE_SPEED_DEG_PER_S * speedCapPct_ / 100.0);
+    }
     const double curve =
         std::sqrt(2.0 * decel * std::max(dist - config::LIFT_APPROACH_ZONE_DEG, 0.0));
     const double close = std::clamp(config::LIFT_APPROACH_KP_PER_S * dist, tailMin,
@@ -875,7 +890,7 @@ void Lift::runHold(std::uint32_t now, double dt, double position) {
 }
 
 // ---------------------------------------------------------------------------
-// L2 scoring, PRESS 1: PRESS -> RELEASE -> (UNSTICK) -> POSTPUSH -> rise + hold
+// L2 scoring, ONE PRESS: PRESS -> RELEASE -> (UNSTICK) -> carry on down to DOWN and SEAT
 // (press 2 is startScoreReturn(), further down)
 // ---------------------------------------------------------------------------
 void Lift::startScore() {
@@ -1005,21 +1020,25 @@ void Lift::updateGrab(std::uint32_t now, double dt, double position) {
 // L2 press 1's ending, and press 2
 // ---------------------------------------------------------------------------
 void Lift::endScoreClear(std::uint32_t now, double position) {
-    // PRESS 1 IS OVER. The pin is off and the jaws are clear of it, so rise L2_CLEAR_RISE_DEG above
-    // wherever the press actually stopped and hold there, latched, until a second L2 (or anything
-    // else) says otherwise -- the driver's "drive away with the claw above the pins".
+    // ONE PRESS, NOT TWO (driver, 2026-10-07): "we no longer need to go up, our claw won't knock over
+    // the tower ... Once the claw is released, keep the same speed down and have it go all the way down
+    // to the bottom position." So the pin is off, and instead of rising L2_CLEAR_RISE_DEG and latching
+    // SCORED to wait for a second L2, the arm simply KEEPS GOING DOWN -- at the same
+    // L2_SCORE_SPEED_PCT the press was using -- all the way to DOWN, where FINAL and SEAT end it
+    // exactly as any other trip to the bottom does. There is no clear rise and no post-release push.
     score_ = false;
     clawReleaseWanted_ = false;
     returnFast_ = false;
-    descent_ = false;
-    scoredAbove_ = true;
-    scoreCycle_ = true;  // still inside the cycle: the autoclamp stays inhibited until press 2 seats
-    active_ = true;
-    precise_ = false;
+    scoredAbove_ = false;  // nothing is held above a stack any more
+    descendRequest_ = false;
     blocked_ = false;
-    goal_ = std::min(position + config::L2_CLEAR_RISE_DEG, config::lift_preset::MAX);
-    // An ordinary position move does the rise: DRIVE -> BRAKE -> APPROACH -> HOLD, already tuned.
-    enterDrive(now, position);
+    // setTarget() clears scoreCycle_ too, so the autoclamp comes back on as the descent starts -- the
+    // same moment press 2 used to give it back (see the note in startScoreReturn()).
+    setTarget(config::lift_preset::DOWN);
+    // setTarget() picked the config descent bands; keep the SCORING speed for both fast bands instead,
+    // so the run to the bottom is the continuation of the press and not a separate, faster descent.
+    // The slow zone, FINAL and SEAT are untouched.
+    if (descent_) enterDescend(now, position, config::L2_SCORE_SPEED_PCT, config::L2_SCORE_SPEED_PCT);
 }
 
 void Lift::startScoreReturn() {
@@ -1158,25 +1177,13 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             stuckSince_ = 0;
             aux.trigger = travelRelease ? 5 : (floorRelease ? 6 : ContactDetector::triggerCode(fired));
         }
-    } else {  // Phase::RELEASE or Phase::POSTPUSH
+    } else {  // Phase::RELEASE
         // Carry the detector's last readings so the r lines show what fired and what it saw.
         aux.ratioPct = static_cast<int>(contact_.speedRatio() * 100.0);
         aux.lag10 = static_cast<int>(contact_.lagDeg() * 10.0);
         aux.effortMv = static_cast<int>(contact_.effortMv());
         aux.trigger = releasedByTravel_ ? 5 : (releasedByFloor_ ? 6 : ContactDetector::triggerCode(contactTrigger_));
 
-        // POSTPUSH has already decided the arm is free -- it is only running out its timer below, so
-        // none of the release judging applies to it any more.
-        if (phase_ == Phase::POSTPUSH) {
-            if (now - phaseStart_ >= static_cast<std::uint32_t>(config::L2_POST_RELEASE_PUSH_MS)) {
-                endScoreClear(now, position);
-                return;
-            }
-            const double mv =
-                runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, config::L2_PRESS_MAX_MV);
-            trace(now, 'p', position, mv, true, aux);
-            return;
-        }
 
         // Don't judge anything until the jaws have actually had time to open. If nobody ever
         // acknowledges the request (no Scoring::update() running, e.g. a bare auton), carry on after
@@ -1212,13 +1219,12 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         }
         if (jawsOpen && freeSince_ != 0 &&
             now - freeSince_ >= static_cast<std::uint32_t>(config::L2_FREE_MS)) {
-            // THE CLAW CAME OFF THE PIN and the arm is running freely again. Keep pressing down for
-            // L2_POST_RELEASE_PUSH_MS so the jaws slide fully clear of it, then rise and hold. Note
-            // this is only reached from the FREED check -- a claw still hooked on the pin goes to
-            // UNSTICK below instead, so the rise can never drag a pin up with it.
-            phase_ = Phase::POSTPUSH;
-            phaseStart_ = now;
-            // fall through to the press output below, now as POSTPUSH
+            // THE CLAW CAME OFF THE PIN and the arm is running freely again. One-press score: carry
+            // straight on down to the bottom at the same speed -- no post-release push, no rise. Note
+            // this is only reached from the FREED check; a claw still hooked on the pin goes to UNSTICK
+            // below instead, so the descent can never drag a pin down with it.
+            endScoreClear(now, position);
+            return;
         }
         if (jawsOpen && stuckSince_ != 0 && now - stuckSince_ >= static_cast<std::uint32_t>(config::L2_STUCK_MS)) {
             // Still stopped with the jaws open: the claw is hooked on the pin.
@@ -1246,15 +1252,9 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         }
     }
 
-    if (phase_ == Phase::POSTPUSH &&
-        now - phaseStart_ >= static_cast<std::uint32_t>(config::L2_POST_RELEASE_PUSH_MS)) {
-        endScoreClear(now, position);
-        return;
-    }
-
     // Pressing down, with the push capped so the loop cannot crush the stack while the arm slows.
     const double mv = runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, config::L2_PRESS_MAX_MV);
-    trace(now, phase_ == Phase::PRESS ? 'P' : (phase_ == Phase::POSTPUSH ? 'p' : 'r'), position, mv,
+    trace(now, phase_ == Phase::PRESS ? 'P' : 'r', position, mv,
           true, aux);
 }
 

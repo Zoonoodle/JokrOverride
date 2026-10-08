@@ -80,7 +80,7 @@ void tick(const Inputs& in) {
         // (BLOCKED/FAULT).
         const bool done = liftPos <= config::L2_OUTTAKE_STOP_DEG;
         // ...and the moment the descent it belongs to is over. With the two-press L2 that is the end
-        // of PRESS 1 (the arm stops L2_CLEAR_RISE_DEG above the stack rather than carrying on to 0,
+        // of the one-press score (the arm carries on to the bottom at the scoring speed,
         // so the stop-height test below would never be met), and the end of press 2's run home.
         const bool cancelled = in.manualLift || in.abort || !scoringDown || robot::lift.isScoreStuck() ||
                                robot::lift.isBlocked() || robot::lift.isFaulted();
@@ -134,8 +134,16 @@ void tick(const Inputs& in) {
     // intakeIn()/intakeOut() land in the same place. Then L2's auto-outtake (so a score always ejects),
     // then L1's auto-intake -- they can never both be active (one needs the claw empty and rising, the
     // other a pin held and descending) -- then stop. ONE intake.set() call, the single writer decision.
+    // THE R1 ROLLER GATE (driver, 2026-10-07): while the intake macro is still getting the arm into
+    // position -- climbing to the pivot height, waiting for the pivot, or at the top of the descent --
+    // holding R1 must NOT spin the rollers. Scoring::intakeRollersBlocked() is that test (the sequence
+    // is running AND the arm is above INTAKE_ROLLERS_ENABLE_BELOW_DEG). Gated on !in.auton so it only
+    // ever touches the DRIVER's R1: an auton route's auton::intakeIn()/intakeFor() arrives through this
+    // same field and is deliberately left alone.
+    const bool driverRollerBlocked = !in.auton && robot::scoring.intakeRollersBlocked();
     if (grabbing) robot::intake.set(Intake::Mode::STOP);  // the grab push beats every other input
-    else if (in.intakeRequest != Intake::Mode::STOP) robot::intake.set(in.intakeRequest, in.intakePower);
+    else if (in.intakeRequest != Intake::Mode::STOP && !driverRollerBlocked)
+        robot::intake.set(in.intakeRequest, in.intakePower);
     else if (autoOuttakeOn) robot::intake.set(Intake::Mode::OUT, config::L2_OUTTAKE_PCT / 100.0);
     else if (autoIntakeOn) robot::intake.set(Intake::Mode::IN);
     else robot::intake.set(Intake::Mode::STOP);

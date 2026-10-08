@@ -170,9 +170,9 @@
  *   UNSTICK   lift L2_UNSTICK_UP_DEG with the claw open, then press again. At
  *             most L2_MAX_UNSTICK_TRIES times; after that it stops, holds where
  *             it is and reports SCORE STUCK rather than grinding.
- *   POSTPUSH  the jaws are open and the arm is free: keep pressing down for
- *             L2_POST_RELEASE_PUSH_MS so they slide clear of the pin.
- *   then      RISE L2_CLEAR_RISE_DEG above wherever it stopped and HOLD there,
+ *   then      ONE PRESS, 2026-10-07: the arm carries straight on DOWN at the same
+ *             L2_SCORE_SPEED_PCT to lift_preset::DOWN and SEATS there. There is no
+ *             post-release push, no clear rise and no second press. Was: HOLD above,
  *             latched, indefinitely -- brain: SCORED UP. PRESS 1 ENDS HERE.
  *             There is no automatic descent to the bottom any more: the driver
  *             can drive away with the claw above the pins.
@@ -275,7 +275,6 @@ class Lift {
     enum class Phase {
         DRIVE, BRAKE, APPROACH, HOLD, DESCEND, FINAL, SEAT, PRESS, RELEASE, UNSTICK,
         GRAB,      // the L1/auton grab: a constant downward push while the jaws close (see THE GRAB)
-        POSTPUSH,  // L2 press 1: still pressing down after the jaws were told to open
         PARK,      // settled: a CONSTANT voltage (the learned gravity term, frozen). No loop at all,
                    // so it cannot hunt. See "Settling instead of hunting" in config.hpp.
         REST,      // settled AT THE BOTTOM: brake mode COAST and 0 V -- the motors are loose.
@@ -555,6 +554,11 @@ class Lift {
      * (the DOWN target stays active in SEAT), so holding R2 all the way down ends exactly like L2.
      * driverPower() -- the D-pad -- still preempts it, as does any new setTarget().
      */
+    /** A PRECISE move with a hard speed ceiling, maxPct of config::LIFT_FREE_SPEED_DEG_PER_S. For the
+     *  moves that must be deliberately slow -- the intake sequence's descent to lift_preset::INTAKE.
+     *  The cap only lowers the limit: the braking curve and the precise walk-in are unchanged. Any
+     *  later ordinary setTarget() clears it. */
+    void setTargetSlow(double degrees, double maxPct);
     void descendManual(bool held);
 
     /** Run one control step. Called every 10 ms by the lift task -- see class comment: this is the
@@ -592,14 +596,14 @@ class Lift {
     /** Put the brake mode back to hold if REST had set it to coast. Called before anything else writes
      *  the motors, so coasting can never leak out of REST. */
     void wakeMotors();
-    /** One tick of PRESS / RELEASE / POSTPUSH / UNSTICK. Writes the motors and traces. */
+    /** One tick of PRESS / RELEASE / UNSTICK. Writes the motors and traces. */
     void updateScore(std::uint32_t now, double dt, double position);
     /** One tick of the grab push. Writes the motors and traces. */
     void updateGrab(std::uint32_t now, double dt, double position);
     /** The one implementation behind startGrab() and startClampPush(): push DOWN for pushMs, asking
      *  Scoring to shut the jaws partway through only if needsGrip. */
     void startPush(int pushMs, bool needsGrip);
-    /** End of L2 press 1: rise L2_CLEAR_RISE_DEG from here and latch a HOLD there. */
+    /** The claw is off the pin: carry on down to lift_preset::DOWN at the scoring speed and seat. */
     void endScoreClear(std::uint32_t now, double position);
     /** Stall guard window: true once the arm has made less than LIFT_STALL_DEG of progress for
      *  LIFT_STALL_MS. Resets itself whenever the arm does move. Only ever called with a speed
@@ -704,7 +708,7 @@ class Lift {
                                           // NOT the same as descentStart_, which UNSTICK re-baselines.
     bool releasedByTravel_ = false;      // this RELEASE was forced by L2_AUTO_RELEASE_DEG's travel rule
     bool releasedByFloor_ = false;       // this RELEASE was forced by L2_RELEASE_FLOOR_DEG (low start)
-    bool scoredAbove_ = false;           // press 1 finished: holding L2_CLEAR_RISE_DEG above the stack
+    bool scoredAbove_ = false;           // legacy: never set since the one-press score (2026-10-07)
     bool scoreCycle_ = false;            // press 1 + the hold above the stack (autoclamp inhibit). It
                                           // ENDS when press 2 starts, not when the arm seats -- see
                                           // startScoreReturn().
@@ -761,7 +765,8 @@ class Lift {
     // runaway guard
     bool faulted_ = false;
     // --- the startup unwrap and the sensor-failure guard (see config.hpp "STARTUP UNWRAP") ---
-    double startupOffsetDeg_ = 0.0;        // added to every sensor read; 0 or -90 arm degrees
+    double startupOffsetDeg_ = 0.0;        // added to every sensor read; 0 or +90 arm degrees
+    double speedCapPct_ = 0.0;             // per-move speed ceiling, % of free speed; 0 = none
     mutable double lastGoodPosition_ = 0.0;  // held and returned while the sensor is not answering
     mutable bool sensorBad_ = false;         // PROS_ERR seen; mutable because the read path is const
 

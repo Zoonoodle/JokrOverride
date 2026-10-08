@@ -270,9 +270,13 @@ void Scoring::enter(State next) {
             command(config::INTAKE_PIVOT_TRIGGER_DEG);
             break;
         case State::INTAKE_DESCEND:
-            // (c) the pivot is already engaged and settled, so now walk down to -2.2. PRECISE makes it
-            // the slow, steady approach rather than a run at it.
-            command(preset::INTAKE, true);
+            // (c) the pivot is already engaged and settled, so now walk down to the intake height --
+            // VERY slowly ("it has to go down very slowly to this height and stay there"). setTargetSlow
+            // caps the whole move at INTAKE_DESCEND_SPEED_PCT of free speed on top of the precise
+            // approach, so it creeps down and still walks the last degrees in as tuned. Commanded
+            // straight on the lift because this needs the capped entry point, not plain command().
+            hasCommanded_ = false;
+            lift_.setTargetSlow(preset::INTAKE, config::INTAKE_DESCEND_SPEED_PCT);
             break;
 
         // --- THE INTAKE AUTOCLAMP GRAB ------------------------------------------------------
@@ -331,6 +335,8 @@ void Scoring::enter(State next) {
             break;
     }
 }
+
+double Scoring::liftPositionForGate() const { return lift_.getPosition(); }
 
 bool Scoring::inHandoffZone() const {
     return lift_.getPosition() <= preset::INTAKE + config::PIVOT_HANDOFF_ZONE_DEG;
@@ -427,7 +433,7 @@ void Scoring::stepUp() {
 }
 
 void Scoring::score() {
-    // PRESS 2 OF TWO. The arm is holding L2_CLEAR_RISE_DEG above the stack it just scored on, with
+    // LEGACY TWO-PRESS PATH, unreachable since the one-press score: nothing enters SCORED any more.
     // the jaws open: this L2 is the run home that seats it (see "SCORING WITH L2" in lift.hpp and the
     // L2 note in config.hpp). Nothing else about press 1 is re-run.
     if (state_ == State::SCORED) {
@@ -718,13 +724,14 @@ void Scoring::update() {
                     enter(State::IDLE);
                     break;
                 }
-                // PRESS 1 IS DONE once the lift is holding L2_CLEAR_RISE_DEG above the stack (the pin
-                // has always been released by then, either detected or forced by L2_AUTO_RELEASE_DEG).
-                // The arm STAYS there -- no automatic descent -- so the driver can drive away with the
-                // claw above the pins; the next L2 is the run home.
-                if (lift_.isScoredAbove() && lift_.isSettled()) {
+                // ONE PRESS, 2026-10-07. The lift releases the pin and then carries straight on down
+                // to DOWN at the same scoring speed (Lift::endScoreClear()), so this state now ends
+                // when the arm is HOME, not when it is parked above the stack. No SCORED, no second
+                // press. BLOCKED / FAULT also end it, so a lift that gives up on the way down still
+                // hands the buttons back.
+                if (lift_.isSeated() || liftArrived(preset::DOWN)) {
                     scoreToHome_ = false;
-                    enter(State::SCORED);
+                    enter(State::IDLE);
                 }
             } else if (elapsed >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS)) {
                 // Interlock 3 (scoreOrMatchload() only -- score()/L2 above no longer waits on this).

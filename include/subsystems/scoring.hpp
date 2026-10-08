@@ -132,7 +132,8 @@ class Scoring {
         GRABBING,   // L1 from the handoff / auton grab: the lift is forcing down, the jaws close
         CLAMPING, STACKING,
         RELEASING,  // L2 press 1: press / sense / release / post-push / rise
-        SCORED,     // press 1 done: holding L2_CLEAR_RISE_DEG above the stack. The next L2 runs home
+        SCORED,     // LEGACY: unreachable since the one-press score (2026-10-07). Kept only so B's
+                    // stow() path from it still compiles; nothing enters it any more.
         RETURNING,  // L2 press 2 (or B from SCORED): the fast descent that seats at 0
         MOVING,
     };
@@ -242,6 +243,18 @@ class Scoring {
                state_ == State::INTAKE_PIVOT_WAIT || state_ == State::INTAKE_DESCEND ||
                (state_ == State::MOVING && moveDest_ == State::INTAKE_POS && inHandoffZone());
     }
+    /** THE R1 ROLLER GATE. True while the intake macro owns the arm but it is NOT yet low enough for
+     *  the rollers to be useful -- on the way up/down to the pivot height, through the pivot wait, and
+     *  down the first part of the descent. periodic::tick() drops the driver's R1 roller request while
+     *  this is true (the driver, 2026-10-07: "while the pivot is trying to activate at 100 and all
+     *  that, intake does NOT spin"). It gates ONLY R1; an auton route's explicit auton::intakeIn() /
+     *  intakeFor() is a separate request and is untouched. */
+    bool intakeRollersBlocked() const {
+        const bool inSequence = state_ == State::INTAKE_APPROACH ||
+                                state_ == State::INTAKE_PIVOT_WAIT ||
+                                state_ == State::INTAKE_DESCEND;
+        return inSequence && liftPositionForGate() > config::INTAKE_ROLLERS_ENABLE_BELOW_DEG;
+    }
     /** True while the automatic grab that follows an intake autoclamp is running (settle, push down,
      *  rise to level 1). Any driver input cancels it, so this is also "is the macro still driving". */
     bool isAutoGrabbing() const {
@@ -291,6 +304,7 @@ class Scoring {
     void command(double degrees, bool precise = false);
     /** True while the arm is inside the handoff zone, INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG. */
     bool inHandoffZone() const;
+    double liftPositionForGate() const;
     bool pivotDone() const;
     bool liftArrived(double degrees) const;
     double levelHeight() const;

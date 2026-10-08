@@ -75,11 +75,17 @@ constexpr double SKILLS_START_Y = 0.0;       // TODO(team)
 constexpr double SKILLS_START_THETA = 0.0;   // TODO(team)
 constexpr double SKILLS_START_LEFT_MM = 0.0; // TODO(team): measure, 0 = no start alignment
 
-// MATCHLOAD_FINISH's start. Same front wall as MATCH until measured otherwise.
-constexpr double MATCHLOAD_START_X = 0.0;        // TODO(team): confirm for this route's start spot
-constexpr double MATCHLOAD_START_Y = 0.0;        // TODO(team)
-constexpr double MATCHLOAD_START_THETA = 0.0;    // TODO(team)
-constexpr double MATCHLOAD_START_LEFT_MM = MATCH_START_LEFT_MM;  // TODO(team): re-measure if it differs
+// MATCHLOAD_FINISH's start. The driver, 2026-10-07: "the starting position of our matchloadfinish
+// auto needs to be 0,0,0, and it does NOT read any distance sensors for resetting". So this route's
+// coordinates below are all measured from a pose of exactly (0, 0, 0).
+constexpr double MATCHLOAD_START_X = 0.0;
+constexpr double MATCHLOAD_START_Y = 0.0;
+constexpr double MATCHLOAD_START_THETA = 0.0;
+// 0 = NO START ALIGNMENT. auton::startPose() does not read the left distance sensor at all with this
+// at 0 -- not even to sample it -- so the pose is exactly the three numbers above and the route costs
+// none of the autonomous period on it. Do NOT set this to a measured wall distance unless this route
+// really should be sensor-corrected; MATCH does that, and this one deliberately does not.
+constexpr double MATCHLOAD_START_LEFT_MM = 0.0;
 
 // ===========================================================================
 // MATCHLOAD_FINISH's FIELD NUMBERS -- every one of these is a PLACEHOLDER.
@@ -404,10 +410,14 @@ void autoclampTest() {
 // the jaws open so the autoclamp takes a pin -> let the macro carry it to level 1 by itself -> drive
 // to the stack -> score -> back clear } -> finish with the arm down and seated.
 void matchloadFinishAuto() {
-    
+    // Pose exactly (0, 0, 0), with NO distance-sensor correction: MATCHLOAD_START_LEFT_MM is 0, which
+    // makes startPose() skip the sensor entirely rather than sample it and discard the result. Every
+    // coordinate below is measured from this origin.
+    auton::startPose(MATCHLOAD_START_X, MATCHLOAD_START_Y, MATCHLOAD_START_THETA,
+                     MATCHLOAD_START_LEFT_MM);
 
     // --- The preload -------------------------------------------------------
-    auton::clawGrip();   
+    auton::clawGrip();
 
     chassis.swingToHeading(9.5, lemlib::DriveSide::RIGHT, 800);
     chassis.moveToPoint(2.8, -16.5, 1000, {.forwards = false, .maxSpeed = 90});

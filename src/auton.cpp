@@ -618,16 +618,25 @@ bool startPose(double x, double y, double thetaDeg, double expectedLeftMm) {
     //    no auton time and is a far better average than a route could afford -- but confirm it with a
     //    short fresh sample, because the robot may have been moved since. If they disagree, the fresh
     //    one is the newer truth and wins.
-    const double preview = startAlignPreview();
-    const double confirm = readLeftAveraged(preview > 0.0 ? config::START_ALIGN_CONFIRM_MS
-                                                          : config::START_ALIGN_SAMPLE_MS);
+    //
+    //    SKIPPED ENTIRELY when expectedLeftMm <= 0, i.e. the caller asked for a plain pose with no
+    //    start alignment. The sensor is not read AT ALL in that case -- which matters because
+    //    readLeftAveraged() BLOCKS for START_ALIGN_SAMPLE_MS (300 ms), and spending 300 ms of the
+    //    autonomous period averaging a reading that step 3 then discards is pure waste. Before
+    //    2026-10-07 the sample happened regardless and only the correction was gated.
     double measured = -1.0;
-    if (preview > 0.0 && confirm > 0.0) {
-        measured = std::fabs(preview - confirm) <= config::START_ALIGN_CONFIRM_TOL_MM ? preview : confirm;
-    } else if (confirm > 0.0) {
-        measured = confirm;
-    } else if (preview > 0.0) {
-        measured = preview;  // the sensor just went invalid; the pre-match average is all there is
+    if (expectedLeftMm > 0.0) {
+        const double preview = startAlignPreview();
+        const double confirm = readLeftAveraged(preview > 0.0 ? config::START_ALIGN_CONFIRM_MS
+                                                              : config::START_ALIGN_SAMPLE_MS);
+        if (preview > 0.0 && confirm > 0.0) {
+            measured =
+                std::fabs(preview - confirm) <= config::START_ALIGN_CONFIRM_TOL_MM ? preview : confirm;
+        } else if (confirm > 0.0) {
+            measured = confirm;
+        } else if (preview > 0.0) {
+            measured = preview;  // the sensor just went invalid; the pre-match average is all there is
+        }
     }
 
     // 3. THE CORRECTION, and the guard. Further than expected = shifted +x (to the robot's right),

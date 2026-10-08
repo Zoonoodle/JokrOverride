@@ -45,7 +45,7 @@
  *                      AUTOCLAMP_INTAKE_CONFIRM_MS / _MIN_SAMPLES, so the FIRST valid in-range reading
  *                      fires -- "trigger claw at the instant it sees the object".
  *   takeClampEvent()   a one-shot "the jaws just shut, and here is why" (MANUAL vs AUTOCLAMP), which
- *                      Scoring turns into the CLAMP_RISE_DEG hop everywhere, or the
+ *                      Scoring turns into the clamp-grab hop everywhere, or the
  *                      AUTOCLAMP_INTAKE_PUSH_MS forced push down at the handoff. It is ALWAYS consumed
  *                      and never queues: a clamp made while disabled is dropped by clearClampEvent().
  * Neither of them touches a cylinder or the lift. This class still owns the one, Scoring the other.

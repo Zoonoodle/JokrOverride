@@ -19,7 +19,7 @@
 //     claw's distance sensor, so a route never calls or waits for anything to get it. Whenever the jaws
 //     are open and something comes within config::AUTOCLAMP_RANGE_AUTON_MM (65 mm in auton) they shut on
 //     it, and the arm then
-//     hops up config::CLAMP_RISE_DEG -- except at the R1 intake handoff, where it fires instantly and
+//     goes to config::CLAMP_GRAB_HEIGHT -- except at the R1 intake handoff, where it fires instantly and
 //     forces the claw DOWN instead (config::AUTOCLAMP_INTAKE_PUSH_MS). auton::autoclamp(false) turns it
 //     off for a route that does not want it; auton::waitUntilClamped() is OPTIONAL and exists only to
 //     stop a drive at the instant of a clamp.
@@ -225,7 +225,7 @@ pros::delay(500);
     auton::scoreAndWait();
     auton::liftDownAndWait();    
     // The autoclamp needs NOTHING from a route: it is on by default and asynchronous, so simply driving
-    // at a pin with the jaws open grips it (and hops the arm up CLAMP_RISE_DEG) on its own.
+    // at a pin with the jaws open grips it (and takes the arm to CLAMP_GRAB_HEIGHT) on its own.
     // waitUntilClamped() is only for the extra step of STOPPING THE DRIVE at the instant of the clamp --
     // .async = true hands the move to LemLib's own task so this one can watch the claw, and the second
     // argument cancels that motion the moment the jaws shut, so the robot does not keep pushing.

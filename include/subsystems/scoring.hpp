@@ -229,7 +229,7 @@ class Scoring {
      *   - Claw::setIntakeMode(): the autoclamp fires on the FIRST in-range reading here
      *     (config::AUTOCLAMP_INTAKE_CONFIRM_MS), instead of the ordinary 50 ms debounce;
      *   - this class's own clamp handler: a clamp here gets the forced push DOWN
-     *     (config::AUTOCLAMP_INTAKE_PUSH_MS) instead of the CLAMP_RISE_DEG hop.
+     *     (config::AUTOCLAMP_INTAKE_PUSH_MS) instead of the clamp-grab hop.
      * MOVING counts only once the arm is actually inside the handoff zone, so an arm still up at a stack
      * level on its way down is not yet "at the intake".
      */
@@ -295,7 +295,7 @@ class Scoring {
      *     L1 press (config::AUTOCLAMP_INTAKE_AUTO_STACK);
      *   - nothing at all, if the rise would fight something that already owns the lift (see the skip
      *     list in the implementation) or if the clamp was a manual one at the handoff;
-     *   - otherwise: Lift::startClampRise() -- up config::CLAMP_RISE_DEG from wherever the arm is.
+     *   - otherwise: Lift::startClampRise() -- TO the absolute config::CLAMP_GRAB_HEIGHT.
      * It is the ONLY thing in the program that turns a clamp into lift motion, and it still goes through
      * the lift's own command API -- it never writes a motor (CLAUDE.md safety rule 2).
      */
@@ -317,7 +317,7 @@ class Scoring {
      *  height from the lift itself, so this does not pin where the next press goes. */
     void resetStep();
     /** Run the delayed clamp hop: once this mode's delay has passed since an autoclamp grab outside
-     *  the intake sequence, rise CLAMP_RISE_DEG from wherever the arm is then. Called every tick. */
+     *  the intake sequence, go to the absolute CLAMP_GRAB_HEIGHT. Called every tick. */
     void serviceClampHop();
     double heightOf(State s) const;
 
@@ -339,7 +339,7 @@ class Scoring {
                                            // scoreOrMatchload()'s INTAKE_POS destination
     bool grabRise_ = false;               // GRABBING: rise to a stack level afterwards (L1), or stay
                                            // exactly where the push ended (auton::grab())
-    // A clamp outside the intake sequence has fired and owes the arm a CLAMP_RISE_DEG hop, once
+    // A clamp outside the intake sequence has fired and owes the arm a clamp-grab hop, once
     // pendingHopDelayMs_ has passed. 0 = nothing pending. Cleared by enter() and reset(), which is
     // what makes any driver input cancel it.
     std::uint32_t pendingHopAt_ = 0;

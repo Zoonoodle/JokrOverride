@@ -217,14 +217,11 @@ void Scoring::serviceClampHop() {
     if (lift_.isGrabbing() || lift_.isScoring() || lift_.isScoreCycle() || lift_.isScoredAbove()) return;
     if (lift_.hasActiveTarget() && !lift_.isSettled() && !lift_.isBlocked() && !lift_.isFaulted()) return;
 
-    // UP, by CLAMP_RISE_DEG, from wherever the arm is NOW -- never down, and never past MAX. "Now" is
-    // the position at the end of the delay, which is what the driver asked for ("move up 7.5 degrees
-    // from where it is"), not where it was when the jaws shut.
-    const double here = lift_.getPosition();
-    const double goal = std::min(here + config::CLAMP_RISE_DEG, preset::MAX);
-    // The arm is already at (or above) the software top: there is no room to hop into, and MAX is BELOW
-    // an arm the D-pad has pushed past it. Do nothing rather than turn the hop into a descent.
-    if (goal <= here + 0.1) return;
+    // GO TO CLAMP_GRAB_HEIGHT -- an ABSOLUTE height, not a rise (driver, 2026-10-07: "make it 37.5
+    // height, not a rise"). Grabs happen at the bottom, so this is normally a ~37.5 deg lift; a grab
+    // with the arm already higher than that moves it DOWN to 37.5, which is what "go to 37.5" means.
+    // There is no never-go-down guard any more for exactly that reason; MAX still caps it.
+    const double goal = std::min(config::CLAMP_GRAB_HEIGHT, preset::MAX);
     hasCommanded_ = false;  // this class is not tracking the height any more; the hop is the lift's move
     lift_.startClampRise(goal);
 }

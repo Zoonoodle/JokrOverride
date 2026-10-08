@@ -854,7 +854,7 @@ inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 // intake (that's special), we need lift to move up 7.5 degrees from where it is automatically, but
 // delay it so it clamps for 400ms before doing that movement." So the arm stays exactly where the
 // clamp caught it for the mode's delay below, letting the jaws take a real grip on the cup or pin, and
-// only then rises CLAMP_RISE_DEG from wherever it is at THAT moment. Both numbers are below.
+// only then goes to CLAMP_GRAB_HEIGHT -- an absolute height, not a rise. Both numbers are below.
 //
 // WHAT TRIGGERS IT: a clamp the AUTOCLAMP DETECTOR made, outside the intake sequence -- picking up
 // from matchload, from the bottom (-39), or off the field. Nothing else:
@@ -882,10 +882,15 @@ inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 // Scoring::setAutonMode(), which periodic::tick() feeds from Inputs::auton -- NOT from
 // pros::competition::is_autonomous(), because an auton route run from the brain menu has no field
 // switch and would otherwise be treated as driver control.
-//   It does not clear the thing it just gripped: raise CLAMP_RISE_DEG.
+//   It does not clear the thing it just gripped: raise CLAMP_GRAB_HEIGHT.
 //   It lifts far enough to matter / fights the next move: lower it (1-2 deg still moves, see above).
 //   It rises before the grip is solid and drops the cup: raise CLAMP_RISE_DELAY_DRIVER_MS.
-inline constexpr double CLAMP_RISE_DEG = 7.5;                // TUNE: arm deg, RELATIVE, up only (8 -> 7.5)
+// AN ABSOLUTE HEIGHT, NOT A RISE (the driver, 2026-10-07: "make it 37.5 height, not a rise"). After a
+// non-intake autoclamp grab the arm goes TO 37.5 in the zero-at-the-bottom frame, wherever it grabbed
+// from. Grabs happen at the bottom (0), so in practice this is a ~37.5 deg lift.
+// FOLLOW THE CONSEQUENCE: a grab with the arm ALREADY ABOVE 37.5 moves it DOWN to 37.5. That is what
+// "go to 37.5" means and it is deliberate; the old relative version could only ever go up.
+inline constexpr double CLAMP_GRAB_HEIGHT = 37.5;            // TUNE: arm degrees, ABSOLUTE
 inline constexpr int CLAMP_RISE_DELAY_AUTON_MS = 0;          // TUNE: 0 = same tick as the clamp
 inline constexpr int CLAMP_RISE_DELAY_DRIVER_MS = 200;       // TUNE: driver 2026-10-07 (was 400 both)
 
@@ -1323,7 +1328,7 @@ inline constexpr int CLAW_RELEASE_LOCKOUT_MS = 750;          // TUNE
 // So while the macro is at (or coming down into) the INTAKE handoff -- Scoring::isAtIntakeHandoff(),
 // which periodic::tick() feeds to Claw::setIntakeMode() every tick -- the autoclamp swaps the ordinary
 // 50 ms / 2-sample confirm for these, and the clamp is followed by a forced push DOWN instead of the
-// CLAMP_RISE_DEG hop (there is nothing to lift clear of at the handoff; the pin has to be pressed into
+// CLAMP_GRAB_HEIGHT hop (there is nothing to lift clear of at the handoff; the pin has to be pressed into
 // the jaws, exactly as L1's GRAB does it).
 //
 // INSTANT, AND WHAT THAT COSTS. 0 ms + 1 fresh sample means the FIRST valid in-range reading fires the

@@ -318,7 +318,7 @@ void Lift::setTarget(double degrees, bool precise) {
     // ...and whether it is a COARSE move (fast, overshoot allowed -- the front toggle rise).
     const bool fromCoarse = coarseRequest_;
     coarseRequest_ = false;
-    // ...and whether it is the CLAMP_RISE_DEG hop (brain: CLAMP UP). Consumed either way, so an ignored
+    // ...and whether it is the CLAMP_GRAB_HEIGHT hop (brain: CLAMP UP). Consumed either way, so an ignored
     // or queued request can never label a later, unrelated move.
     const bool fromClampRise = clampRiseRequest_;
     clampRiseRequest_ = false;
@@ -435,10 +435,16 @@ void Lift::setTargetFast(double degrees) {
 }
 
 void Lift::startClampRise(double degrees) {
-    // PRECISE, and not negotiable: see the header and "THE CLAMP-RISE" in config.hpp -- a 5 deg goal is
-    // inside LIFT_TOLERANCE_DEG, so a non-precise move would latch "arrived" without moving at all.
     clampRiseRequest_ = true;
-    setTarget(degrees, true);
+    // PRECISE ONLY IF THE HOP IS SMALL. This used to force precise unconditionally, and the reason was
+    // specific: the hop was a 5-8 deg nudge, which is inside LIFT_TOLERANCE_DEG, so an ordinary move
+    // would have latched "arrived" without moving at all. CLAMP_GRAB_HEIGHT is an absolute 37.5 now (driver,
+    // 2026-10-07) -- a real move, far outside that tolerance -- and forcing precise on it would make
+    // the arm walk the last degrees in at LIFT_APPROACH_MIN_DEG_PER_S and hold in the tight band: a
+    // creep, where what is wanted is a quick clean lift that settles into an ordinary hold.
+    // So choose by DISTANCE, which keeps both cases right if CLAMP_GRAB_HEIGHT is ever tuned back down.
+    const double dist = std::fabs(degrees - getPosition());
+    setTarget(degrees, dist <= config::LIFT_TOLERANCE_DEG);
 }
 
 void Lift::moveTo(double degrees, int timeoutMs, bool waitUntilSettled) {
@@ -497,10 +503,10 @@ const char* Lift::phaseName() const {
     // A fast descent queued behind a toggle rise: the arm is still going UP, on its way to touching
     // the toggle height, and will turn around the moment it gets there.
     if (toggleWait_) return "TOGGLE ^";
-    // The CLAMP_RISE_DEG hop: short enough that DRIVE/BRAKE/APPROACH/HOLD would all flick past before
+    // The clamp-grab hop: short enough that DRIVE/BRAKE/APPROACH/HOLD can flick past before
     // they could be read, so say what the move IS for as long as it is running. PARK (and anything that
     // follows) reports normally -- by then the hop is over and the arm is just settled at a height.
-    // The word carries no number on purpose: CLAMP_RISE_DEG is a TUNE constant (5 -> 8 already), and a
+    // The word carries no number on purpose: CLAMP_GRAB_HEIGHT is a TUNE constant, and a
     // baked-in "+5" would quietly start lying. The goal is printed next to it on the same line anyway.
     if (clampRise_ && (phase_ == Phase::DRIVE || phase_ == Phase::BRAKE || phase_ == Phase::APPROACH ||
                        phase_ == Phase::HOLD)) {
@@ -1049,7 +1055,7 @@ void Lift::startScoreReturn() {
     // the stack precisely so the robot can drive away, and press 2 is pressed after it has. If press 2 is
     // ever used while still standing over the stack, the pin can be re-grabbed on the way down.
     // The lift cannot be FOUGHT by that, which is the part that would actually have been dangerous: a
-    // clamp during the descent raises the CLAMP_RISE_DEG hop request, and Scoring::handleClampEvent()
+    // clamp during the descent raises the clamp-grab hop request, and Scoring::handleClampEvent()
     // refuses it while a lift move is in flight (hasActiveTarget() && !isSettled()), which a descent is.
     scoreCycle_ = false;
     descendRequest_ = false;

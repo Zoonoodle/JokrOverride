@@ -1599,7 +1599,14 @@ inline constexpr int CLAW_OPEN_TIME_MS = 200;                // TUNE: never meas
 //   Slams the pin into the stack / knocks the tower: LOWER it (45, 35).
 //   Scoring feels slow: raise it, but contact detection gets less sensitive as the gap between
 //   "moving" and "stopped" shrinks relative to the noise.
-inline constexpr double L2_SCORE_SPEED_PCT = 90.0;           // TUNE: ~135 deg/s -- 1.5x, driver 2026-10-07 (was 60)
+// 90 -> 100, which is the CEILING, not a choice: 100% of LIFT_FREE_SPEED_DEG_PER_S is 150 deg/s and
+// the arm cannot be driven faster than its own free speed -- a reference above 100 is unreachable and
+// only winds up the velocity integral (the same reason LIFT_FAST_DESCENT_* were pulled back to
+// 95/100). So the asked-for 1.5x is not available here: 135 -> 150 deg/s is 1.11x.
+// THIS CONSTANT ONLY GOVERNS THE RUN TO THE BOTTOM AFTER THE RELEASE, which uses full authority. The
+// press-down BEFORE the release is limited by L2_PRESS_MAX_MV instead, and that is where the 1.5x
+// actually comes from -- see the note there.
+inline constexpr double L2_SCORE_SPEED_PCT = 100.0;          // TUNE: 150 deg/s, the free-speed ceiling (was 90)
 // Most the loop may push DOWNWARD (magnitude, mV) while pressing. This is the crush limit: the
 // velocity loop has 12000 mV of authority and an integral that winds up, so without a cap it would
 // keep increasing the push until it moved -- i.e. flatten the stack. 7000 mV through the 4:1 is about
@@ -1616,7 +1623,16 @@ inline constexpr double L2_SCORE_SPEED_PCT = 90.0;           // TUNE: ~135 deg/s
 //   The pin does not seat fully before the release: raise it (8000).
 //   A loaded arm still creeps under L2_CONTACT_STALL_DEG_PER_S with nothing under it: raise this
 //   further, or raise L2_CONTACT_NOSTART_MS so it has longer to prove it is still accelerating.
-inline constexpr float L2_PRESS_MAX_MV = 3500.0f;            // TUNE: magnitude, downward, red retune 2026-10-07 (was 7000)
+// THE PRESS-DOWN'S REAL SPEED LIMIT, and the knob the driver's "1.5x faster descent" actually needs.
+// The press phase runs runVelocityLoop(..., downMaxMv = THIS), so it is AUTHORITY-limited, not
+// reference-limited: at 3500 mV the motor's back-EMF balances at 3500/12000 * 150 = ~44 deg/s, and
+// above that the motors brake against gravity. L2_SCORE_SPEED_PCT's 135 deg/s was never reachable
+// during the press -- it was always this cap doing the limiting.
+// 3500 -> 5250 is a true 1.5x of the available downward authority, and still well under the 7000 this
+// was before the red retune, so it is inside territory the arm has already run at.
+// THE TRADE: this is also the crush cap -- how hard the arm may press a pin into a stack while the
+// contact detector decides. 1.5x the authority is 1.5x the press force. Watch the first few scores.
+inline constexpr float L2_PRESS_MAX_MV = 5250.0f;            // TUNE: magnitude, downward (was 3500)
 // CONTACT DETECTION. Implemented by subsystems::ContactDetector (include/subsystems/contact_detector.hpp),
 // which is a PURE class with host-side tests in test/ -- run test/run.sh on the Mac after changing any
 // of these, it proves the thresholds against synthetic landings before anything is uploaded.
@@ -1670,10 +1686,15 @@ inline constexpr float L2_PRESS_MAX_MV = 3500.0f;            // TUNE: magnitude,
 //     altogether past a certain point: AGREEMENT plus thresholds that are TOO strict together can
 //     reject a genuinely gentle landing as readily as a false one. L2_AUTO_RELEASE_DEG is the backstop
 //     for whatever this still misses.
-inline constexpr double L2_CONTACT_LAG_DEG = 2.2;            // TUNE: arm degrees of accumulated shortfall (was 1.5)
+// SCALED WITH THE SPEED (2.2 -> 3.3, 1.5x). This is accumulated shortfall in DEGREES, so a faster
+// descent racks degrees up quicker for the same disturbance -- leaving it at 2.2 would make it easier
+// to false-fire in free descent, which has bitten this arm before. Scaling it up keeps the margin.
+inline constexpr double L2_CONTACT_LAG_DEG = 3.3;            // TUNE: arm deg of accumulated shortfall (was 2.2)
 inline constexpr double L2_CONTACT_LAG_LEAK_MS = 200.0;      // TUNE: makes LAG measure a change, not a drift
-inline constexpr double L2_CONTACT_EFFORT_MV = 1800.0;       // TUNE: extra downward push over the baseline (was 2000 --
-                                                              // LOWERED, not raised: see the AGREEMENT note above)
+// SCALED WITH THE AUTHORITY (1800 -> 2700, 1.5x), because this is an absolute mV figure and
+// L2_PRESS_MAX_MV just went up 1.5x: the loop now has half again as much headroom to push into a
+// stack, so the same number would fire on less real resistance.
+inline constexpr double L2_CONTACT_EFFORT_MV = 2700.0;       // TUNE: extra downward push over baseline (was 1800)
 inline constexpr double L2_CONTACT_SPEED_FRAC = 0.55;        // TUNE: measured / baseline that counts as contact (was 0.70)
 inline constexpr double L2_CONTACT_STALL_DEG_PER_S = 6.0;    // TUNE: absolute near-stop, needs no baseline, no AGREEMENT
 inline constexpr int L2_CONTACT_MS = 30;                     // TUNE: confirm window (was 20 -- see AGREEMENT below)
@@ -1684,7 +1705,10 @@ inline constexpr int L2_CONTACT_MS = 30;                     // TUNE: confirm wi
 //   Baseline looks wrong / fires early on a loaded press: raise this (3.5 -> 5.0).
 //   Takes too long to arm on a normal unloaded press: lower it, but not below a degree or two -- it
 //   needs to be more than sensor noise could ever integrate into over L2_CONTACT_SETTLE_MS.
-inline constexpr double L2_CONTACT_ARM_TRAVEL_DEG = 3.5;     // TUNE: arm degrees, cumulative since PRESS started
+// SCALED WITH THE SPEED (3.5 -> 5.25, 1.5x). The detector refuses to arm until the arm has travelled
+// this far, so the start-of-move transient cannot fire it. A faster press covers 3.5 deg sooner, i.e.
+// earlier in that transient, so the distance has to grow with the speed to keep the same margin.
+inline constexpr double L2_CONTACT_ARM_TRAVEL_DEG = 5.25;    // TUNE: arm deg since PRESS started (was 3.5)
 // How long the press gets to reach a steady descent speed before the baseline is snapshotted and the
 // baseline-relative signals come alive. The absolute near-stop is live before this (after the dead
 // time below), so a pin that is already resting is still caught immediately.
@@ -1767,7 +1791,7 @@ inline constexpr int L2_MAX_UNSTICK_TRIES = 2;               // TUNE
 //     lot just turns more of the press into a guaranteed-release, no-sensing region.
 //   Height rule fires before a real landing that the detector should have caught: that is a tuning
 //     problem in the CONTACT_* block above, not this constant -- the detector is supposed to win first.
-inline constexpr double L2_AUTO_RELEASE_DEG = 32.0;          // TUNE: arm degrees, RELATIVE travel from the L2 start
+inline constexpr double L2_AUTO_RELEASE_DEG = 48.0;          // TUNE: arm deg, RELATIVE; 1.5x, driver 2026-10-07 (was 32)
 // TWO JOBS, both "we're close enough to the bottom, stop being delicate about it", at the same height
 // on purpose:
 //   1. PRESS fallback for a start too low for L2_AUTO_RELEASE_DEG's travel to ever complete before the

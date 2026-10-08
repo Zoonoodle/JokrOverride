@@ -275,6 +275,24 @@ class Lift {
         REST,      // settled AT THE BOTTOM: brake mode COAST and 0 V -- the motors are loose.
     };
 
+    /**
+     * THE FIVE GAINS THAT MATTER, LIVE AND WRITEABLE AT RUNTIME.
+     *
+     * They are seeded from the config::LIFT_* constants at startup and are what the loops actually
+     * read, so the LIFT_PID_TUNE auton route can nudge them with the controller and the arm's feel
+     * changes on the next tick -- no rebuild, no re-upload. Nothing else in the program writes them.
+     *
+     * WHAT YOU CHANGE HERE IS NOT SAVED. Powering off restores the config values, which is the point:
+     * tune live, note the numbers off the brain, then type the ones you liked into config.hpp so they
+     * survive. See "TUNING THE LIFT PID" in config.hpp for the order to turn them in.
+     */
+    struct Gains {
+        float holdKp, holdKi, holdKd;  // the position hold: sag, learned gravity, anti-bounce
+        float velKp, velKi;            // the inner speed loop every move runs through
+    };
+    /** The live gains. Readable and writeable from anywhere; the PID task reads them every tick. */
+    static Gains& gains();
+
     Lift();
 
     /** Put this class's own control state in a known place before startTask(). Call once, at

@@ -27,6 +27,7 @@ enum class Route {
     MATCH_ALT,         // a second match route to iterate on without touching the working MATCH
 
     // Lift/claw/pivot only -- NO drivetrain motion, so both are safe to run on a stand.
+    LIFT_PID_TUNE,  // tune the lift PID live with the controller -- no drivetrain, see autons.cpp
     PIVOT_TEST,     // checks the pivot now waits for the arm to arrive before swinging OUT
     AUTOCLAMP_TEST, // checks an autoclamp at the handoff rises to level 1 and swings the pivot OUT
 

@@ -144,18 +144,17 @@ void Scoring::handleClampEvent() {
     // driver may well be gripping something by hand and L1 is the button that pushes.
     if (isAtIntakeHandoff()) {
         if (source != Claw::ClampSource::AUTOCLAMP) return;
-        if (lift_.isGrabbing() || lift_.isScoring() || lift_.isScoreCycle()) return;  // already pushing
-        lift_.startClampPush(config::AUTOCLAMP_INTAKE_PUSH_MS);
-        // Scoring stays in INTAKE_POS throughout, so a following L1 is still recognised as "from the
-        // handoff" and runs the ordinary GRAB (which finds the jaws already shut, skips the close,
-        // pushes, then rises to level 1). commanded_ is dropped because the arm is no longer at the
-        // height this class asked for.
-        hasCommanded_ = false;
-        // AND THEN GO UP BY ITSELF (config::AUTOCLAMP_INTAKE_AUTO_STACK, driver 2026-10-07). The
-        // INTAKE_POS case in update() watches the push and enters STACKING on level 1 the tick it
-        // ends -- no L1 press needed. Set here rather than acted on here because the push has to
-        // FINISH first: the arm is still forcing down onto the pin this tick.
-        autoStackAfterPush_ = config::AUTOCLAMP_INTAKE_AUTO_STACK;
+        if (lift_.isGrabbing() || lift_.isScoring() || lift_.isScoreCycle()) return;  // already busy
+        // THE BOUNCE CAUGHT SOMETHING. Stop sweeping and run the automatic grab (driver, 2026-10-07):
+        // settle, push down into it, then rise to level 1 releasing the pivot on the way. Entering
+        // GRAB_SETTLE is what stops the bounce -- INTAKE_POS is the only state that commands it, so
+        // leaving the state ends it on this very tick, with no flag to clear.
+        //
+        // No startClampPush() any more: the push down is now a real, measured move to
+        // GRAB_PUSH_DEPTH_DEG in GRAB_PUSH, not a timed voltage shove, so the depth is what the
+        // driver asked for ("move down lower to like -5 degrees") rather than however far 300 ms of
+        // push happened to get.
+        if (config::AUTOCLAMP_INTAKE_AUTO_STACK) enter(State::GRAB_SETTLE);
         return;
     }
 
@@ -194,19 +193,55 @@ void Scoring::enter(State next) {
     state_ = next;
     stateStart_ = pros::millis();
     hasCommanded_ = false;
-    // Any state change cancels a pending auto-rise: if the driver pressed L1/L2/R1/B between the
-    // autoclamp's push and its automatic trip to level 1, their button wins. The INTAKE_POS handler
-    // clears this itself before entering STACKING, so this never eats its own transition.
-    autoStackAfterPush_ = false;
     switch (next) {
         case State::IDLE: resetStep(); break;  // arrived home after score() lowers to DOWN (reset() sets IDLE directly, without going through enter())
         case State::INTAKE_POS:
+            // STEP (d), THE BOUNCE. The pivot is already ENGAGED (INTAKE_DESCEND did it at 13.5) and
+            // the arm is already at -2.2; all this does is start the sweep from the bottom end.
+            // setPivot(false) is belt-and-braces for the MOVING path, which can still land here.
+            openClawForPickup();
+            setPivot(false);
+            bounceUp_ = false;
+            bounceFlipAt_ = pros::millis();
+            command(preset::INTAKE, true);  // precise: the band is 1.7 deg wide
+            break;
         case State::MATCHLOAD_POS:
             command(heightOf(next));
             openClawForPickup();
-            // The intake handoff is the one place the pivot is BACK (the driver's definition). MOVING
-            // normally already swung it BACK on the way down into the handoff zone; this makes sure.
-            setPivot(next == State::INTAKE_POS ? false : !config::PIVOT_BACK_AT_MATCHLOAD);
+            setPivot(!config::PIVOT_BACK_AT_MATCHLOAD);
+            break;
+
+        // --- THE INTAKE SEQUENCE ------------------------------------------------------------
+        case State::INTAKE_APPROACH:
+            // (a) Pivot DISENGAGED -- setPivot(TRUE) is "OUT", which is the driver's "not engaged"
+            // (see the polarity note in config.hpp) -- and run to 13.5. The jaws open now so a cup
+            // can be taken the moment the sequence reaches the bottom.
+            openClawForPickup();
+            setPivot(true);
+            command(config::INTAKE_PIVOT_TRIGGER_DEG);
+            break;
+        case State::INTAKE_DESCEND:
+            // (b) happened on the transition into this state: the pivot is ENGAGED the tick the arm
+            // arrived at 13.5, with no delay, because the cylinder is fast.
+            // (c) now walk down to -2.2. PRECISE makes it the slow, steady approach rather than a run.
+            setPivot(false);
+            command(preset::INTAKE, true);
+            break;
+
+        // --- THE INTAKE AUTOCLAMP GRAB ------------------------------------------------------
+        case State::GRAB_SETTLE:
+            // Jaws just shut on a cup or pin. Command NOTHING: the arm holds exactly where the clamp
+            // caught it for GRAB_SETTLE_MS so the grip settles before any motion.
+            break;
+        case State::GRAB_PUSH:
+            // Down into what we just caught, still clamped. Precise, because -5 is a shallow,
+            // deliberate seating depth and overshooting it presses the cup into the floor.
+            command(config::GRAB_PUSH_DEPTH_DEG, true);
+            break;
+        case State::GRAB_RISE:
+            // Up to level 1, still clamped. The pivot stays ENGAGED for now: update() disengages it
+            // the moment the arm passes PIVOT_RELEASE_UP_DEG on the way up.
+            command(preset::STACK_LEVELS[0]);
             break;
         case State::LIFT_SETTLE:
             break;  // update() watches the lift and starts pendingAfterSettle_ when it arrives
@@ -260,10 +295,6 @@ bool Scoring::inHandoffZone() const {
 void Scoring::reset() {
     state_ = State::IDLE;
     hasCommanded_ = false;
-    // reset() sets state_ directly instead of going through enter(), so the pending auto-rise has to
-    // be cleared here too -- the manual override (D-pad) calls this every tick it is held, and must
-    // not be followed by an automatic trip to level 1 the moment it is let go.
-    autoStackAfterPush_ = false;
     resetStep();
 }
 
@@ -298,16 +329,18 @@ void Scoring::goToIntake() {
         state_ == State::RETURNING || state_ == State::LIFT_SETTLE) {
         return;
     }
-    if (state_ == State::INTAKE_POS) {
-        hasCommanded_ = false;  // re-tap snaps it back to INTAKE after a manual nudge
-        command(preset::INTAKE);
+    // Already running the sequence: a re-tap is a no-op rather than a restart, so it cannot throw the
+    // arm back up to 13.5 from the bounce. (The bounce re-commands its own height every tick, so
+    // there is nothing to "re-send" the way the old single-height handoff needed.)
+    if (state_ == State::INTAKE_POS || state_ == State::INTAKE_APPROACH ||
+        state_ == State::INTAKE_DESCEND) {
         return;
     }
-    if (state_ == State::MOVING && moveDest_ == State::INTAKE_POS) {
-        hasCommanded_ = false;  // already heading there, just re-send it
-        return;
-    }
-    moveTo(State::INTAKE_POS);
+    // R1 AND EVERY AUTON INTAKE CALL START HERE -- one shared path (driver, 2026-10-07). Step (a) of
+    // "THE INTAKE SEQUENCE" in config.hpp: pivot disengaged, run to 13.5. It replaces the old
+    // moveTo(INTAKE_POS), which went straight to a single handoff height and placed the pivot by
+    // height on the way down.
+    enter(State::INTAKE_APPROACH);
 }
 
 void Scoring::stepUp() {
@@ -457,29 +490,86 @@ void Scoring::update() {
 
     const std::uint32_t elapsed = pros::millis() - stateStart_;
     switch (state_) {
-        case State::INTAKE_POS:
-            // THE AUTOCLAMP'S OWN TRIP TO LEVEL 1. handleClampEvent() above started the forced push
-            // down onto the pin and set autoStackAfterPush_; the push owns the lift while it runs, so
-            // wait for it to finish (Lift::isGrabbing() covers startClampPush -- it IS a GRAB) and
-            // only then rise. advanceStep() is the FIRST rung of L1's ladder, exactly what an L1 press
-            // from the handoff asks for. STACKING then commands the height and swings the pivot OUT to
-            // the scoring position once the arm has arrived (interlock 2).
+        case State::INTAKE_POS: {
+            // STEP (d), THE BOUNCE. Sweep steadily between -2.2 and -0.5 so that a cup and a pin --
+            // which are different sizes -- each end up inside the claw sensor's range at some point
+            // in the cycle. It runs forever; the two ways out are a clamp (handleClampEvent() above
+            // enters GRAB_SETTLE, which stops this by leaving the state) and any driver button.
             //
-            // WHERE THE FIRST RUNG LANDS UNDER UP-ONLY STEPPING (checked 2026-10-07): the push leaves
-            // the lift with an active target, because Lift::startPush() sets goal_ = the position the
-            // push STARTED from -- the handoff, 23.0 -- and never moves it (the forcing is voltage, not
-            // a goal). So advanceStep()'s base is 23.0 and the rung is 43.0, which is the same place an
-            // L1 press from the handoff goes. It is NOT the pushed-down position, which is what would
-            // have made this rise short.
-            if (autoStackAfterPush_ && !lift_.isGrabbing()) {
-                autoStackAfterPush_ = false;
-                // Nothing in the jaws after all (the pin was knocked out by the push): stay down and
-                // keep waiting at the handoff rather than rising with an empty claw.
-                if (!claw_.isClamped()) break;
-                advanceStep();
+            // TIME-DRIVEN, NOT ARRIVAL-DRIVEN: the band is 1.7 deg, narrower than the arrival
+            // tolerance, so waiting for "arrived" would stall at one end. Each half gets
+            // INTAKE_BOUNCE_HALF_MS.
+            if (pros::millis() - bounceFlipAt_ >= static_cast<std::uint32_t>(config::INTAKE_BOUNCE_HALF_MS)) {
+                bounceUp_ = !bounceUp_;
+                bounceFlipAt_ = pros::millis();
+            }
+            command(bounceUp_ ? config::INTAKE_BOUNCE_TOP_DEG : preset::INTAKE, true);
+            break;
+        }
+
+        // --- THE INTAKE SEQUENCE ----------------------------------------------------------------
+        case State::INTAKE_APPROACH:
+            // (a) running to 13.5 with the pivot disengaged. (b) THE TRIGGER: the tick the lift
+            // arrives -- from above OR below, liftArrived() is a distance test, not a direction one --
+            // move on, and INTAKE_DESCEND's entry engages the pivot immediately.
+            // The timeout is a backstop so a blocked arm cannot sit here forever; carrying on is safe
+            // because the next step is also downward.
+            if (liftArrived(config::INTAKE_PIVOT_TRIGGER_DEG) || lift_.isBlocked() ||
+                lift_.isFaulted() ||
+                elapsed >= static_cast<std::uint32_t>(config::INTAKE_APPROACH_TIMEOUT_MS)) {
+                enter(State::INTAKE_DESCEND);
+            }
+            break;
+
+        case State::INTAKE_DESCEND:
+            // (c) the slow, precise walk down to -2.2 with the pivot engaged. Then the bounce.
+            if (liftArrived(preset::INTAKE) || lift_.isBlocked() || lift_.isFaulted() ||
+                elapsed >= static_cast<std::uint32_t>(config::INTAKE_DESCEND_TIMEOUT_MS)) {
+                enter(State::INTAKE_POS);
+            }
+            break;
+
+        // --- THE INTAKE AUTOCLAMP GRAB ----------------------------------------------------------
+        case State::GRAB_SETTLE:
+            // Holding still on the fresh grip. If it turns out there is nothing in the jaws after all
+            // go straight back to intaking rather than pushing and rising with an empty claw.
+            if (!claw_.isClamped()) {
+                enter(State::INTAKE_POS);
+                break;
+            }
+            if (elapsed >= static_cast<std::uint32_t>(config::GRAB_SETTLE_MS)) enter(State::GRAB_PUSH);
+            break;
+
+        case State::GRAB_PUSH:
+            // Seating down into the cup/pin at -5, still clamped. BLOCKED is the expected outcome as
+            // often as arrival is -- the cup is on the floor -- so both move on.
+            if (liftArrived(config::GRAB_PUSH_DEPTH_DEG) || lift_.isBlocked() || lift_.isFaulted() ||
+                elapsed >= static_cast<std::uint32_t>(config::GRAB_PUSH_TIMEOUT_MS)) {
+                enter(State::GRAB_RISE);
+            }
+            break;
+
+        case State::GRAB_RISE: {
+            // Rising to level 1 with the cup held. THE PIVOT DISENGAGES ON THE WAY UP, by HEIGHT:
+            // engaged until the arm passes PIVOT_RELEASE_UP_DEG (3), then OUT. Checked every tick, so
+            // it happens mid-rise exactly as asked and not on arrival.
+            if (lift_.getPosition() > config::PIVOT_RELEASE_UP_DEG) setPivot(true);
+            // Lost the cup on the way up: stop pretending to stack it.
+            if (!claw_.isClamped()) {
+                enter(State::IDLE);
+                break;
+            }
+            // Arrived at level 1: hand over to STACKING so the ladder is seeded there and the next L1
+            // steps up from level 1 rather than from the floor.
+            if (liftArrived(preset::STACK_LEVELS[0]) || lift_.isBlocked() || lift_.isFaulted() ||
+                elapsed >= static_cast<std::uint32_t>(config::GRAB_RISE_TIMEOUT_MS)) {
+                setPivot(true);  // make sure, even if the rise never got past 3 deg
+                stepGoal_ = preset::STACK_LEVELS[0];
+                level_ = 1;
                 enter(State::STACKING);
             }
             break;
+        }
 
         case State::IDLE:
         case State::MATCHLOAD_POS:
@@ -538,9 +628,11 @@ void Scoring::update() {
             break;
 
         case State::STACKING: {
-            // Driver opened the claw by hand up here: treat it as a score.
+            // Driver opened the claw by hand up here: treat it as a score. Goes through the INTAKE
+            // SEQUENCE (13.5 trigger -> pivot -> -2.2 -> bounce), not the old straight-to-the-handoff
+            // MOVING path, so there is exactly ONE way the arm ever arrives at the intake.
             if (!claw_.isClamped()) {
-                moveTo(State::INTAKE_POS);
+                enter(State::INTAKE_APPROACH);
                 break;
             }
             const double h = levelHeight();
@@ -586,7 +678,8 @@ void Scoring::update() {
                 }
             } else if (elapsed >= static_cast<std::uint32_t>(config::CLAW_OPEN_TIME_MS)) {
                 // Interlock 3 (scoreOrMatchload() only -- score()/L2 above no longer waits on this).
-                moveTo(State::INTAKE_POS);
+                // Same single intake path as R1 and the auton calls.
+                enter(State::INTAKE_APPROACH);
             }
             break;
 
@@ -615,6 +708,11 @@ const char* Scoring::stateName() const {
         case State::IDLE: return "IDLE";
         case State::INTAKE_POS: return "INTAKE";
         case State::MATCHLOAD_POS: return "MATCHLOAD";
+        case State::INTAKE_APPROACH: return "IN>13.5";
+        case State::INTAKE_DESCEND: return "IN>-2.2";
+        case State::GRAB_SETTLE: return "GRAB SET";
+        case State::GRAB_PUSH: return "GRAB DN";
+        case State::GRAB_RISE: return "GRAB UP";
         case State::CLAMPING: return "CLAMPING";
         case State::STACKING: return "STACKING";
         case State::LIFT_SETTLE: return "WAIT LIFT";

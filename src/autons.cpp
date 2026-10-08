@@ -36,6 +36,12 @@
 #include "config.hpp"
 #include "robot.hpp"
 
+#include "pros/screen.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+
 using namespace robot;
 
 namespace autons {
@@ -444,7 +450,7 @@ auton::clawGrip();
       auton::autoclamp(true);
     //move to first cup
     chassis.waitUntilDone();
-    chassis.swingToHeading(82, lemlib::DriveSide::LEFT, 700);
+    chassis.turnToHeading(82, 700);
     pros::delay(400);
       auton::liftTo(auton::Level::ONE);
     chassis.moveToPoint(24, -21, 1000, {.forwards = false, .maxSpeed = 80});
@@ -471,6 +477,130 @@ chassis.turnToHeading(87.5, 700);
 
 
 }
+
+// ---------------------------------------------------------------------------
+// LIFT_PID_TUNE — tune the lift PID without rebuilding. NO DRIVETRAIN: safe on a stand.
+// ---------------------------------------------------------------------------
+// HOW TO USE IT
+//   1. Put SELECTED (top of this file) on Route::LIFT_PID_TUNE and run autonomous on a stand.
+//   2. The arm walks the real heights, one per A press, and after each move the brain's line 5 shows
+//          TUNE <name> ovr <overshoot> set <settle ms> err <steady error>
+//      OVERSHOOT is how far past the goal it went, SETTLE is how long until it stayed inside the
+//      tolerance, STEADY ERR is where it actually parked. Those are the three numbers to tune on.
+//   3. Nudge the gains LIVE with the controller -- no rebuild, no re-upload:
+//          LEFT / RIGHT  pick which gain is selected   (shown on the controller screen)
+//          UP / DOWN     raise / lower it by 10%
+//          A             run the next height
+//          B             re-run the current height
+//          Y             print all five gains to the brain terminal
+//      Line 6 of the brain always shows the five live values.
+//   4. When you like it, note the numbers and type them into config.hpp -- see "TUNING THE LIFT PID"
+//      there. NOTHING HERE IS SAVED: a power cycle restores the config values.
+//
+// The heights are the ones that actually matter, in the order the tuning procedure wants them: a long
+// swing first (for the speed loop), then the precise spots (for arrival).
+namespace {
+struct TunePoint {
+    const char* name;
+    double height;
+    bool precise;
+};
+const TunePoint kTunePoints[] = {
+    {"DOWN", config::lift_preset::DOWN, false},
+    {"L5", config::lift_preset::STACK_LEVELS[4], false},     // the long swing: speed-loop work
+    {"DOWN", config::lift_preset::DOWN, false},
+    {"L1", config::lift_preset::STACK_LEVELS[0], false},
+    {"L2", config::lift_preset::STACK_LEVELS[1], false},
+    {"L3", config::lift_preset::STACK_LEVELS[2], false},
+    {"L4", config::lift_preset::STACK_LEVELS[3], false},
+    {"13.5 trig", config::INTAKE_PIVOT_TRIGGER_DEG, true},  // the precise spots
+    {"-2.2 intake", config::lift_preset::INTAKE, true},
+    {"-0.5 bounce", config::INTAKE_BOUNCE_TOP_DEG, true},
+    {"-5 grab", config::GRAB_PUSH_DEPTH_DEG, true},
+};
+constexpr int kTunePointCount = static_cast<int>(sizeof(kTunePoints) / sizeof(kTunePoints[0]));
+
+/** The five live gains, in the order LEFT/RIGHT walks them. Pointers into Lift::gains(), so writing
+ *  through one changes what the PID task reads on its very next tick. */
+struct GainRef {
+    const char* name;
+    float* value;
+};
+
+/** Run one height and measure it. Blocks until the arm settles or the timeout, sampling every 10 ms. */
+void tuneRunPoint(const TunePoint& p) {
+    const double tol = p.precise ? config::LIFT_PRECISE_TOLERANCE_DEG : config::LIFT_TOLERANCE_DEG;
+    robot::lift.setTarget(p.height, p.precise);
+    const std::uint32_t start = pros::millis();
+    double worstOvershoot = 0.0;
+    std::uint32_t settledAt = 0;
+    const double startPos = auton::liftPosition();
+    const bool goingUp = p.height > startPos;
+    while (pros::millis() - start < static_cast<std::uint32_t>(config::AUTON_LIFT_TIMEOUT_MS)) {
+        const double pos = auton::liftPosition();
+        // Overshoot = how far PAST the goal it got, in the direction of travel.
+        const double past = goingUp ? pos - p.height : p.height - pos;
+        if (past > worstOvershoot) worstOvershoot = past;
+        const bool inBand = std::fabs(pos - p.height) <= tol;
+        if (inBand && settledAt == 0) settledAt = pros::millis();
+        if (!inBand) settledAt = 0;  // left the band again: it has not settled yet
+        if (settledAt != 0 && pros::millis() - settledAt >= 250) break;  // held the band for 250 ms
+        pros::delay(10);
+    }
+    const std::uint32_t settleMs = settledAt != 0 ? settledAt - start : 0;
+    const double steadyErr = auton::liftPosition() - p.height;
+    pros::screen::print(pros::E_TEXT_MEDIUM, 5, "TUNE %-11s ovr %5.1f set %4lu err %+5.1f   ", p.name,
+                        worstOvershoot, static_cast<unsigned long>(settleMs), steadyErr);
+    std::printf("TUNE %s goal %.1f overshoot %.1f settle_ms %lu steady_err %.2f\n", p.name, p.height,
+                worstOvershoot, static_cast<unsigned long>(settleMs), steadyErr);
+}
+
+void liftPidTune() {
+    subsystems::Lift::Gains& g = subsystems::Lift::gains();
+    GainRef refs[] = {
+        {"VEL_KP", &g.velKp}, {"VEL_KI", &g.velKi},
+        {"HOLD_KP", &g.holdKp}, {"HOLD_KI", &g.holdKi}, {"HOLD_KD", &g.holdKd},
+    };
+    constexpr int kRefCount = static_cast<int>(sizeof(refs) / sizeof(refs[0]));
+    int sel = 4;    // start on HOLD_KD: the anti-bounce term is what people come here for
+    int point = 0;  // which height runs next
+
+    pros::screen::print(pros::E_TEXT_MEDIUM, 5, "TUNE ready -- A runs, UP/DOWN +-10%%        ");
+    while (true) {
+        // Always show the live gains, so a nudge is visible immediately.
+        pros::screen::print(pros::E_TEXT_MEDIUM, 6, "vKp%.0f vKi%.0f hKp%.0f hKi%.0f hKd%.0f  <%s>   ",
+                            g.velKp, g.velKi, g.holdKp, g.holdKi, g.holdKd, refs[sel].name);
+        robot::master.print(0, 0, "%-8s %7.1f", refs[sel].name, *refs[sel].value);
+
+        if (robot::master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_RIGHT)) {
+            sel = (sel + 1) % kRefCount;
+        }
+        if (robot::master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_LEFT)) {
+            sel = (sel + kRefCount - 1) % kRefCount;
+        }
+        // +-10%, with a floor so a gain can never be nudged to exactly 0 and get stuck there.
+        if (robot::master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_UP)) {
+            *refs[sel].value = std::max(*refs[sel].value * 1.1f, *refs[sel].value + 1.0f);
+        }
+        if (robot::master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_DOWN)) {
+            *refs[sel].value = std::max(*refs[sel].value * 0.9f, 1.0f);
+        }
+        if (robot::master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_Y)) {
+            std::printf("GAINS velKp %.1f velKi %.1f holdKp %.1f holdKi %.1f holdKd %.1f\n", g.velKp,
+                        g.velKi, g.holdKp, g.holdKi, g.holdKd);
+        }
+        if (robot::master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B)) {
+            const int prev = (point + kTunePointCount - 1) % kTunePointCount;
+            tuneRunPoint(kTunePoints[prev]);  // re-run the one just done
+        }
+        if (robot::master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A)) {
+            tuneRunPoint(kTunePoints[point]);
+            point = (point + 1) % kTunePointCount;
+        }
+        pros::delay(20);
+    }
+}
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // MATCH_ALT — a second match route, so MATCH can stay the one that works.
@@ -519,6 +649,7 @@ const char* selectedName() {
         case Route::SKILLS: return "SKILLS";
         case Route::MATCHLOAD_FINISH: return "MATCHLOAD_FIN";
         case Route::MATCH_ALT: return "MATCH_ALT";
+        case Route::LIFT_PID_TUNE: return "LIFT_PID_TUNE";
         case Route::PIVOT_TEST: return "PIVOT_TEST";
         case Route::AUTOCLAMP_TEST: return "AUTOCLAMP_TEST";
         case Route::NONE: return "NONE";
@@ -534,6 +665,7 @@ void run() {
         case Route::SKILLS: skillsRoute(); break;
         case Route::MATCHLOAD_FINISH: matchloadFinishAuto(); break;
         case Route::MATCH_ALT: matchAltRoute(); break;
+        case Route::LIFT_PID_TUNE: liftPidTune(); break;
         case Route::PIVOT_TEST: pivotTest(); break;
         case Route::AUTOCLAMP_TEST: autoclampTest(); break;
         case Route::NONE: break;

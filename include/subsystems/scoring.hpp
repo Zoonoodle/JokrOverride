@@ -112,6 +112,19 @@ class Scoring {
   public:
     enum class State {
         IDLE, INTAKE_POS, MATCHLOAD_POS,
+        // --- THE INTAKE SEQUENCE (driver, 2026-10-07). R1 and every auton intake call enter
+        // INTAKE_APPROACH; the three states run in order and end in INTAKE_POS, which BOUNCES.
+        // See "THE INTAKE SEQUENCE" in config.hpp for the numbers and the pivot polarity.
+        INTAKE_APPROACH,  // (a) pivot DISENGAGED, lift to INTAKE_PIVOT_TRIGGER_DEG (13.5)
+        INTAKE_DESCEND,   // (b)+(c) pivot ENGAGED on arrival at 13.5, then precise descent to -2.2
+        // ...and INTAKE_POS is (d): the steady -2.2 <-> -0.5 bounce, until a clamp or a button.
+
+        // --- THE INTAKE AUTOCLAMP GRAB. Entered by the clamp event itself, runs to level 1 on its
+        // own, and cancelled by any driver input (they all call enter()/reset()).
+        GRAB_SETTLE,      // jaws just shut: hold still for GRAB_SETTLE_MS
+        GRAB_PUSH,        // down to GRAB_PUSH_DEPTH_DEG (-5), still clamped
+        GRAB_RISE,        // up to level 1; pivot DISENGAGES passing PIVOT_RELEASE_UP_DEG (3)
+
         LIFT_SETTLE,  // an action was asked for while a lift move was still flying: wait for it to
                       // arrive, then do the action (see pendingAfterSettle_)
         GRABBING,   // L1 from the handoff / auton grab: the lift is forcing down, the jaws close
@@ -212,8 +225,20 @@ class Scoring {
      * level on its way down is not yet "at the intake".
      */
     bool isAtIntakeHandoff() const {
-        return state_ == State::INTAKE_POS ||
+        // THE WHOLE INTAKE SEQUENCE COUNTS, not just the parked/bouncing end (2026-10-07). This is
+        // what switches the claw to AUTOCLAMP_INTAKE_RANGE_MM (70 mm) and to the intake clamp
+        // reaction, and the driver asked for that range "when in intake position/mode" -- so it is
+        // live from the moment R1 starts the sequence, through the descent, and all through the
+        // bounce. The approach step is included deliberately: a cup can arrive early.
+        return state_ == State::INTAKE_POS || state_ == State::INTAKE_APPROACH ||
+               state_ == State::INTAKE_DESCEND ||
                (state_ == State::MOVING && moveDest_ == State::INTAKE_POS && inHandoffZone());
+    }
+    /** True while the automatic grab that follows an intake autoclamp is running (settle, push down,
+     *  rise to level 1). Any driver input cancels it, so this is also "is the macro still driving". */
+    bool isAutoGrabbing() const {
+        return state_ == State::GRAB_SETTLE || state_ == State::GRAB_PUSH ||
+               state_ == State::GRAB_RISE;
     }
     /** True while an L2 score has been asked for but is still waiting for the lift to arrive. The
      *  score has NOT started yet -- nothing is pressing -- but it will. */
@@ -289,10 +314,15 @@ class Scoring {
                                            // scoreOrMatchload()'s INTAKE_POS destination
     bool grabRise_ = false;               // GRABBING: rise to a stack level afterwards (L1), or stay
                                            // exactly where the push ended (auton::grab())
-    bool autoStackAfterPush_ = false;     // the autoclamp pushed at the handoff and the macro owes
-                                           // itself a trip to level 1 once the push ends -- see
-                                           // config::AUTOCLAMP_INTAKE_AUTO_STACK. Cleared by every
-                                           // state change and by reset(), so any button cancels it.
+    // THE BOUNCE (INTAKE_POS, step (d)): which end of the -2.2 .. -0.5 band is currently commanded.
+    // Flipped on a timer, not on arrival -- the band is narrower than the arrival tolerance, see
+    // "THE INTAKE SEQUENCE" in config.hpp.
+    bool bounceUp_ = false;
+    std::uint32_t bounceFlipAt_ = 0;      // when the current half of the bounce started
+    // autoStackAfterPush_ IS GONE (2026-10-07). The "push, then rise to level 1 by itself" flag was
+    // replaced by the real GRAB_SETTLE -> GRAB_PUSH -> GRAB_RISE states, which the clamp event enters
+    // directly. Being a STATE rather than a flag is what makes "any driver input cancels it" free:
+    // every button already leaves the state it is in.
     State pendingAfterSettle_ = State::IDLE;  // what LIFT_SETTLE is waiting to start
     std::uint32_t stateStart_ = 0;
     std::uint32_t pivotMovedAt_ = 0;

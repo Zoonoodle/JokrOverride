@@ -23,6 +23,15 @@ std::int16_t toI16(double v) {
 }
 }  // namespace
 
+Lift::Gains& Lift::gains() {
+    // Seeded ONCE from config, then owned here. The loops read this every tick, so writing it (the
+    // LIFT_PID_TUNE route does) changes the arm's behaviour immediately and without a rebuild.
+    // Function-local static so there is no static-init-order question with config's constants.
+    static Gains g{config::LIFT_HOLD_KP, config::LIFT_HOLD_KI, config::LIFT_HOLD_KD,
+                   config::LIFT_VEL_KP, config::LIFT_VEL_KI};
+    return g;
+}
+
 Lift::Lift() : motors_(config::LIFT_PORTS, pros::v5::MotorGears::red) {  // both lift motors are red (100 RPM) cartridges
     motors_.set_encoder_units_all(pros::v5::MotorEncoderUnits::degrees);
     // HOLD is what every brake() in this file means: the firmware's own position hold. It is the HOLD
@@ -771,7 +780,7 @@ bool Lift::stalled(std::uint32_t now, double position) {
 
 double Lift::runVelocityLoop(double vRef, double dt, double upMaxMv, double downMaxMv) {
     const double err = vRef - velocity_;
-    double out = config::LIFT_VEL_KP * err + velI_;
+    double out = gains().velKp * err + velI_;
     // The limits are per-call, and ASYMMETRIC, because L2's press needs a much tighter cap on how hard
     // it may push DOWN (L2_PRESS_MAX_MV, the crush limit -- the integral winds up against whatever is
     // resisting, so without it the press would keep raising the push until something moved, i.e.
@@ -780,7 +789,7 @@ double Lift::runVelocityLoop(double vRef, double dt, double upMaxMv, double down
     // would let the arm outrun its own commanded descent and land hard.
     if (out > upMaxMv) out = upMaxMv;
     else if (out < -downMaxMv) out = -downMaxMv;
-    else velI_ = std::clamp(velI_ + config::LIFT_VEL_KI * err * dt, -downMaxMv, upMaxMv);  // unsaturated only
+    else velI_ = std::clamp(velI_ + gains().velKi * err * dt, -downMaxMv, upMaxMv);  // unsaturated only
     motors_.move_voltage(static_cast<int>(out));
     lastOutput_ = out;
     return out;
@@ -795,9 +804,9 @@ void Lift::runHold(std::uint32_t now, double dt, double position) {
     const double err = holdGoal_ - position;
     const bool inBand = std::fabs(err) <= band;
     double p = 0.0;
-    if (err > band) p = config::LIFT_HOLD_KP * (err - band);
-    else if (err < -band) p = config::LIFT_HOLD_KP * (err + band);
-    double out = p - config::LIFT_HOLD_KD * velocity_ + gravityMv_;
+    if (err > band) p = gains().holdKp * (err - band);
+    else if (err < -band) p = gains().holdKp * (err + band);
+    double out = p - gains().holdKd * velocity_ + gravityMv_;
     const double sat = config::LIFT_HOLD_MAX_MV;
     if (out > sat) out = sat;
     else if (out < -sat) out = -sat;
@@ -809,7 +818,7 @@ void Lift::runHold(std::uint32_t now, double dt, double position) {
     // is the "moving up and down randomly" the driver saw when driver control took over. The integral
     // is what makes parkMv_ right, and it cannot wind for long: PARK takes the loop away within
     // LIFT_SETTLE_TIMEOUT_MS. The P term staying silent in the band is what stops the hunting.
-    else gravityMv_ = std::clamp(gravityMv_ + config::LIFT_HOLD_KI * err * dt, -sat, sat);
+    else gravityMv_ = std::clamp(gravityMv_ + gains().holdKi * err * dt, -sat, sat);
     motors_.move_voltage(static_cast<int>(out));
     lastOutput_ = out;
     lastVRef_ = 0.0;

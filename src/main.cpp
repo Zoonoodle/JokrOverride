@@ -199,21 +199,20 @@ void autonomous() {
     //    (Driver control enables it the same way from AUTOCLAMP_ON_IN_DRIVER -- see opcontrol().)
     auton::autoclamp(config::AUTOCLAMP_ON_IN_AUTON);
 
-    // 3. NOTHING MOVES AT THE START OF AUTON. This used to call auton::homeLift(), which swung the
-    //    pivot OUT and asked the lift to home against its hard stop. Both are gone: the driver's
-    //    standing instruction, 2026-10-07, is "no longer reset position at the beginning of auton or
-    //    driver, just keep arm claw where it is".
+    // 3. HOME THE LIFT, NON-BLOCKING (the driver, 2026-10-07: "go back to how we reset our position to
+    //    0 by moving lift down at the start. have this be a non blocking thing so rest of auton can
+    //    still run while it does this"). The arm drives down onto its hard stop and the sensor is
+    //    zeroed THERE, which is what makes lift_preset::DOWN 0.0 and every other height a positive
+    //    number measured up from the stop -- the same figures on every boot, however the brain was
+    //    started. It replaces the software startup offset, which could not work (see "THE STARTUP
+    //    UNWRAP IS GONE" in config.hpp).
     //
-    //    So the arm holds whatever height it is at (the lift task has NO target active at power-on and
-    //    its idle branch brake-holds, or coasts once it is resting on the stop), the pivot keeps the
-    //    position it is physically in, and the jaws keep theirs. The POSITION READING is untouched by
-    //    this: Lift::zero() in initialize() still seeds the counter from the rotation sensor's own
-    //    calibrated absolute zero, exactly as before, so every preset still means the same height.
-    //    Only the physical reset is gone.
-    //
-    //    A ROUTE THAT WANTS THE ARM SOMEWHERE SPECIFIC SAYS SO ITSELF -- auton::liftDownAndWait(),
-    //    auton::pivotOut() and so on. That is deliberate: the route is the one place that knows where
-    //    the arm should be for the run it is about to do.
+    //    THIS RETURNS AT ONCE. Homing runs as a mode inside the lift's own task, so the route below
+    //    starts immediately and the arm finds its stop underneath it: drive moves, the claw and the
+    //    intake all carry on. A LIFT command issued while it is still homing is queued and starts the
+    //    moment homing finishes, so a route never silently loses one. Holding the D-pad cancels it.
+    //    Only the LIFT moves -- homeLift() does not touch the claw or the pivot.
+    auton::homeLift();
 
     // 4. Odometry/IMU calibration, BOUNDED. A drive move needs a heading, so wait for it -- but never
     //    longer than AUTON_CALIBRATE_TIMEOUT_MS, so an unplugged IMU costs a few seconds instead of

@@ -62,36 +62,23 @@ void Lift::initState() {
     //
     // set_reversed() is still applied once in the constructor, so every read is consistently signed.
     //
-    // THE ONE-OFF STARTUP UNWRAP, re-centred for the 2026-10-07 frame. The sensor's counter comes up
-    // holding its SINGLE-TURN angle, [0, 90) arm degrees at the 4:1 ratio, so some start positions come
-    // back a whole turn out. Every height was measured with the arm resting where it powers on, which
-    // READS 79, so the window must leave 79 alone: read the sensor ONCE here and, if it comes back
-    // BELOW LIFT_STARTUP_WINDOW_BOTTOM_DEG (35), carry a fixed +90 arm (one whole sensor turn) offset
-    // on every later read. Window [35, 125). THE SENSOR IS NEVER WRITTEN. Full reasoning, and what
-    // still reads wrong, under "STARTUP UNWRAP" in config.hpp.
-    startupOffsetDeg_ = 0.0;
+    // NO SOFTWARE OFFSET ANY MORE. The old startup unwrap guessed which 90-degree window of the
+    // sensor's single turn the arm booted in; it could not work, because get_position() is a RETAINED
+    // multi-turn counter that only re-folds on a real sensor power cycle, so cold and warm starts
+    // disagreed. HOMING defines zero now (see updateHoming()), and lift_preset::DOWN is 0.0.
+    // The sensor read is still CHECKED here, purely so a dead sensor is caught before the task starts.
     sensorBad_ = false;
     lastGoodPosition_ = 0.0;
     if (rotation_) {
-        // Bounded retry: a sensor still waking up at program start answers PROS_ERR for a few ms, and
-        // giving up instantly would leave the offset unresolved for the whole run.
+        // Bounded retry: a sensor still waking up answers PROS_ERR for a few ms.
         const std::uint32_t deadline = pros::millis() + config::LIFT_SENSOR_START_RETRY_MS;
         std::int32_t raw = rotation_->get_position();
         while (raw == PROS_ERR && pros::millis() < deadline) {
             pros::delay(5);
             raw = rotation_->get_position();
         }
-        if (raw == PROS_ERR) {
-            // Never answered. Leave the offset at 0 and latch the fault: update() will brake and the
-            // brain shows SENSOR BAD, which is far better than silently trusting a bad frame.
-            sensorBad_ = true;
-        } else {
-            const double armDeg = raw / 100.0 / config::LIFT_ROTATION_RATIO;
-            if (armDeg < config::LIFT_STARTUP_WINDOW_BOTTOM_DEG) {
-                startupOffsetDeg_ = 360.0 / config::LIFT_ROTATION_RATIO;  // +90 arm deg
-            }
-            lastGoodPosition_ = armDeg + startupOffsetDeg_;
-        }
+        if (raw == PROS_ERR) sensorBad_ = true;  // update() brakes and the brain shows SENSOR BAD
+        else lastGoodPosition_ = raw / 100.0 / config::LIFT_ROTATION_RATIO;
     }
     active_ = false;
     goal_ = 0.0;
@@ -154,9 +141,9 @@ double Lift::getSensorPosition() const {
         sensorBad_ = true;
         return lastGoodPosition_;
     }
-    // THE ALL-TIME POSITION plus the one-off startup unwrap (0 or -90 arm). Nothing is ever written
-    // back to the sensor -- see "STARTUP UNWRAP" in config.hpp.
-    lastGoodPosition_ = raw / 100.0 / config::LIFT_ROTATION_RATIO + startupOffsetDeg_;
+    // Arm degrees, straight from the counter. The frame comes from HOMING's zero at the hard stop,
+    // not from any software offset here.
+    lastGoodPosition_ = raw / 100.0 / config::LIFT_ROTATION_RATIO;
     return lastGoodPosition_;
 }
 
@@ -257,20 +244,20 @@ void Lift::updateHoming(const std::uint32_t now) {
     const std::int32_t angleCentideg = foldCentideg(rotation_->get_angle());
     homeStopAngleDeg_ = angleCentideg / 100.0;
 
-    // HOMING NO LONGER RE-ZEROES THE SENSOR (2026-10-07). It used to set_position() here once it had
-    // driven the arm onto the hard stop, which was the last remaining write to the sensor's position
-    // in the whole program. The driver's instruction is that NOTHING resets the lift's position
-    // anywhere, because the sensor is absolute, so that write is gone: this path can now only CHECK
-    // whether the arm looks like it is at the bottom and report DONE or FAILED. It changes no reading.
+    // HOMING ZEROES THE SENSOR HERE, and this is the ONLY place in the program that writes it (the
+    // driver, 2026-10-07: "go back to how we reset our position to 0 by moving lift down at the
+    // start"). The arm has just stopped moving while being driven down, so it is on its hard stop:
+    // that IS zero, and every lift_preset height is measured up from it.
     //
-    // WHICH MEANS HOMING HAS NOTHING LEFT TO ACCOMPLISH, and config::LIFT_HOME_ON_ENABLE must stay
-    // false. requestHome() returns Home::SKIPPED while it is, so none of this runs; it is kept rather
-    // than deleted only because the Home state, waitHome()/liftHomed() and the brain's LIFT line are
-    // threaded through it. Turning that flag on would drive the arm into its stop for no benefit.
-    const double bottomSensorDeg = config::lift_preset::DOWN * config::LIFT_ROTATION_RATIO;
-    home_ = std::fabs(homeStopAngleDeg_ - bottomSensorDeg) <= config::LIFT_HOME_ZERO_WINDOW_DEG
-                ? Home::DONE
-                : Home::FAILED;
+    // There is no absolute-angle plausibility gate any more. It used to refuse to zero unless the
+    // sensor's own calibrated zero was nearby, but the sensor's zero no longer has any fixed
+    // relationship to the stop -- that is exactly why the software-offset approach was abandoned -- so
+    // the gate could only ever reject good homes. The mechanical stop is the ground truth now. The
+    // stall detector above is what distinguishes "reached the stop" (DONE) from "never stopped"
+    // (FAILED, on the timeout), and only DONE zeroes.
+    rotation_->set_position(0);
+    home_ = Home::DONE;
+    havePrevPosition_ = false;  // the position just jumped to 0 by decree; not a velocity
     if (home_ == Home::DONE) {
         // Homing just proved the arm is physically on its hard stop, which is exactly what SEAT means,
         // so adopt a DOWN target already in SEAT: the loop has an owner, the arm stays pressed down

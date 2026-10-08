@@ -149,6 +149,12 @@ double heightOf(Level level) {
     return preset::STACK_LEVELS[i];
 }
 
+void homeLift() {
+    AUTON_LOCK;
+    // Only the lift moves: no pivot swing, no claw. Returns at once; the lift task does the work.
+    robot::lift.requestHome();
+}
+
 bool waitHome(int timeoutMs) {
     const std::uint32_t start = pros::millis();
     while (robot::lift.isHoming()) {

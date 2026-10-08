@@ -93,12 +93,21 @@ enum class Level { ONE = 1, TWO = 2, THREE = 3, FOUR = 4, FIVE = 5 };
 /** The arm degrees a Level means. */
 double heightOf(Level level);
 
-// homeLift() WAS HERE AND IS GONE (2026-10-07). It swung the pivot OUT and asked the lift to home
-// against its hard stop -- two physical resets -- and the driver's standing instruction is that no
-// mode start moves the arm, claw or pivot. Nothing called it once main.cpp stopped, and leaving a
-// one-line call that fires a cylinder would have been a trap. Homing itself still exists in Lift and
-// is still gated by config::LIFT_HOME_ON_ENABLE (false); call robot::lift.requestHome() directly if
-// you ever genuinely want it. waitHome()/liftHomed() below stay -- they only ASK, they never move.
+/**
+ * HOME THE LIFT: drive it down onto its hard stop and zero the sensor there, which is what defines
+ * the whole frame (lift_preset::DOWN is 0.0 and every height is positive, measured up from the stop).
+ * Back as of 2026-10-07 at the driver's request.
+ *
+ * NON-BLOCKING, and that is the point: it returns the instant the request is in, and the homing
+ * itself runs as a mode inside the lift's own task. So a route can call this first and carry straight
+ * on -- chassis moves, the claw, the intake all run while the arm is still finding its stop. A LIFT
+ * command issued during homing is not lost either: it is QUEUED and starts the moment homing ends.
+ *
+ * Use auton::waitHome() only if a route genuinely must not move until the frame is known.
+ * A no-op once a run has homed, failed or been cancelled, so a program homes exactly once.
+ * It does NOT touch the claw or the pivot -- only the lift moves.
+ */
+void homeLift();
 /** Block until homing finishes. True only if it really HOMED (so the arm is seated on a trustworthy
  *  zero); false on HOME FAIL / CANCELLED / SKIPPED or the timeout. */
 bool waitHome(int timeoutMs = config::AUTON_HOME_TIMEOUT_MS);

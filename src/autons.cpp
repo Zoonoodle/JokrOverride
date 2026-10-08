@@ -440,14 +440,14 @@ auton::clawGrip();
 
     chassis.moveToPoint(3.8, 3.6, 500);
     chassis.turnToHeading(-55.8, 500);
-    chassis.moveToPoint(34.3, -15.8, 2000, {.forwards = false, .maxSpeed = 60});
+    chassis.moveToPoint(38.5, -19, 2000, {.forwards = false, .maxSpeed = 60});
       auton::autoclamp(true);
     //move to first cup
     chassis.waitUntilDone();
-    chassis.swingToHeading(-63, lemlib::DriveSide::LEFT, 700);
+    chassis.swingToHeading(82, lemlib::DriveSide::LEFT, 700);
     pros::delay(400);
       auton::liftTo(auton::Level::ONE);
-    chassis.moveToPoint(37, -19.4, 1000, {.forwards = false, .maxSpeed = 80});
+    chassis.moveToPoint(24, -21, 1000, {.forwards = false, .maxSpeed = 80});
   chassis.waitUntilDone();
 auton::scoreAndWait();  
 chassis.moveToPoint(36, -21, 1000);

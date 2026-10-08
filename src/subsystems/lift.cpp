@@ -34,37 +34,24 @@ Lift::Lift() : motors_(config::LIFT_PORTS, pros::v5::MotorGears::red) {  // both
     }
 }
 
-void Lift::zero() {
-    // Motor encoders are only ever a fallback position source (getPosition() prefers the rotation
-    // sensor whenever one is fitted, which it is -- see getPosition() below) and are only read for
-    // the brain's diagnostic ROT/MOT cross-check, so taring them here is harmless.
-    motors_.tare_position_all();
-
-    // Absolute-angle SEED, not a startup reset: the rotation sensor's own persistent zero point has
-    // been calibrated (on the brain's device screen, outside this code) to the physical bottom of the
-    // lift, so get_angle() is already a true absolute 0..360 sensor-degree reading from that zero and
-    // survives power cycles on its own -- it does NOT need, and must NOT get, a software reset HERE.
-    // Resetting it here would throw that calibration away and make every height relative to wherever
-    // the arm happened to be sitting at THIS particular boot instead (e.g. a little high from band
-    // tension with the motors unpowered) -- exactly the bug this avoids. zero() also commands no
-    // motion of any kind, which is what keeps "nothing moves at startup" true of initialize().
+void Lift::initState() {
+    // THIS FUNCTION TOUCHES NO SENSOR AND COMMANDS NO MOTION. It only puts this class's own control
+    // state in a known place before startTask() begins ticking. It used to be called zero(), and it
+    // used to do two things that are now gone (the driver, 2026-10-07: "the rotation sensor on the
+    // lift is an absolute positioning sensor, so don't reset the position ANYWHERE in the code ... We
+    // need to be reading the all-time position with no code resetting the sensor's position"):
     //
-    // What we do instead: seed the multi-turn position counter (what get_position() tracks) from the
-    // current absolute angle, folded to the signed sensor-degree range closest to 0, (-180, 180].
+    //  1. motors_.tare_position_all() -- the motor encoders are now left alone. They are only a
+    //     fallback position source and a brain diagnostic (see getMotorPosition()).
+    //  2. rotation_->set_position(foldCentideg(get_angle())) -- the ±180-sensor-degree "seed". THIS
+    //     WAS THE BUG THE DRIVER IS DESCRIBING. It overwrote the sensor's accumulated multi-turn
+    //     count at every program start with the single-turn angle folded into (-180, 180] sensor
+    //     degrees, i.e. (-45, 45] ARM degrees -- so an arm sitting anywhere outside that window read
+    //     a whole sensor revolution (90 arm degrees) out, and a lift left up could never report its
+    //     real height. Nothing seeds, folds or offsets the reading now: getPosition() is the sensor's
+    //     own all-time count, straight through.
     //
-    // LIMIT, and why homing exists: this is only unambiguous if the lift powers on within +-45 ARM
-    // degrees (+-180 sensor degrees -- one quarter of the 4:1-geared sensor's single revolution) of
-    // the true bottom. An arm that powered on further up than that seeds to the wrong turn count and
-    // every preset is then off by a whole sensor revolution. That is the real failure the user sees as
-    // "our arm always starts up too much". requestHome() fixes it properly by driving the arm down to
-    // its hard stop at the start of the first ENABLED mode and set_position(0)-ing THERE -- which is a
-    // different thing from resetting the sensor here, and is the only place in this class allowed to
-    // do it (see updateHoming()). set_reversed() was already applied in the constructor, so it affects
-    // get_angle() here and every later get_position() read the same consistent way.
-    if (rotation_) {
-        const std::int32_t angleCentideg = foldCentideg(rotation_->get_angle());
-        rotation_->set_position(angleCentideg);  // seed the counter -- NOT reset_position()
-    }
+    // set_reversed() is still applied once in the constructor, so every read is consistently signed.
     active_ = false;
     goal_ = 0.0;
     precise_ = descent_ = false;
@@ -102,13 +89,32 @@ void Lift::zero() {
 }
 
 double Lift::getMotorPosition() const {
-    // Motor encoders read motor degrees; divide by the gear ratio to get lift degrees.
+    // Motor encoders read motor degrees; divide by the gear ratio to get arm degrees.
+    //
+    // NOT ABSOLUTE, AND NO LONGER TARED. initState() used to tare these at program start, which at
+    // least made them read 0 at boot; that tare is gone with every other position reset, so this is
+    // now a bare accumulated count whose datum is wherever the encoders happened to be. It has NO
+    // defined relationship to the arm's real height, so the presets are meaningless against it.
+    //
+    // It is only reached when NO rotation sensor is configured (config::LIFT_ROTATION_PORT == 0, a
+    // build-time choice -- the robot has one on port 16), and it is otherwise read purely for the
+    // brain's ROT/MOT cross-check. Kept as a last resort so a sensorless build still compiles and the
+    // D-pad still works, but a sensorless build CANNOT run presets correctly and never could.
     return motors_.get_position() / config::LIFT_GEAR_RATIO;
 }
 
 double Lift::getSensorPosition() const {
     if (!rotation_) return 0.0;
-    // centidegrees -> sensor degrees -> lift degrees
+    // THE ALL-TIME POSITION, STRAIGHT THROUGH. centidegrees -> sensor degrees -> arm degrees, with
+    // nothing subtracted, folded, offset or reset anywhere in this program (driver, 2026-10-07).
+    //
+    // get_position(), NOT get_angle(), and that is the whole point. get_angle() is the sensor's
+    // single-turn absolute angle, 0..360 sensor degrees = only 90 ARM degrees at LIFT_ROTATION_RATIO
+    // 4, while the arm travels lift_preset::DOWN..MAX = -31.9..111.9 = 143.8 arm = 575.2 SENSOR
+    // degrees, i.e. about 1.6 sensor turns. An angle therefore cannot tell some arm heights apart at
+    // all (the hard stop, -31.9 arm = -127.6 sensor, is the same angle as about +58 arm). Only
+    // get_position() counts turns, so only get_position() can describe the whole range -- which is
+    // what makes "start auton with the lift up and have it read its real height" possible.
     return rotation_->get_position() / 100.0 / config::LIFT_ROTATION_RATIO;
 }
 
@@ -207,25 +213,20 @@ void Lift::updateHoming(const std::uint32_t now) {
     const std::int32_t angleCentideg = foldCentideg(rotation_->get_angle());
     homeStopAngleDeg_ = angleCentideg / 100.0;
 
-    // Plausibility: if we really are at the hard stop, the folded absolute angle must be near the
-    // bottom. If it isn't, the arm is jammed on something partway down -- do NOT zero there, that
-    // would bake the jam into every preset. Keep zero()'s seed and report it instead.
+    // HOMING NO LONGER RE-ZEROES THE SENSOR (2026-10-07). It used to set_position() here once it had
+    // driven the arm onto the hard stop, which was the last remaining write to the sensor's position
+    // in the whole program. The driver's instruction is that NOTHING resets the lift's position
+    // anywhere, because the sensor is absolute, so that write is gone: this path can now only CHECK
+    // whether the arm looks like it is at the bottom and report DONE or FAILED. It changes no reading.
     //
-    // THE BOTTOM IS NOT 0 ANY MORE (2026-10-07). It is lift_preset::DOWN (-31.9) in ARM degrees, and
-    // homeStopAngleDeg_ / LIFT_HOME_ZERO_WINDOW_DEG are both SENSOR degrees, so the arm-side constant
-    // is converted with LIFT_ROTATION_RATIO (4:1): -31.9 arm deg = -127.6 sensor deg.
-    // UNTESTED ON THE ROBOT -- homing is switched off (config::LIFT_HOME_ON_ENABLE is false), so this
-    // path does not run today. VERIFY BOTH LINES BEFORE TURNING HOMING BACK ON: if the window or the
-    // seed is wrong, homing will zero the sensor in the wrong place and every preset moves with it.
+    // WHICH MEANS HOMING HAS NOTHING LEFT TO ACCOMPLISH, and config::LIFT_HOME_ON_ENABLE must stay
+    // false. requestHome() returns Home::SKIPPED while it is, so none of this runs; it is kept rather
+    // than deleted only because the Home state, waitHome()/liftHomed() and the brain's LIFT line are
+    // threaded through it. Turning that flag on would drive the arm into its stop for no benefit.
     const double bottomSensorDeg = config::lift_preset::DOWN * config::LIFT_ROTATION_RATIO;
-    if (std::fabs(homeStopAngleDeg_ - bottomSensorDeg) <= config::LIFT_HOME_ZERO_WINDOW_DEG) {
-        // the ONE place in this class that may re-seed the sensor -- see zero()
-        rotation_->set_position(static_cast<std::int32_t>(std::lround(bottomSensorDeg * 100.0)));
-        home_ = Home::DONE;
-        havePrevPosition_ = false;  // the position just jumped to the bottom by decree; not a velocity
-    } else {
-        home_ = Home::FAILED;
-    }
+    home_ = std::fabs(homeStopAngleDeg_ - bottomSensorDeg) <= config::LIFT_HOME_ZERO_WINDOW_DEG
+                ? Home::DONE
+                : Home::FAILED;
     if (home_ == Home::DONE) {
         // Homing just proved the arm is physically on its hard stop, which is exactly what SEAT means,
         // so adopt a DOWN target already in SEAT: the loop has an owner, the arm stays pressed down

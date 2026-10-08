@@ -277,11 +277,15 @@ class Lift {
 
     Lift();
 
-    /** Seed the position counter from the rotation sensor's own calibrated absolute zero (does NOT
-     *  reset/re-zero the sensor itself -- see the long comment in lift.cpp). Call once, at power-on,
-     *  from initialize(). It commands no motion. It is only correct within +-45 arm degrees of the
-     *  true bottom, which is why requestHome() exists. */
-    void zero();
+    /** Put this class's own control state in a known place before startTask(). Call once, at
+     *  power-on, from initialize(). It TOUCHES NO SENSOR and commands no motion.
+     *
+     *  Was zero() until 2026-10-07, when it stopped seeding the rotation sensor's position counter
+     *  and stopped taring the motor encoders. NOTHING in this program resets the lift's position any
+     *  more: the rotation sensor is absolute and getPosition() reports its all-time count straight
+     *  through, so a lift left part-way up reads its real height instead of calling wherever it
+     *  booted "zero". See getSensorPosition() in lift.cpp for the one wrap caveat. */
+    void initState();
 
     /** Start the background task that calls update() every 10 ms (and, if config::LIFT_TRACE, the
      *  trace task that prints the ring buffer). Call once from initialize(). */

@@ -927,11 +927,20 @@ inline constexpr int LIFT_TRACE_TAIL_MS = 500;
 // says HOME SKIPPED), so NEITHER autonomous() NOR opcontrol() moves the arm on enable -- important,
 // because turning it off only in auton would have made opcontrol's own call live, and the arm would
 // have driven itself down at the start of driver control, possibly holding a pin.
-// TURN IT BACK ON (true) IF: the arm is ever powered on more than ~45 ARM degrees above the bottom.
-// That is the one case the seed cannot resolve -- past +-45 arm deg (+-180 sensor deg) it lands on the
-// wrong turn of the 4:1-geared sensor and every preset is off by a whole sensor revolution, which is
-// the "our arm always starts up too much" problem homing was written for. Everything below still
-// works and is still tuned; only this switch gates it.
+// IT MUST NOW STAY FALSE (2026-10-07). Homing's entire purpose was to drive the arm onto its hard
+// stop and set_position() the sensor THERE, and that write is gone: the driver's instruction is that
+// nothing in this program resets the lift's position, because the sensor is absolute. updateHoming()
+// can now only CHECK whether the arm looks like it is at the bottom and report HOME DONE / HOME FAIL;
+// it changes no reading. Setting this true would therefore drive the arm into its stop at the start of
+// the first enabled mode for no benefit at all. The machinery is kept, not deleted, only because the
+// Home state, auton::waitHome()/liftHomed() and the brain's LIFT line are threaded through it.
+// THE PROBLEM HOMING EXISTED FOR IS NOW SOLVED DIFFERENTLY, and only partly -- see
+// Lift::getSensorPosition() in lift.cpp. The old ±45-arm-degree seed window is gone with the seed, so
+// a lift left up now reads its true height across a program restart. A BRAIN POWER CYCLE still
+// re-seeds the sensor's counter from its single-turn angle, which covers only 90 arm degrees at
+// LIFT_ROTATION_RATIO 4, so readings outside one turn come back a whole revolution out. The real fix
+// for that is mechanical: move the sensor onto the 48T output axle (LIFT_ROTATION_RATIO 1.0), where
+// the arm's whole 143.8-degree travel fits inside a single sensor turn.
 inline constexpr bool LIFT_HOME_ON_ENABLE = false;           // the driver's call, 2026-10-03
 inline constexpr float LIFT_HOME_MV = -2000.0f;              // TUNE: steady downward drive while homing, red retune 2026-10-07 (was -4000)
 // Don't start looking for "stopped" until the arm has been driving this long, so a sticky start isn't

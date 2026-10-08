@@ -129,12 +129,14 @@ void initialize() {
     master.rumble(".");
     master.print(0, 0, "PROGRAM ON      ");
 
-    // The lift must start at (or within 45 arm degrees of) DOWN. zero() does NOT re-zero the rotation
-    // sensor -- its absolute zero is calibrated on the brain's device screen and survives power
-    // cycles on its own; zero() just seeds the position counter from it (see the comment in
-    // lift.cpp). It doesn't move anything either way. The PID task starts idle: no target is active
-    // until a preset button, the intake macro, or autonomous explicitly commands a height (see lift.hpp).
-    lift.zero();
+    // THE LIFT MAY START ANYWHERE. Nothing here resets, seeds, folds or tares the lift's position --
+    // initState() only puts the control state in a known place, and it reads no sensor at all (the
+    // driver, 2026-10-07: "don't reset the position ANYWHERE in the code ... we can have the lift up
+    // and it DOESN'T count that starting position as 0"). getPosition() is the rotation sensor's own
+    // all-time count, so an arm left part-way up reports its real height.
+    // Neither call moves anything. The PID task starts idle: no target is active until a preset
+    // button, the intake macro, or an auton route explicitly commands a height (see lift.hpp).
+    lift.initState();
     lift.startTask();
 
     // Calibrate in the background so nothing here can delay driver control.

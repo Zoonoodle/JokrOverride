@@ -112,9 +112,32 @@ void homeLift();
  *  zero); false on HOME FAIL / CANCELLED / SKIPPED or the timeout. */
 bool waitHome(int timeoutMs = config::AUTON_HOME_TIMEOUT_MS);
 
-/** Command an arbitrary height in arm degrees (clamped to 0..config::lift_preset::MAX). Non-blocking.
- *  precise = true asks for the tight LIFT_PRECISE_TOLERANCE_DEG band; INTAKE is promoted to precise
- *  automatically whoever asks for it. */
+/**
+ * MOVE THE ARM TO A HEIGHT, in arm degrees, zero at the hard stop. This is the clean "put the arm at
+ * X" call -- the same move a preset uses: the ordinary fast profile, braking, and settling into a
+ * hold. Prefer it over the timed liftPush*For() helpers, which are raw voltage for a duration and
+ * have no idea where the arm ends up.
+ *
+ *     auton::liftTo(40);            // up to 40 deg, returns at once
+ *     auton::liftToAndWait(40);     // ...or block until it is there
+ *     auton::liftTo(0);             // all the way down (see below)
+ *
+ * ASKING FOR 0 (or anything at or below config::LIFT_BOTTOM_GOAL_DEG, 5) IS NOT A POSITION HOLD AT 0:
+ * it is the real trip to the bottom -- the banded descent, then FINAL forcing onto the hard stop, then
+ * SEAT, where the arm keeps driving down at config::LIFT_DOWN_PUSH_MV for as long as the target stays
+ * there. That is the "always trying to go below 0" behaviour, and it is what you want for matchload and
+ * cup pickup. Same path as auton::liftDown() and the driver's trip home.
+ *
+ * The target is CLAMPED to [config::lift_preset::DOWN, config::lift_preset::MAX], currently [0, 179.5],
+ * so an out-of-range number is pinned rather than refused.
+ *
+ * Non-blocking: it returns the moment the request is in. It also drops the scoring macro
+ * (Scoring::reset(), which moves nothing) so a direct height command is never fought by a macro
+ * mid-sequence.
+ *
+ * precise = true asks for the tight LIFT_PRECISE_TOLERANCE_DEG band instead of LIFT_TOLERANCE_DEG;
+ * lift_preset::INTAKE is promoted to precise automatically whoever asks for it.
+ */
 void liftTo(double degrees, bool precise = false);
 /** Command a stack level. Non-blocking. */
 void liftTo(Level level);
@@ -216,7 +239,11 @@ bool waitLift(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 /** Block until the arm is pressed onto its hard stop (phase SEAT, including SEAT(short)). */
 bool waitLiftSeated(int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 
-/** liftTo() + waitLift(), the one-liner form. True = arrived. */
+/** liftTo() + waitLift(), the one-liner form. BLOCKS until the arm is settled on the height it
+ *  actually took (the clamped one), or the timeout. True = arrived; false = BLOCKED, FAULT or timeout.
+ *  liftToAndWait(0) returns once the arm is SEATED on the hard stop, not merely near 0.
+ *      auton::liftToAndWait(40);   // up to 40 and wait
+ *      auton::liftToAndWait(0);    // down to the stop and wait for the seat */
 bool liftToAndWait(double degrees, int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS, bool precise = false);
 bool liftToAndWait(Level level, int timeoutMs = config::AUTON_LIFT_TIMEOUT_MS);
 /** liftToIntake() + waitLift(). The precise band is tight, so give it room. */

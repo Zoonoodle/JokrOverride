@@ -1633,6 +1633,27 @@ inline constexpr double L2_SCORE_SPEED_PCT = 100.0;          // TUNE: 150 deg/s,
 // THE TRADE: this is also the crush cap -- how hard the arm may press a pin into a stack while the
 // contact detector decides. 1.5x the authority is 1.5x the press force. Watch the first few scores.
 inline constexpr float L2_PRESS_MAX_MV = 5250.0f;            // TUNE: magnitude, downward (was 3500)
+// ...AND THE WAY ROUND THE TRADE (2026-10-09, the driver: "it needs to go down fast"). The cap above
+// has to do two different jobs with one number: it limits how fast the arm can be DRIVEN DOWN through
+// free air (where a bigger number is simply better) and how hard it may CRUSH once something is
+// resisting (where it is the only thing protecting the stack). Those two never happen at the same
+// time, so they no longer share a number: while the arm is measurably MOVING DOWN it gets
+// L2_PRESS_FREE_MAX_MV, and the instant it slows -- which is exactly what a landing looks like -- the
+// cap drops back to L2_PRESS_MAX_MV, within one 10 ms tick, before the loop can lean on anything.
+// Hysteretic, on the MEASURED arm speed, so it cannot flicker:
+//   below ON  -> the crush cap (this is also the state a press starts in, and the state a press that
+//               begins with the pin already resting on the stack never leaves)
+//   above ON  -> the free cap, until the speed falls back under OFF.
+// 9000 mV balances back-EMF at 9000/12000 * 150 = ~112 deg/s, so the press runs at about 1.7x the
+// 5250 cap's ~66 deg/s. It is NOT 12000: the detector still needs ~30-40 ms to confirm a landing, and
+// the arm travels that window at whatever speed it is doing, so this is deliberately short of
+// free-fall into a stack of cups.
+//   The stack gets knocked over by the press itself: LOWER this (7000), not L2_PRESS_MAX_MV.
+//   Still too slow in free air: raise it toward LIFT_VEL_MAX_MV (12000), a step at a time.
+//   The press feels like it stalls and then surges: the ON/OFF pair are too close -- widen them.
+inline constexpr float L2_PRESS_FREE_MAX_MV = 9000.0f;       // TUNE: magnitude, downward, free travel only
+inline constexpr double L2_PRESS_FAST_ON_DEG_PER_S = 40.0;   // TUNE: measured descent speed that earns the free cap
+inline constexpr double L2_PRESS_FAST_OFF_DEG_PER_S = 25.0;  // TUNE: ...and the speed that takes it away again
 // CONTACT DETECTION. Implemented by subsystems::ContactDetector (include/subsystems/contact_detector.hpp),
 // which is a PURE class with host-side tests in test/ -- run test/run.sh on the Mac after changing any
 // of these, it proves the thresholds against synthetic landings before anything is uploaded.

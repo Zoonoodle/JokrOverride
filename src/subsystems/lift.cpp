@@ -101,6 +101,8 @@ void Lift::initState() {
     idleStillSince_ = 0;
     score_ = returnFast_ = scoreStuck_ = releasedByTravel_ = releasedByFloor_ = false;
     scoredAbove_ = scoreCycle_ = false;
+    scoreReturn_ = pressFast_ = false;
+    scoreNote_[0] = '\0';
     grab_ = gripWanted_ = gripAcked_ = false;
     clawReleaseWanted_ = clawReleased_ = false;
     contact_.reset();
@@ -330,6 +332,23 @@ void Lift::setTarget(double degrees, bool precise) {
     // config.hpp). Everything else trades a few degrees of accuracy for a stop that doesn't hunt.
     const bool wantPrecise = precise || std::fabs(clamped - config::lift_preset::INTAKE) < 0.5;
 
+    // THE POST-SCORE RUN HOME IS UNCANCELLABLE BY ANYTHING AUTOMATIC (see isScoreReturn()). The one
+    // automatic caller that can get this far is the autoclamp's CLAMP_GRAB_HEIGHT hop via
+    // startClampRise(): the jaws are OPEN and travelling down past the pin that was just placed, and
+    // a grab there would send the arm to an ABSOLUTE 37.5 and hold it. Scoring::handleClampEvent()
+    // already refuses while isScoreCycle(), which endScoreClear() holds for exactly this reason, so
+    // this is the second lock on the same door -- and the one that says so on the brain.
+    // EVERYTHING ELSE gets through and ends the run home, because everything else is a person or a
+    // route deliberately asking for a height: a preset, L1's ladder, a liftTo(), B, R2, the D-pad.
+    if (scoreReturn_) {
+        if (fromClampRise) {
+            noteScore("REFUSE clamp", getPosition());
+            return;
+        }
+        scoreReturn_ = false;
+        noteScore("RETARGET", getPosition());
+    }
+
     // Homing owns the motors until it finishes. Queue the target rather than dropping it (so a button
     // pressed during homing still does what the driver asked) and rather than letting it abort homing
     // (so the arm still gets a trustworthy zero).
@@ -480,6 +499,15 @@ void Lift::cancel() {
     grab_ = gripWanted_ = gripAcked_ = false;
     scoredAbove_ = false;
     scoreCycle_ = false;
+    pressFast_ = false;
+    // A cancel() is always EXPLICIT -- the D-pad / manual override, R2 let go part-way, auton::
+    // liftStop(), or the sensor failing -- so it is allowed to end the post-score run home. It is the
+    // one thing that is, besides a new height. Say so on the brain: the arm stopping above 0 after a
+    // score is exactly what this diagnostic exists for.
+    if (scoreReturn_) {
+        scoreReturn_ = false;
+        noteScore("CANCEL", getPosition());
+    }
 }
 
 const char* Lift::activePresetName() const {
@@ -746,6 +774,11 @@ void Lift::enterSeat(std::uint32_t now, bool shortSeat) {
     // Whatever brought the arm here, it is now on its hard stop with nothing in the jaws that a score
     // could re-grab: the two-press score cycle (and its autoclamp inhibit) is over.
     scoreCycle_ = false;
+    // ...and so is the uncancellable post-score run home: the arm is where it was promised to end up.
+    if (scoreReturn_) {
+        scoreReturn_ = false;
+        noteScore(shortSeat ? "SEAT(short)" : "SEAT", getPosition());
+    }
     phase_ = Phase::SEAT;
     phaseStart_ = now;
     stallStart_ = 0;
@@ -903,6 +936,8 @@ void Lift::startScore() {
     scoreStuck_ = false;
     scoredAbove_ = false;
     scoreCycle_ = true;  // ...until press 2 seats the arm: the autoclamp is inhibited throughout
+    scoreReturn_ = false;  // not yet: the run home is latched by endScoreClear(), after the release
+    pressFast_ = false;    // the press always STARTS on the crush cap and earns the free cap by moving
     grab_ = gripWanted_ = gripAcked_ = false;
     releasedByTravel_ = false;
     releasedByFloor_ = false;
@@ -921,6 +956,21 @@ void Lift::startScore() {
     descentStart_ = getPosition();  // the runaway guard's reference for the whole sequence
     scoreStartPos_ = descentStart_;  // FIXED for the whole score -- the origin for L2_AUTO_RELEASE_DEG's
                                      // relative travel rule. Unlike descentStart_, UNSTICK never moves it.
+    noteScore("PRESS", descentStart_);
+}
+
+// ---------------------------------------------------------------------------
+// THE SCORE DIAGNOSTIC (see scoreNote() in lift.hpp)
+// ---------------------------------------------------------------------------
+// One line per event, to the terminal AND to the brain, so "it stopped above 0 again" is never a
+// mystery twice: every phase transition of a score, and every retarget, cancel or refusal that
+// touches the lift while one is running, says WHAT happened and WHERE the arm was. Short on purpose --
+// this is called from the 10 ms control task, only on transitions, never every tick.
+void Lift::noteScore(const char* what, double position) {
+    std::snprintf(scoreNote_, sizeof(scoreNote_), "%s @%.1f", what, position);
+    std::printf("SCORE %u %s pos %.1f goal %.1f vel %.0f\n", static_cast<unsigned>(pros::millis()), what,
+                position, active_ ? goal_ : 0.0, velocity_);
+    std::fflush(stdout);
 }
 
 void Lift::clawReleaseDone() {
@@ -1021,23 +1071,60 @@ void Lift::endScoreClear(std::uint32_t now, double position) {
     // SCORED to wait for a second L2, the arm simply KEEPS GOING DOWN -- at the same
     // L2_SCORE_SPEED_PCT the press was using -- all the way to DOWN, where FINAL and SEAT end it
     // exactly as any other trip to the bottom does. There is no clear rise and no post-release push.
+    // THIS NO LONGER GOES THROUGH setTarget(), AND THAT IS THE BUG dc1e37b LEFT BEHIND. It used to
+    // call setTarget(DOWN) and then test `if (descent_)`. But startScore() has ALREADY set
+    // active_ = true, goal_ = DOWN and precise_ = false, so setTarget(DOWN) landed on its own
+    // "same move, already running" early return (`active_ && clamped == goal_ && wantPrecise ==
+    // precise_ && !faulted_ && !blocked_`) and did NOTHING: descent_ stayed false, phase_ stayed
+    // RELEASE, and nothing ever entered DESCEND. update() then fell through to the POSITION-MOVE
+    // branch with phase_ == RELEASE and a minDist_ left over from the move that brought the arm up to
+    // the stack level (~0 at arrival) -- so `dist - minDist_ > LIFT_FAULT_DEG` was true on the very
+    // next tick, the runaway guard tripped, and the arm braked dead at the release height with FAULT
+    // on the brain. dc1e37b fixed the FREED-vs-STUCK arbitration that used to hold the arm there, and
+    // then handed over to a call that could not take effect. Same symptom, different cause.
+    //
+    // So the descent is set up EXPLICITLY here. Nothing about this depends on what setTarget() would
+    // have decided, nothing can be deduplicated away, and the phase is entered on this tick.
     score_ = false;
     clawReleaseWanted_ = false;
-    returnFast_ = false;
     scoredAbove_ = false;  // nothing is held above a stack any more
     descendRequest_ = false;
+    descendOwned_ = false;
+    clampRise_ = clampRiseRequest_ = false;
+    coarse_ = coarseRequest_ = false;
+    fastRequest_ = false;
+    toggleWait_ = false;
+    speedCapPct_ = 0.0;
     blocked_ = false;
-    setTarget(config::lift_preset::DOWN);
-    // KEEP THE AUTOCLAMP INHIBITED ALL THE WAY DOWN. setTarget() clears scoreCycle_, which would hand
-    // the autoclamp back the instant the descent starts -- with the jaws open, travelling down right
-    // past the pin that was just placed, which it would then re-grab. Press 2 used to be the thing
-    // that gave it back, and there is no press 2 any more, so the inhibit is re-asserted here and
-    // enterSeat() ends it at the bottom.
+    faulted_ = false;
+    grab_ = gripWanted_ = gripAcked_ = false;
+    wakeMotors();
+    active_ = true;
+    goal_ = config::lift_preset::DOWN;
+    precise_ = false;
+    descent_ = true;        // NOT derived from LIFT_BOTTOM_GOAL_DEG: this IS the banded trip home
+    descentFast_ = true;    // the FAST ramp (LIFT_FAST_DESCENT_RAMP_DEG_PER_S2), so full speed is
+                            // reached in ~75 ms and shed again inside the slow zone
+    returnFast_ = true;     // brain/trace: RETURN -- this descent is a post-score run home
+    minDist_ = std::fabs(goal_ - position);  // the runaway guard's reference, re-based on THIS move
+    moveStart_ = now;
+    restWakes_ = 0;
+    parkTimeout_ = false;
+    seatStillSince_ = 0;
+    // KEEP THE AUTOCLAMP INHIBITED ALL THE WAY DOWN: the jaws are open and the arm is travelling down
+    // right past the pin it just placed, which the autoclamp would otherwise re-grab -- and a grab
+    // outside the intake sends the arm to the ABSOLUTE CLAMP_GRAB_HEIGHT (37.5) and leaves it there.
+    // enterSeat() ends both flags at the bottom.
     scoreCycle_ = true;
-    // setTarget() picked the config descent bands; keep the SCORING speed for both fast bands instead,
-    // so the run to the bottom is the continuation of the press and not a separate, faster descent.
-    // The slow zone, FINAL and SEAT are untouched.
-    if (descent_) enterDescend(now, position, config::L2_SCORE_SPEED_PCT, config::L2_SCORE_SPEED_PCT);
+    // ...AND MAKE THE REST OF THE TRIP UNCANCELLABLE BY ANYTHING AUTOMATIC (see isScoreReturn()).
+    // "It needs to go all the way down to zero no matter where it is" is a guarantee, so it is a
+    // latch, not a hope: only an explicit new command (setTarget/cancel) may end it early.
+    scoreReturn_ = true;
+    // Both fast bands at the SCORING speed, so the run to the bottom is the continuation of the press
+    // rather than a separate, slower move. The slow zone, FINAL and SEAT are untouched.
+    enterDescend(now, position, config::L2_SCORE_SPEED_PCT, config::L2_SCORE_SPEED_PCT);
+    returnFast_ = true;  // enterDescend() doesn't touch it, but keep it next to the flag it belongs to
+    noteScore("RUN DOWN", position);
 }
 
 void Lift::startScoreReturn() {
@@ -1097,6 +1184,7 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         faulted_ = true;
         score_ = false;
         clawReleaseWanted_ = false;
+        noteScore("FAULT press", position);
         motors_.brake();
         lastOutput_ = 0.0;
         trace(now, 'F', position, 0.0, true);
@@ -1175,6 +1263,7 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             freeSince_ = 0;
             stuckSince_ = 0;
             aux.trigger = travelRelease ? 5 : (floorRelease ? 6 : ContactDetector::triggerCode(fired));
+            noteScore(phaseName(), position);  // REL(lag) / REL(spd) / REL(32) / REL(floor) ...
         }
     } else {  // Phase::RELEASE
         // Carry the detector's last readings so the r lines show what fired and what it saw.
@@ -1234,7 +1323,26 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
     }
 
     // Pressing down, with the push capped so the loop cannot crush the stack while the arm slows.
-    const double mv = runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, config::L2_PRESS_MAX_MV);
+    //
+    // TWO CAPS, CHOSEN BY MEASURED SPEED (see L2_PRESS_FREE_MAX_MV in config.hpp). A press through
+    // free air and a press into a stack want opposite things from one number, and they never happen at
+    // the same moment: while the arm is really MOVING DOWN it gets the free cap (which is what makes
+    // the press fast), and the tick its speed falls away -- which is what a landing IS -- it is back on
+    // the crush cap, before the loop has had a chance to lean on anything. Hysteretic, so it cannot
+    // flicker at the boundary; and a press that starts with the pin already resting on the stack never
+    // earns the free cap at all, because the arm never gets moving.
+    double pressCap = config::L2_PRESS_MAX_MV;
+    if (phase_ == Phase::PRESS) {
+        if (pressFast_) pressFast_ = descendSpeed >= config::L2_PRESS_FAST_OFF_DEG_PER_S;
+        else pressFast_ = descendSpeed >= config::L2_PRESS_FAST_ON_DEG_PER_S;
+        if (pressFast_) pressCap = config::L2_PRESS_FREE_MAX_MV;
+    } else {
+        pressFast_ = false;  // RELEASE presses the jaws off the pin: crush cap only
+    }
+    // Hand the integral back inside the cap we are about to enforce, so losing the free cap cannot
+    // leave a wound-up -9000 sitting in velI_ for the loop to fight its way out of.
+    velI_ = std::max(velI_, -static_cast<double>(pressCap));
+    const double mv = runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, pressCap);
     trace(now, phase_ == Phase::PRESS ? 'P' : 'r', position, mv,
           true, aux);
 }
@@ -1268,6 +1376,10 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
         // within ~60 ms.
         if (position > descentStart_ + config::LIFT_FAULT_DEG) {
             faulted_ = true;
+            if (scoreReturn_) {
+                scoreReturn_ = false;
+                noteScore("FAULT down", position);
+            }
             motors_.brake();
             lastOutput_ = 0.0;
             lastVRef_ = 0.0;
@@ -1282,9 +1394,14 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
             // keeps real downward authority and forces for a fixed window rather than trusting "looks
             // stopped" the instant it crosses this line (see "Seating on the hard stop" in config.hpp
             // for why the original single-step version could be fooled by that).
+            if (scoreReturn_) noteScore("FINAL", position);
             enterFinal(now);
         } else if (stalled(now, position)) {  // stopped well above the bottom: caught on something
             blocked_ = true;
+            // THE ONE WAY A SCORE CAN LEGITIMATELY END ABOVE 0: the arm is physically caught on
+            // something and pushing harder would break it (CLAUDE.md). It is not cancelled, it is
+            // jammed -- and now it says so, with the height, instead of just stopping.
+            if (scoreReturn_) noteScore("BLOCKED", position);
             enterHold(now, position);  // hold where it stopped, never push into the jam
         }
     } else if (phase_ == Phase::FINAL) {

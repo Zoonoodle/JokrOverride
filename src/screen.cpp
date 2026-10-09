@@ -226,6 +226,20 @@ void draw() {
                                 hs[0] ? hs : "NOT HOMED", lift.getPosition());
         }
     }
+
+    // --- 10: SCORE. THE LAST THING THAT HAPPENED TO A SCORE, and where the arm was when it did:
+    // PRESS, then whichever signal released the pin (REL(lag) / REL(spd) / REL(eff) / REL(stall), or
+    // REL(32) = the L2_AUTO_RELEASE_DEG travel rule, REL(floor) = too low for that), then RUN DOWN
+    // (the uncancellable trip to 0), then SEAT. If the arm ever stops above 0 after an L2 again, THIS
+    // LINE SAYS WHY, with the height: RETARGET (something commanded a new height), CANCEL (the D-pad,
+    // R2 or a route let go), REFUSE clamp (the autoclamp's 37.5 hop was blocked -- the arm kept
+    // going), BLOCKED (physically caught, holding rather than grinding), FAULT down (the runaway
+    // guard), SEAT(short) (FINAL's window ran out short of 0). The same lines go to the terminal as
+    // `SCORE <ms> <what> pos <p> goal <g> vel <v>`, one per event. (Line 9 is MOVEB; 5-7 are warnings.)
+    {
+        const char* note = lift.scoreNote();
+        if (note[0]) pros::screen::print(pros::E_TEXT_MEDIUM, 10, "SCORE %-30s", note);
+    }
 }
 
 }  // namespace

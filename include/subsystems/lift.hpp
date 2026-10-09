@@ -523,6 +523,19 @@ class Lift {
     bool isScoreCycle() const { return scoreCycle_; }
     /** True while a score sequence is running (PRESS / RELEASE / UNSTICK). */
     bool isScoring() const { return score_; }
+    /** TRUE FROM THE MOMENT A SCORE HAS RELEASED THE PIN UNTIL THE ARM IS SEATED ON ITS HARD STOP --
+     *  the run home that endScoreClear() starts. While it is true the descent is UNCANCELLABLE by
+     *  anything automatic: the autoclamp's CLAMP_GRAB_HEIGHT hop is refused outright (it used to be
+     *  able to retarget the arm to 37.5 mid-descent), and the autoclamp itself stays inhibited because
+     *  scoreCycle_ is held alongside it. Only an EXPLICIT new command clears it -- a preset, the
+     *  D-pad / manual override, a route's liftTo(), R2, B -- all of which go through setTarget() or
+     *  cancel(). enterSeat() ends it on arrival. */
+    bool isScoreReturn() const { return scoreReturn_; }
+    /** THE SCORE DIAGNOSTIC. The last phase transition, retarget or cancellation that happened during
+     *  a score, as a short string ("PRESS @67.7", "REL(lag) @31.2", "RUN DOWN @31.2", "SEAT @0.3",
+     *  "REFUSE clamp37.5 @22.4"). Every one of these is also printf'd to the terminal as a `SCORE`
+     *  line the moment it happens. Empty until the first score of the run. Shown on brain line 10. */
+    const char* scoreNote() const { return scoreNote_; }
     /** TRUE WHEN THE LIFT NEEDS THE JAWS OPENED, right now: the pin has landed on the stack. The
      *  owner of the claw (Scoring) polls this every tick, opens the claw, and calls
      *  clawReleaseDone(). The lift keeps pushing down meanwhile. */
@@ -607,6 +620,9 @@ class Lift {
     void startPush(int pushMs, bool needsGrip);
     /** The claw is off the pin: carry on down to lift_preset::DOWN at the scoring speed and seat. */
     void endScoreClear(std::uint32_t now, double position);
+    /** Record ONE score diagnostic: a phase transition, or something that retargeted / cancelled /
+     *  was refused during a score. printf's a `SCORE` line and leaves the text for brain line 10. */
+    void noteScore(const char* what, double position);
     /** Stall guard window: true once the arm has made less than LIFT_STALL_DEG of progress for
      *  LIFT_STALL_MS. Resets itself whenever the arm does move. Only ever called with a speed
      *  reference that really wants motion -- see the guard notes in config.hpp. */
@@ -722,6 +738,11 @@ class Lift {
                                                                                  // releasedByTravel_/releasedByFloor_)
     std::uint32_t freeSince_ = 0;        // when the arm was first seen clearly moving after the release
     std::uint32_t stuckSince_ = 0;       // when it was first seen stopped after the release
+    bool scoreReturn_ = false;           // the post-release run home is running and may not be
+                                          // cancelled by anything automatic -- see isScoreReturn()
+    bool pressFast_ = false;             // the press currently has L2_PRESS_FREE_MAX_MV (hysteretic,
+                                          // on the measured descent speed)
+    char scoreNote_[32] = "";            // the score diagnostic, see scoreNote()
     double pressRef_ = 0.0;              // ramped press/unstick speed reference, unsigned deg/s
     double unstickGoal_ = 0.0;           // height the unstick hop is climbing to
     int unstickTries_ = 0;

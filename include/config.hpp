@@ -1255,7 +1255,7 @@ inline constexpr bool CLAW_AUTOCLAMP_AT_START = false;       // power-on / initi
 // trade at the handoff (see AUTOCLAMP_INTAKE_*), where a false clamp costs one button press. In auton a
 // false clamp is worse than a late one: the route carries on having gripped a wall. So "more sensitive"
 // is tuned here, in millimetres.
-inline constexpr int AUTOCLAMP_RANGE_DRIVER_MM = 60;         // TUNE: driver control (the driver's number, 2026-10-03; was 55)
+inline constexpr int AUTOCLAMP_RANGE_DRIVER_MM = 65;         // TUNE: driver control (was 60, +5 driver 2026-10-09; originally 55)
 inline constexpr int AUTOCLAMP_RANGE_AUTON_MM = 75;          // TUNE: autonomous -- "a bit more sensitive" (was 65)
 inline constexpr int AUTOCLAMP_CONFIRM_MS = 50;              // TUNE: ...continuously for this long
 // ...over at least this many FRESH readings. The sensor refreshes on the order of 30 ms, i.e. slower

@@ -103,7 +103,7 @@ void Lift::initState() {
     scoredAbove_ = scoreCycle_ = false;
     scoreReturn_ = pressFast_ = runDownHard_ = false;
     runDownStillSince_ = 0;
-    scoreNote_[0] = '\0';
+    note_[0] = '\0';
     grab_ = gripWanted_ = gripAcked_ = false;
     clawReleaseWanted_ = clawReleased_ = false;
     contact_.reset();
@@ -311,6 +311,11 @@ const char* Lift::homeStateName() const {
 // Targets
 // ---------------------------------------------------------------------------
 void Lift::setTarget(double degrees, bool precise) {
+    // EVERY call counts as a command, including one that turns out to be the move already running and
+    // returns early below: a delayed reaction (the clamp hop) has to be able to tell that something
+    // newer has been asked for, and "the driver re-asked for the height it is already going to" is
+    // still newer than a grab 200 ms ago. See commandSeq().
+    ++commandSeq_;
     // One-shot: did this call come from descendManual() (R2 in clamped mode)? Consumed either way, so
     // a queued or ignored request can't leak into a later, unrelated move.
     const bool fromR2 = descendRequest_;
@@ -343,13 +348,13 @@ void Lift::setTarget(double degrees, bool precise) {
     // route deliberately asking for a height: a preset, L1's ladder, a liftTo(), B, R2, the D-pad.
     if (scoreReturn_) {
         if (fromClampRise) {
-            noteScore("REFUSE clamp", getPosition());
+            note("REFUSE clamp", getPosition());
             return;
         }
         scoreReturn_ = false;
         runDownHard_ = false;  // ...including when the dedup guard below turns this into a no-op:
                                // the descent then carries on as the ordinary banded one
-        noteScore("RETARGET", getPosition());
+        note("RETARGET", getPosition());
     }
 
     // Homing owns the motors until it finishes. Queue the target rather than dropping it (so a button
@@ -433,6 +438,15 @@ void Lift::setTarget(double degrees, bool precise) {
     descent_ = !precise_ && goal_ <= config::LIFT_BOTTOM_GOAL_DEG;
     const std::uint32_t now = pros::millis();
     const double position = getPosition();
+    // EVERY ACCEPTED NEW TARGET GOES ON THE RECORD, with where the arm was when it arrived. This is
+    // the line that answers "what moved the arm?" -- including the case this diagnostic was added for,
+    // a height commanded BELOW the arm: "TGT 20.0 @40.3" is a target 20 deg commanded while the arm
+    // was at 40.3, i.e. a descent -- and an L1 press can never produce one of those any more.
+    {
+        char what[24];
+        std::snprintf(what, sizeof(what), "TGT %.1f", goal_);
+        note(what, position);
+    }
     if (descent_) {
         // R2's descent has its own, gentler top band; L2/B/auton use the config bands.
         // R2's descent has its own gentler top band; the front toggle's has its own FASTER ones;
@@ -482,6 +496,7 @@ void Lift::moveTo(double degrees, int timeoutMs, bool waitUntilSettled) {
 }
 
 void Lift::cancel() {
+    ++commandSeq_;
     wakeMotors();
     toggleWait_ = false;
     clampRise_ = clampRiseRequest_ = false;
@@ -510,7 +525,7 @@ void Lift::cancel() {
     runDownHard_ = false;
     if (scoreReturn_) {
         scoreReturn_ = false;
-        noteScore("CANCEL", getPosition());
+        note("CANCEL", getPosition());
     }
 }
 
@@ -782,7 +797,7 @@ void Lift::enterSeat(std::uint32_t now, bool shortSeat) {
     runDownHard_ = false;
     if (scoreReturn_) {
         scoreReturn_ = false;
-        noteScore(shortSeat ? "SEAT(short)" : "SEAT", getPosition());
+        note(shortSeat ? "SEAT(short)" : "SEAT", getPosition());
     }
     phase_ = Phase::SEAT;
     phaseStart_ = now;
@@ -927,6 +942,7 @@ void Lift::runHold(std::uint32_t now, double dt, double position) {
 // (press 2 is startScoreReturn(), further down)
 // ---------------------------------------------------------------------------
 void Lift::startScore() {
+    ++commandSeq_;
     // Owns the motors from here as an active command with DOWN as its nominal goal, so everything
     // that asks "where is the lift heading" still gets a sensible answer and isSettled() is false
     // until the arm is actually seated at the bottom.
@@ -962,7 +978,7 @@ void Lift::startScore() {
     descentStart_ = getPosition();  // the runaway guard's reference for the whole sequence
     scoreStartPos_ = descentStart_;  // FIXED for the whole score -- the origin for L2_AUTO_RELEASE_DEG's
                                      // relative travel rule. Unlike descentStart_, UNSTICK never moves it.
-    noteScore("PRESS", descentStart_);
+    note("PRESS", descentStart_);
 }
 
 // ---------------------------------------------------------------------------
@@ -972,9 +988,9 @@ void Lift::startScore() {
 // mystery twice: every phase transition of a score, and every retarget, cancel or refusal that
 // touches the lift while one is running, says WHAT happened and WHERE the arm was. Short on purpose --
 // this is called from the 10 ms control task, only on transitions, never every tick.
-void Lift::noteScore(const char* what, double position) {
-    std::snprintf(scoreNote_, sizeof(scoreNote_), "%s @%.1f", what, position);
-    std::printf("SCORE %u %s pos %.1f goal %.1f vel %.0f\n", static_cast<unsigned>(pros::millis()), what,
+void Lift::note(const char* what, double position) {
+    std::snprintf(note_, sizeof(note_), "%s @%.1f", what, position);
+    std::printf("LIFT EV %u %s pos %.1f goal %.1f vel %.0f\n", static_cast<unsigned>(pros::millis()), what,
                 position, active_ ? goal_ : 0.0, velocity_);
     std::fflush(stdout);
 }
@@ -996,6 +1012,7 @@ void Lift::startPush(int pushMs, bool needsGrip) {
     // Homing owns the motors and is finding the true zero: do NOT push against it. The caller sees
     // isGrabbing() == false and falls back to the ordinary close-then-rise (see Scoring::update()).
     if (home_ == Home::RUNNING) return;
+    ++commandSeq_;
     const std::uint32_t now = pros::millis();
     active_ = true;
     goal_ = getPosition();  // nominal, so "where is it heading" has a sane answer
@@ -1136,7 +1153,7 @@ void Lift::endScoreClear(std::uint32_t now, double position) {
     runDownStillSince_ = 0;
     enterDescend(now, position, config::L2_SCORE_SPEED_PCT, config::L2_SCORE_SPEED_PCT);
     returnFast_ = true;  // enterDescend() doesn't touch it, but keep it next to the flag it belongs to
-    noteScore("RUN DOWN", position);
+    note("RUN DOWN", position);
 }
 
 void Lift::startScoreReturn() {
@@ -1196,7 +1213,7 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         faulted_ = true;
         score_ = false;
         clawReleaseWanted_ = false;
-        noteScore("FAULT press", position);
+        note("FAULT press", position);
         motors_.brake();
         lastOutput_ = 0.0;
         trace(now, 'F', position, 0.0, true);
@@ -1275,7 +1292,7 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             freeSince_ = 0;
             stuckSince_ = 0;
             aux.trigger = travelRelease ? 5 : (floorRelease ? 6 : ContactDetector::triggerCode(fired));
-            noteScore(phaseName(), position);  // REL(lag) / REL(spd) / REL(32) / REL(floor) ...
+            note(phaseName(), position);  // REL(lag) / REL(spd) / REL(32) / REL(floor) ...
         }
     } else {  // Phase::RELEASE
         // Carry the detector's last readings so the r lines show what fired and what it saw.
@@ -1377,7 +1394,7 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
     if (scoreReturn_ && scoreCycle_ && clawReleasedAt_ != 0 &&
         now - clawReleasedAt_ >= static_cast<std::uint32_t>(config::L2_AUTOCLAMP_LOCKOUT_MS)) {
         scoreCycle_ = false;
-        noteScore("CLAMP ARMED", position);
+        note("CLAMP ARMED", position);
     }
 
     // --- phase transitions first, so the output below always matches the phase ---
@@ -1406,7 +1423,7 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
             runDownHard_ = false;
             if (scoreReturn_) {
                 scoreReturn_ = false;
-                noteScore("FAULT down", position);
+                note("FAULT down", position);
             }
             motors_.brake();
             lastOutput_ = 0.0;
@@ -1442,7 +1459,7 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
             // the goal rather than a jam. Hold where it stopped; never force into it.
             blocked_ = true;
             runDownHard_ = false;
-            noteScore("BLOCKED", position);
+            note("BLOCKED", position);
             enterHold(now, position);
         }
     } else if (phase_ == Phase::DESCEND) {
@@ -1452,14 +1469,14 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
             // keeps real downward authority and forces for a fixed window rather than trusting "looks
             // stopped" the instant it crosses this line (see "Seating on the hard stop" in config.hpp
             // for why the original single-step version could be fooled by that).
-            if (scoreReturn_) noteScore("FINAL", position);
+            if (scoreReturn_) note("FINAL", position);
             enterFinal(now);
         } else if (stalled(now, position)) {  // stopped well above the bottom: caught on something
             blocked_ = true;
             // THE ONE WAY A SCORE CAN LEGITIMATELY END ABOVE 0: the arm is physically caught on
             // something and pushing harder would break it (CLAUDE.md). It is not cancelled, it is
             // jammed -- and now it says so, with the height, instead of just stopping.
-            if (scoreReturn_) noteScore("BLOCKED", position);
+            if (scoreReturn_) note("BLOCKED", position);
             enterHold(now, position);  // hold where it stopped, never push into the jam
         }
     } else if (phase_ == Phase::FINAL) {
@@ -1632,6 +1649,7 @@ void Lift::update() {
     //    target either (see class comment).
     if (std::fabs(manualPower_) > 0.02) {
         wakeMotors();  // the driver is taking over: plain voltage, and brake-hold when they let go
+        if (!wasManual_) ++commandSeq_;  // the takeover itself is a command (cancel() bumps it too)
         if (active_) cancel();
         if (home_ == Home::RUNNING) {
             home_ = Home::CANCELLED;

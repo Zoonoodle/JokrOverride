@@ -531,11 +531,22 @@ class Lift {
      *  D-pad / manual override, a route's liftTo(), R2, B -- all of which go through setTarget() or
      *  cancel(). enterSeat() ends it on arrival. */
     bool isScoreReturn() const { return scoreReturn_; }
-    /** THE SCORE DIAGNOSTIC. The last phase transition, retarget or cancellation that happened during
-     *  a score, as a short string ("PRESS @67.7", "REL(lag) @31.2", "RUN DOWN @31.2", "SEAT @0.3",
-     *  "REFUSE clamp37.5 @22.4"). Every one of these is also printf'd to the terminal as a `SCORE`
-     *  line the moment it happens. Empty until the first score of the run. Shown on brain line 10. */
-    const char* scoreNote() const { return scoreNote_; }
+    /** THE LIFT EVENT LINE. The last thing worth knowing that happened to the lift, as a short string
+     *  with the height it happened at: every score phase transition ("PRESS @67.7", "REL(lag) @31.2",
+     *  "RUN DOWN @31.2", "SEAT @0.3"), and every NEW COMMANDED TARGET ("TGT 67.7 <-37.5"), so a move
+     *  nobody expected can be traced to the press that caused it. Each one is also printf'd to the
+     *  terminal as a `LIFT EV` line the moment it happens. Empty until the first event. Brain line 10. */
+    const char* lastNote() const { return note_; }
+    /** HOW MANY COMMANDS THIS LIFT HAS BEEN GIVEN, ever. Bumped by every setTarget()/cancel()/grab/
+     *  score/manual takeover, INCLUDING one that turns out to be the move already running. It exists so
+     *  a DELAYED reaction can tell whether anything newer has been asked for since it was queued --
+     *  see Scoring::serviceClampHop(), where a 200 ms old clamp hop must not override a newer height. */
+    std::uint32_t commandSeq() const { return commandSeq_; }
+    /** Record ONE lift event: a score phase transition, a new commanded target, or something that
+     *  retargeted / cancelled / was refused. printf's a `LIFT EV` line and leaves the text on brain
+     *  line 10. Public so the macros above the lift can log a refusal of their own (Scoring's clamp
+     *  hop). Called only on transitions, never every tick. */
+    void note(const char* what, double position);
     /** TRUE WHEN THE LIFT NEEDS THE JAWS OPENED, right now: the pin has landed on the stack. The
      *  owner of the claw (Scoring) polls this every tick, opens the claw, and calls
      *  clawReleaseDone(). The lift keeps pushing down meanwhile. */
@@ -620,9 +631,6 @@ class Lift {
     void startPush(int pushMs, bool needsGrip);
     /** The claw is off the pin: carry on down to lift_preset::DOWN at the scoring speed and seat. */
     void endScoreClear(std::uint32_t now, double position);
-    /** Record ONE score diagnostic: a phase transition, or something that retargeted / cancelled /
-     *  was refused during a score. printf's a `SCORE` line and leaves the text for brain line 10. */
-    void noteScore(const char* what, double position);
     /** Stall guard window: true once the arm has made less than LIFT_STALL_DEG of progress for
      *  LIFT_STALL_MS. Resets itself whenever the arm does move. Only ever called with a speed
      *  reference that really wants motion -- see the guard notes in config.hpp. */
@@ -745,7 +753,8 @@ class Lift {
     bool runDownHard_ = false;           // THIS descent is the post-score run home: one constant
                                           // L2_RUN_DOWN_MV, no bands, no FINAL -- see updateDescent()
     std::uint32_t runDownStillSince_ = 0; // when the hard run-down first saw the arm stopped near 0
-    char scoreNote_[32] = "";            // the score diagnostic, see scoreNote()
+    char note_[32] = "";                 // the lift event line, see lastNote()
+    std::uint32_t commandSeq_ = 0;       // see commandSeq()
     double pressRef_ = 0.0;              // ramped press/unstick speed reference, unsigned deg/s
     double unstickGoal_ = 0.0;           // height the unstick hop is climbing to
     int unstickTries_ = 0;

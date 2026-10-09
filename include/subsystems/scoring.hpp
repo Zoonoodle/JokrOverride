@@ -346,6 +346,12 @@ class Scoring {
     // The delay chosen for THIS pending hop, captured when the clamp fired so the mode cannot change
     // under it: CLAMP_RISE_DELAY_AUTON_MS or CLAMP_RISE_DELAY_DRIVER_MS.
     int pendingHopDelayMs_ = 0;
+    // THE LIFT'S COMMAND COUNTER AS IT WAS WHEN THE CLAMP FIRED. If it has moved by the time the hop
+    // is due, SOMETHING NEWER HAS COMMANDED THE LIFT and the hop is dropped -- a 200 ms old reaction
+    // to a grab must never override the height the driver has asked for since. enter()/reset() already
+    // cancel a pending hop for every input that goes through them; this covers the ones that do not,
+    // such as stepUp()'s CLAMPING/STACKING case (it only advances the ladder -- no enter() call).
+    std::uint32_t hopCmdSeq_ = 0;
     bool autonMode_ = false;  // set every tick by periodic::tick() from Inputs::auton
     // autoStackAfterPush_ IS GONE (2026-10-07). The "push, then rise to level 1 by itself" flag was
     // replaced by the real GRAB_SETTLE -> GRAB_PUSH -> GRAB_RISE states, which the clamp event enters

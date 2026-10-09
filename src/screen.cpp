@@ -239,8 +239,8 @@ void draw() {
     // guard), SEAT(short) (FINAL's window ran out short of 0). The same lines go to the terminal as
     // `SCORE <ms> <what> pos <p> goal <g> vel <v>`, one per event. (Line 9 is MOVEB; 5-7 are warnings.)
     {
-        const char* note = lift.scoreNote();
-        if (note[0]) pros::screen::print(pros::E_TEXT_MEDIUM, 10, "SCORE %-30s", note);
+        const char* note = lift.lastNote();
+        if (note[0]) pros::screen::print(pros::E_TEXT_MEDIUM, 10, "LIFT  %-30s", note);
     }
 }
 

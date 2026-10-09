@@ -84,7 +84,17 @@ void Scoring::advanceStep() {
     // The last step up lands ON the top measured level rather than at the nearest multiple of the
     // step, so the top of the ladder is a real scoring height. The low clamp means a step can never
     // command the arm below its own hard stop.
-    stepGoal_ = std::clamp(base + step, preset::DOWN, ceiling);
+    //
+    // ...AND NEVER BELOW WHERE THE ARM ALREADY IS. "UP ONLY" is the rule above, but the rung was
+    // computed from the lift's TARGET, and the target is not always under the arm: a descent to DOWN
+    // that gets BLOCKED on something, or PARKed by LIFT_MOVE_TIMEOUT_MS, leaves goal_ at the bottom
+    // with the arm held well above it and hasActiveTarget() still true -- so base was 0, the rung came
+    // out at L1_STEP_DEG, and an L1 press DROVE THE ARM DOWN to it at LIFT_DOWN_SPEED_PCT. That is a
+    // real path to "I pressed L1 and it went down rapidly", and this one line closes it for every
+    // stale base there could ever be: the worst an L1 can now do is ask for the height the arm is
+    // already at. (The ladder keeps stepping from the TARGET when the target IS ahead of the arm --
+    // that is what merges rapid taps into one continuous rise.)
+    stepGoal_ = std::clamp(std::max(base + step, lift_.getPosition()), preset::DOWN, ceiling);
 
     // The rung number is for the brain only; it is derived from the height so the two cannot disagree,
     // and it is counted FROM THE BOTTOM (which is -31.9, not 0).
@@ -198,6 +208,7 @@ void Scoring::handleClampEvent() {
     pendingHopAt_ = pros::millis();
     pendingHopDelayMs_ =
         autonMode_ ? config::CLAMP_RISE_DELAY_AUTON_MS : config::CLAMP_RISE_DELAY_DRIVER_MS;
+    hopCmdSeq_ = lift_.commandSeq();  // ...and what the lift had been asked for as of now
 }
 
 void Scoring::serviceClampHop() {
@@ -216,6 +227,26 @@ void Scoring::serviceClampHop() {
     // this, so only the lift's own business needs re-testing.
     if (lift_.isGrabbing() || lift_.isScoring() || lift_.isScoreCycle() || lift_.isScoredAbove()) return;
     if (lift_.hasActiveTarget() && !lift_.isSettled() && !lift_.isBlocked() && !lift_.isFaulted()) return;
+    // ANYTHING NEWER WINS. enter() and reset() cancel a pending hop, which covers every input that
+    // goes through them -- but not all of them do: stepUp()'s CLAMPING/STACKING case only advances the
+    // ladder, and auton can command the lift without touching this class at all. So the hop also
+    // checks the lift's own command counter: if the lift has been asked for ANYTHING since the clamp
+    // fired, this reaction is stale and is dropped rather than overriding it. CLAMP_GRAB_HEIGHT is an
+    // ABSOLUTE height (f480e95), so a stale hop does not nudge the arm -- it yanks it to 37.5.
+    if (lift_.commandSeq() != hopCmdSeq_) {
+        lift_.note("HOP stale", lift_.getPosition());
+        return;
+    }
+    // A HOP NEVER GOES DOWN. It is the reaction to a grab -- "lift what you just picked up clear" --
+    // and CLAMP_GRAB_HEIGHT being absolute means that from anywhere above it the very same call is a
+    // DESCENT instead. With the arm parked at the intake handoff this is not hypothetical: the
+    // working-tree lift_preset::INTAKE is 42, i.e. ABOVE the 37.5 hop height, so the hop would command
+    // the arm DOWN 4.5 deg -- and startClampRise() would even make it a PRECISE move, because the
+    // distance is inside LIFT_TOLERANCE_DEG. At the old INTAKE of 22 the same call was a 15.5 deg rise.
+    if (lift_.getPosition() >= config::CLAMP_GRAB_HEIGHT - config::LIFT_TOLERANCE_DEG) {
+        lift_.note("HOP skip hi", lift_.getPosition());
+        return;
+    }
 
     // GO TO CLAMP_GRAB_HEIGHT -- an ABSOLUTE height, not a rise (driver, 2026-10-07: "make it 37.5
     // height, not a rise"). Grabs happen at the bottom, so this is normally a ~37.5 deg lift; a grab

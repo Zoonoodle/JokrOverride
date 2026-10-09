@@ -1474,16 +1474,23 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
         // can never grind at L2_RUN_DOWN_MV forever whatever the frame reads down there (see
         // L2_RUN_DOWN_* in config.hpp). 1: the band the driver asked for. 2: stopped near 0 long
         // enough, which is what fires if the stop cannot physically reach -1. 3: the time backstop.
+        // AUTON FORCES LOWER AND FOR LONGER BEFORE IT WILL CALL ITSELF DOWN (see AUTON_RUN_DOWN_* in
+        // config.hpp): a descent whose job is to put the claw on the floor must not stop pushing
+        // because it has been still for a tenth of a second two degrees up. The band the driver asked
+        // for (L2_RUN_DOWN_TARGET_DEG) and the 2500 ms backstop are shared by both.
+        const double zeroDeg =
+            forcedDescent_ ? config::AUTON_RUN_DOWN_ZERO_DEG : config::L2_RUN_DOWN_ZERO_DEG;
+        const int stillMs =
+            forcedDescent_ ? config::AUTON_RUN_DOWN_STILL_MS : config::L2_RUN_DOWN_STILL_MS;
         const bool inBand = position <= config::L2_RUN_DOWN_TARGET_DEG;
-        const bool nearZero = position <= config::L2_RUN_DOWN_ZERO_DEG;
+        const bool nearZero = position <= zeroDeg;
         if (nearZero && std::fabs(velocity_) <= config::L2_RUN_DOWN_STILL_DEG_PER_S) {
             if (runDownStillSince_ == 0) runDownStillSince_ = now;
         } else {
             runDownStillSince_ = 0;
         }
         const bool stoppedLow =
-            runDownStillSince_ != 0 &&
-            now - runDownStillSince_ >= static_cast<std::uint32_t>(config::L2_RUN_DOWN_STILL_MS);
+            runDownStillSince_ != 0 && now - runDownStillSince_ >= static_cast<std::uint32_t>(stillMs);
         const bool capped = now - phaseStart_ >= static_cast<std::uint32_t>(config::L2_RUN_DOWN_MAX_MS);
         if (inBand || stoppedLow || capped) {
             // SEAT(short) unless it really got to the bottom, so the brain says which happened.
@@ -1569,8 +1576,13 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
             motors_.brake();
             lastOutput_ = 0.0;
         } else {
-            motors_.move_voltage(static_cast<int>(config::LIFT_DOWN_PUSH_MV));
-            lastOutput_ = config::LIFT_DOWN_PUSH_MV;
+            // AUTON PRESSES HARDER AT THE BOTTOM than the driver's hold-on-the-stop (see
+            // AUTON_DOWN_PUSH_MV): the claw has to stay down while the robot drives into floor
+            // objects, not merely stay put. Read every tick from the mode mirror, so a seat that
+            // outlives autonomous eases back to LIFT_DOWN_PUSH_MV on the first driver tick.
+            const double push = forcedDescent_ ? config::AUTON_DOWN_PUSH_MV : config::LIFT_DOWN_PUSH_MV;
+            motors_.move_voltage(static_cast<int>(push));
+            lastOutput_ = push;
         }
         lastVRef_ = 0.0;
         trace(now, 'S', position, lastOutput_, false);

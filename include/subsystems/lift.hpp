@@ -399,6 +399,13 @@ class Lift {
      * with the jaws empty: Scoring's intake reset uses it. One-shot, like every other request here.
      */
     void descendForced();
+    /** Make the NEXT descent a forced one, without commanding it here. For a caller that has its own
+     *  way of starting the trip down -- auton::liftDownFast() goes through descendFast(), which may
+     *  queue itself behind a FRONT_TOGGLE rise and start the move from inside the lift task later; the
+     *  one-shot survives that wait because only setTarget() consumes it. It makes an auton descent
+     *  forced BY CONSTRUCTION rather than by setForcedDescent()'s mirror having been pushed already,
+     *  which matters for the first lift call of a route, before the auton tick's first pass. */
+    void forceNextDescent() { forceDownRequest_ = true; }
 
     /** Stop chasing whatever target is active and brake-hold right where the lift is. Does not
      *  resume any previous target later -- same "no old target" rule as releasing the manual override. */

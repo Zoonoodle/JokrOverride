@@ -168,6 +168,12 @@ bool waitHome(int timeoutMs) {
 void liftTo(double degrees, bool precise) {
     AUTON_LOCK;
     robot::scoring.reset();  // a direct height command takes the macro out of the way first
+    // A ROUTE'S TRIP TO THE BOTTOM ALWAYS FORCES ITSELF DOWN, and says so here rather than relying on
+    // Lift's auton mirror having been pushed already (periodic::tick() sets it, and the very first
+    // lift call of a route can beat the tick task's first pass). This is the same test setTarget()
+    // uses to decide a goal is a banded descent rather than a position move, so liftDown(),
+    // liftToMatchload() and a liftTo(0) in a route all get it, and nothing above the bottom does.
+    if (!precise && degrees <= config::LIFT_BOTTOM_GOAL_DEG) robot::lift.forceNextDescent();
     robot::lift.setTarget(degrees, precise);
 }
 
@@ -188,6 +194,9 @@ void liftDown() { liftTo(preset::DOWN); }
 void liftDownFast() {
     AUTON_LOCK;
     robot::scoring.reset();  // a direct height command takes the macro out of the way first
+    // Forced, for the same reason as liftTo() above -- and the one-shot survives descendFast()'s own
+    // wait for a FRONT_TOGGLE rise to finish, because only setTarget() consumes it.
+    robot::lift.forceNextDescent();
     robot::lift.descendFast();
 }
 

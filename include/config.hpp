@@ -952,7 +952,18 @@ inline constexpr double LIFT_MANUAL_DOWN_PCT = 50.0;         // TUNE: D-pad Down
 //   It does not press hard enough to seat the pin, or does not move at all: raise it.
 //   It lifts the back of the robot / slams the pin down / stalls the motors warm: LOWER it -- but see
 //     the band floor above before going far below 40.
-inline constexpr double AUTON_LIFT_PUSH_PCT = 45.0;          // TUNE: % of LIFT_MAX_MV, downward (40 -> 20 -> 45)
+// 45 -> 85 (the driver, 2026-10-09: "this needs to push with more force too: auton::liftPushFor(600)").
+// WHY 85 SPECIFICALLY: it matches what a forced descent already pushes with. L2_RUN_DOWN_MV is
+// -10000 mV of 12000, i.e. 83%, so a timed push-down now presses with the same authority as the trip
+// that seats the arm -- which is the point, since both are "get the claw DOWN and keep it there".
+// Rounded up to 85 rather than sitting on 83.3 because this is a plain-voltage knob in percent and a
+// round number is easier to walk up or down; 10200 mV against the descent's 10000.
+// IT IS OPEN LOOP, with no cap and no closed loop behind it (Lift::driverPower()), so this is nearly
+// twice the push the matchload sequences in autons.cpp were tuned against at 45%. Watch the first run:
+//   It lifts the back of the robot, or crushes the pin: lower it, or pass a percent per call --
+//     liftPushFor(400, 45) still does exactly what it used to.
+//   The motors get warm on a route with several long pushes: shorten the pushes before lowering this.
+inline constexpr double AUTON_LIFT_PUSH_PCT = 85.0;          // TUNE: % of LIFT_MAX_MV, downward (45 -> 85)
 // ...and the same thing UPWARD (auton::liftPushUp() / liftPushUpFor()), for the driver's first-pin nudge.
 // THIS IS THE TRANSLATION OF THEIR OLD-LIBRARY LINES, which were:
 //     liftMotors.move(50);  pros::delay(300);  liftMotors.move(0);
@@ -1712,6 +1723,35 @@ inline constexpr int L2_RUN_DOWN_MAX_MS = 2500;              // TUNE: backstop, 
 //   The pin just placed gets re-grabbed on the way past it: RAISE this (1400, 1800).
 //   A cup sitting at the bottom is not picked up soon enough: lower it (700).
 inline constexpr int L2_AUTOCLAMP_LOCKOUT_MS = 1000;         // TUNE: driver 2026-10-09
+// ---------------------------------------------------------------------------
+// ...AND AUTON PUSHES HARDER AND LOWER THAN THAT
+// ---------------------------------------------------------------------------
+// The driver, 2026-10-09: "in auton when its liftdown fast, it needs to force clamp lower still". An
+// auton descent exists to put the claw ON THE FLOOR and keep it there while the robot drives into
+// whatever it is collecting -- a different job from the L2 run home, which only has to get out of the
+// way, so the two now part company at the bottom. All three of these apply when Lift's forcedDescent_
+// mirror is on, i.e. in autonomous, and leave driver exactly as it was.
+//
+// 1. THE "STOPPED LOW" EXIT IS STRICTER. The shared exit lets the arm call itself seated anywhere
+// inside L2_RUN_DOWN_ZERO_DEG (2.0 deg) once it has been still for L2_RUN_DOWN_STILL_MS (120 ms) --
+// which is right for "I am clearly down, stop forcing", and wrong for a floor pickup, where 1.9 deg of
+// friction stall would end the push and hand over to a gentle hold. Auton halves the band and more
+// than doubles the window, so only an arm that genuinely cannot go further gets to stop pushing.
+// THE 2500 ms BACKSTOP (L2_RUN_DOWN_MAX_MS) IS DELIBERATELY UNCHANGED and is what bounds the cost of
+// being wrong: if the frame's zero is a degree high -- see the homing note on LIFT_HOME_MV -- the arm
+// can no longer reach this band at all, and the backstop is then the only exit. That is 2.5 s of
+// L2_RUN_DOWN_MV per descent, which is why it stays.
+inline constexpr double AUTON_RUN_DOWN_ZERO_DEG = lift_preset::DOWN + 0.8;  // TUNE (driver: 2.0)
+inline constexpr int AUTON_RUN_DOWN_STILL_MS = 300;          // TUNE: ms (driver: 120)
+// 2. ...AND THE SEAT KEEPS PRESSING HARDER ONCE IT IS THERE. LIFT_DOWN_PUSH_MV (-3500) holds the arm
+// on its stop, which is all the driver's bottom needs; it is not much to drive a claw down into a cup
+// with. This is the auton equivalent, applied for as long as the target stays DOWN.
+// LIFT_SEAT_TEMP_LIMIT_C still governs: the brain says SEAT(hot) and the push stops if a lift motor
+// passes it, same as ever. At -6000 continuous that guard is doing real work -- an auton is 15 s, so
+// it should never trip, but a route left seated on a bench will.
+//   The claw still rides up over floor objects: raise it (-7500).
+//   The motors are warm after a practice session, or the frame complains: lower it toward -3500.
+inline constexpr float AUTON_DOWN_PUSH_MV = -6000.0f;        // TUNE: magnitude is the push, sign is DOWN
 // Most the loop may push DOWNWARD (magnitude, mV) while pressing. This is the crush limit: the
 // velocity loop has 12000 mV of authority and an integral that winds up, so without a cap it would
 // keep increasing the push until it moved -- i.e. flatten the stack. 7000 mV through the 4:1 is about

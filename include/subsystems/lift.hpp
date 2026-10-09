@@ -194,7 +194,7 @@
  * THE MANUAL INPUT (driverPower(): D-pad Up at LIFT_MANUAL_UP_PCT and Down at
  * LIFT_MANUAL_DOWN_PCT -- half speed, because gravity already helps downward and
  * it ends on the hard stop -- and R1 at
- * R_LIFT_UP_PCT while a pin is clamped) is plain voltage fed into this same
+ * L1_LIFT_UP_PCT while L1 is held) is plain voltage fed into this same
  * loop ahead of everything else, and it cancels a score sequence at any stage.
  * R2 in clamped mode is not manual at all -- descendManual() runs the DESCENT
  * above with R_LIFT_DOWN_PCT as its top band, so holding R2 to the bottom seats
@@ -368,14 +368,6 @@ class Lift {
      * other way, including the guards, the hold and PARK.
      */
     void setTargetFast(double degrees);
-    /**
-     * THE DRIVER'S L1 STEP. An ordinary non-precise move to `degrees`, with one difference: the
-     * braking curve and the final walk-in both run config::L1_STEP_SPEED_BOOST_PCT faster, so the step
-     * spends longer at full speed and crawls in quicker. The CRUISE is untouched because it cannot be
-     * touched -- it is already at LIFT_FREE_SPEED_DEG_PER_S (see the constant's note). The boost is a
-     * one-shot: it applies to this move only and the next command clears it.
-     */
-    void setTargetStep(double degrees);
 
     /**
      * Auton-friendly wrapper: command a height, optionally blocking the CALLING task (not the lift
@@ -589,7 +581,7 @@ class Lift {
     /**
      * Driver manual override: -1..1 of LIFT_MAX_MV, plain motor power, no feedforward. The D-pad uses
      * +LIFT_MANUAL_UP_PCT / -LIFT_MANUAL_DOWN_PCT (100% up, 50% down); R1 in clamped mode uses
-     * +R_LIFT_UP_PCT / 100. Non-zero input immediately
+     * +L1_LIFT_UP_PCT / 100 (L1 held). Non-zero input immediately
      * cancels any active target AND any homing in progress (see class comment), and letting go
      * brake-holds where it is -- no old target resumes. Call with 0 every loop nothing is holding it.
      */
@@ -827,8 +819,6 @@ class Lift {
     bool faulted_ = false;
     // --- the startup unwrap and the sensor-failure guard (see config.hpp "STARTUP UNWRAP") ---
     double speedCapPct_ = 0.0;             // per-move speed ceiling, % of free speed; 0 = none
-    double moveBoostPct_ = 0.0;            // per-move braking/walk-in boost, % (the driver's L1 step)
-    bool stepBoostRequest_ = false;        // one-shot: the next setTarget() is that step
     mutable double lastGoodPosition_ = 0.0;  // held and returned while the sensor is not answering
     mutable bool sensorBad_ = false;         // PROS_ERR seen; mutable because the read path is const
 

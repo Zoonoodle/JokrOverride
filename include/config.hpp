@@ -305,25 +305,6 @@ inline constexpr int GRAB_RISE_TIMEOUT_MS = 4000;            // TUNE: backstop f
 //     not a constant.
 // THE FLOOR is lift_preset::DOWN, so a step can never command the arm below its own hard stop.
 inline constexpr double L1_STEP_DEG = 20.0;                  // TUNE: arm degrees per L1 press
-// HOW MUCH FASTER THE DRIVER'S L1 STEP IS THAN AN ORDINARY MOVE (the driver, 2026-10-09: "10% faster
-// than it currently moves (if it can)"). It is "if it can" for a real reason: the CRUISE is already at
-// the mechanical ceiling. speedProfile()'s cap is LIFT_FREE_SPEED_DEG_PER_S * LIFT_UP_SPEED_PCT = 150
-// * 100% = 150 deg/s, which IS the red cartridge's free speed through the 4:1 -- there is no more
-// speed to give, and asking for more only winds up the velocity integral.
-// What is left is the two parts of the move that are deliberately slower than the arm could go:
-//   - the BRAKING CURVE (LIFT_DECEL_DEG_PER_S2): braking 10% harder means staying at full speed 10%
-//     longer before the arm has to start shedding it.
-//   - the WALK-IN (LIFT_APPROACH_*): the last LIFT_APPROACH_ZONE_DEG is covered at
-//     LIFT_APPROACH_KP_PER_S * distance, clamped to [LIFT_APPROACH_MIN_DEG_PER_S, _DEG_PER_S]. On a
-//     20 deg step that tail is a third of the time, so 10% off it is 10% off the move.
-// A 20 deg step is roughly 16 deg of accelerate-and-cruise plus a ~4 deg walk-in, so the arithmetic
-// comes out at about 10% of the whole press-to-settled time. SCOPED TO THIS ONE MOVE: it is applied
-// as a per-move multiplier that Lift::setTargetStep() sets and the next command clears, so no preset,
-// auton move, descent or score is touched.
-//   The step overshoots or arrives with a thump: LOWER this (0 turns it off entirely).
-//   Still not snappy enough: raise it, but past ~25 the arm starts arriving with real speed left and
-//   the hold has to absorb it (which is the ringing LIFT_HOLD_KD exists to damp).
-inline constexpr double L1_STEP_SPEED_BOOST_PCT = 10.0;      // TUNE: driver L1 only
 inline constexpr double L1_STEP_CEILING_DEG =
     lift_preset::STACK_LEVELS[lift_preset::STACK_LEVEL_COUNT - 1];  // the top measured level (106.9)
 
@@ -972,7 +953,21 @@ inline constexpr double AUTON_LIFT_PUSH_UP_PCT = 40.0;       // TUNE: % of LIFT_
 // While the claw is CLAMPED on a pin, R1/R2 stop being intake/extake and become lift up/down.
 // Up is plain voltage; down goes through the banded descent above (so it seats at the bottom exactly
 // like L2 does) with this as its top-band speed.
-inline constexpr double R_LIFT_UP_PCT = 90.0;                // TUNE: R1 up, % of full voltage
+inline constexpr double R_LIFT_UP_PCT = 90.0;                // LEGACY: R1-up moved to L1, see below
+// L1 (HOLD) = LIFT UP, and this is what it pushes with (the driver, 2026-10-09: "l1 hold moves the arm
+// up like our old r1 did when we had clamp active, it moves arm up steady and fast with hold, holds it
+// after release"). It is literally the old clamped-mode R1-up -- the same plain-voltage path through
+// Lift::driverPower() that the D-pad uses, so it cancels any target or macro on the way in and
+// brake-holds the moment it is let go -- just on a button that always means "raise", claw or no claw.
+// 90 -> 99 IS THE "10% FASTER" ASK, and it is real: this path is OPEN LOOP, so the arm's free-running
+// speed is simply the voltage, and 99% of LIFT_MAX_MV is 11880 mV against 90%'s 10800. That is
+// 10% more voltage and about 10% more speed (~135 -> ~148 deg/s unloaded). THE CEILING IS 100% --
+// LIFT_MAX_MV is the full battery, which is what LIFT_MANUAL_UP_PCT (the D-pad) already uses -- so the
+// 10% fits with 1% of headroom left and no more. Asking for 15% would hit the wall at 103.5.
+//   Too jumpy to position with: lower it (90 was the old feel).
+//   Loaded, it still feels slow: it is already at 99% of the motors' authority -- there is nothing
+//   left in the voltage. The arm is gear-limited at that point (LIFT_FREE_SPEED_DEG_PER_S, 150 deg/s).
+inline constexpr double L1_LIFT_UP_PCT = 99.0;               // TUNE: L1 hold, % of full voltage (was R1's 90)
 inline constexpr double R_LIFT_DOWN_PCT = 65.0;              // TUNE: R2 down, % of free speed (~98 deg/s)
 
 // --- Arrival bands ---------------------------------------------------------

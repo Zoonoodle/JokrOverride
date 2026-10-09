@@ -470,39 +470,6 @@ void Scoring::stepUp() {
     }
 }
 
-void Scoring::stepUpPlain() {
-    switch (state_) {
-        // Mid-sequence, and none of it may be interrupted by a step: a score in flight, the jaws
-        // physically closing, the lift forcing down onto a pin, a queued action waiting for the arm,
-        // press 2's run home -- and the automatic intake grab, which owns the arm from the moment the
-        // autoclamp catches something at the handoff until it has lifted it to level 1.
-        case State::RELEASING:
-        case State::CLAMPING:
-        case State::GRABBING:
-        case State::LIFT_SETTLE:
-        case State::RETURNING:
-        case State::GRAB_SETTLE:
-        case State::GRAB_PUSH:
-        case State::GRAB_RISE:
-            return;
-        default:
-            break;
-    }
-    // THE MACRO LETS GO FIRST. Nothing here moves a cylinder or a motor (reset() is pure state), but
-    // it has to happen: a state that re-issues a height every tick -- INTAKE_POS holding the handoff,
-    // MOVING, STACKING -- would otherwise command the arm straight back down over the top of the step.
-    reset();
-    // UP ONLY, from wherever the arm is HEADING if that is ahead of it (so rapid taps merge into one
-    // continuous rise, exactly as the ladder did) and from the arm ITSELF otherwise. The floor on the
-    // arm's own position is what makes "L1 never moves the arm down" true whatever stale target the
-    // lift was carrying -- see the note in advanceStep().
-    const double position = lift_.getPosition();
-    const double base = std::max(lift_.hasActiveTarget() ? lift_.getTarget() : position, position);
-    const double goal = std::clamp(base + config::L1_STEP_DEG, preset::DOWN, preset::MAX);
-    hasCommanded_ = false;  // this class is not tracking the height; the step is the lift's move
-    lift_.setTargetStep(goal);
-}
-
 void Scoring::score() {
     // LEGACY TWO-PRESS PATH, unreachable since the one-press score: nothing enters SCORED any more.
     // the jaws open: this L2 is the run home that seats it (see "SCORING WITH L2" in lift.hpp and the

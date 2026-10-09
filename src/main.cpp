@@ -47,18 +47,20 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *               Holding either immediately cancels the intake macro / any preset target and
  *               takes manual control. Letting go brakes and holds right there -- it does NOT
  *               resume whatever preset or macro step was active before.
- *   L1          STEP UP: the arm goes L1_STEP_DEG (20 deg) above wherever it is heading, every
- *               press, capped at lift_preset::MAX. That is ALL it does (the driver, 2026-10-09: "i
- *               dont like our level system during driver (keep in auto), just make l1 do our r1 step
- *               up, but it always does step up"). No stack levels, no rung counter, no claw, no pivot,
- *               no grab at the handoff, and no floor sweep. Rapid taps merge into one continuous rise,
- *               because each press steps from the TARGET when the target is ahead of the arm. It can
- *               never move the arm DOWN: the goal is floored at the arm's own position. The move
- *               brakes and walks in config::L1_STEP_SPEED_BOOST_PCT (10%) faster than an ordinary
- *               preset -- its cruise is already at the arm's free speed and cannot go faster.
- *               Ignored mid-score, mid-grab, and during the automatic intake grab.
- *               THE STACK LEVELS ARE AUTON'S NOW: auton::stepUp() still walks the ladder and
- *               auton::liftTo(Level::N) still goes to a measured level. Nothing about auton changed.
+ *   L1 (hold)   LIFT UP, steady and fast, for as long as it is held: plain manual voltage at
+ *               L1_LIFT_UP_PCT (99% of LIFT_MAX_MV), through the same Lift::driverPower() path the
+ *               D-pad uses. THIS IS THE OLD CLAMPED-MODE R1-UP, moved to L1 and 10% quicker (it was
+ *               90%) -- the driver, 2026-10-09: "l1 hold moves the arm up like our old r1 did when we
+ *               had clamp active, it moves arm up steady and fast with hold, holds it after release".
+ *               Holding it CANCELS the intake macro and any preset target, exactly as the D-pad does,
+ *               and LETTING GO BRAKE-HOLDS the arm right where it is -- no old target resumes. It
+ *               works with the claw clamped or empty, and like every manual override it is not
+ *               clamped by lift_preset::MAX (the mechanism's own top stop is the limit). D-pad
+ *               Up/Down still win over it; it wins over everything else, a score included.
+ *               THERE ARE NO STACK LEVELS IN DRIVER ANY MORE (the driver's call, same day): no ladder,
+ *               no rung counter, no +20 step, no grab-at-the-handoff on L1. The level system is
+ *               AUTON'S -- auton::stepUp() still walks the ladder and auton::liftTo(Level::N) still
+ *               goes to a measured level. Nothing about auton changed.
  *   L2          intake macro: THE SENSING SCORER, IN TWO PRESSES (above the bottom, holding a pin).
  *               PRESS 1 presses the pin
  *               DOWN onto the stack with the claw still SHUT at L2_SCORE_SPEED_PCT, watches the
@@ -109,8 +111,7 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *                 R_LIFT_DOWN_PCT of the free speed, slowing to the final-approach crawl near the
  *                 bottom and SEATING on the hard stop, exactly like L2's descent. Letting go
  *                 part-way brakes and holds where it is (no old target resumes).
- *               R1'S OLD CLAMPED-MODE "lift up at R_LIFT_UP_PCT" IS GONE with the change above.
- *               Manual up is the D-pad; a measured step up is L1.
+ *               R1'S OLD CLAMPED-MODE "lift up at R_LIFT_UP_PCT" MOVED TO L1 (hold), above.
  *   D-pad Up/Down still win over both.
  *
  *   B           stow: pivot OUT, lift straight down to DOWN (0 deg) and seated, cancel the macro
@@ -322,7 +323,7 @@ void opcontrol() {
         const bool r1 = master.get_digital(pros::E_CONTROLLER_DIGITAL_R1);
         const bool r2 = master.get_digital(pros::E_CONTROLLER_DIGITAL_R2);
         const bool r1New = master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_R1);
-        const bool l1New = master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L1);
+        const bool l1 = master.get_digital(pros::E_CONTROLLER_DIGITAL_L1);  // HELD, not a new press
         const bool l2New = master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_L2);
         const bool bNew = master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B);
         // THE MODE LATCH IS R2'S ALONE NOW (2026-10-09). It used to be latched off either button,
@@ -343,19 +344,38 @@ void opcontrol() {
         // rollers. The sweep's code is still there and still works for auton's stepUp(). ---
         if (r1) in.intakeRequest = Intake::Mode::IN;
         else if (screen::rMode == screen::RMode::INTAKE && r2) in.intakeRequest = Intake::Mode::OUT;
-        in.manualLift = up || down;
+        // L1 counts as a manual lift override, like the D-pad: it is the same plain-voltage path, and
+        // the macro windows (the floor sweep, the L2 outtake) must let go of the intake when the
+        // driver takes the arm over.
+        in.manualLift = up || down || l1;
         in.liftButtonMode = screen::rMode == screen::RMode::LIFT;
         in.abort = bNew;
         in.scorePressed = l2New;
 
+        // L1 HELD = LIFT UP, steady and fast, for as long as it is held (the driver, 2026-10-09: "l1
+        // hold moves the arm up like our old r1 did when we had clamp active ... holds it after
+        // release"). THIS IS THE OLD CLAMPED-MODE R1-UP, MOVED TO L1 AND 10% QUICKER: the identical
+        // plain-voltage path through Lift::driverPower() that the D-pad uses, at config::L1_LIFT_UP_PCT
+        // (99%, up from R1's 90). So it cancels any target or macro on the way in -- scoring.reset()
+        // stops the state machine re-issuing a height; driverPower() itself cancels the lift's target
+        // and any homing -- and letting go BRAKE-HOLDS exactly where it is, resuming nothing. It works
+        // clamped or not, because L1 now just means "raise", and it is not clamped by lift_preset::MAX:
+        // manual voltage never was (the arm's own hard stop at the top is the limit, same as the D-pad).
+        // The D-pad still wins over it, and it wins over everything else -- including a score or the
+        // automatic intake grab, which is what a manual override is for and exactly what the old R1-up
+        // did from the same line of code.
+        const bool l1Lift = l1 && !up && !down;  // D-pad wins
+        if (l1Lift) {
+            scoring.reset();
+            lift.driverPower(config::L1_LIFT_UP_PCT / 100.0);
+        } else if (!up && !down) {
+            lift.driverPower(0.0);
+        }
         // Clamped mode, R2 ONLY: the lift's own banded descent, which seats the arm on its hard stop
         // if it is held all the way down. It is a no-op the moment the claw unclamps, because
-        // rModeFor() has already dropped the mode to INERT.
-        // R1'S "LIFT UP AT R_LIFT_UP_PCT" IS GONE (2026-10-09): R1 is the intake, always. Manual up is
-        // the D-pad, and L1 is the 20 deg step -- the driver asked for R1 to intake whatever is held.
-        if (!up && !down) lift.driverPower(0.0);
-        if (rLift && r2) scoring.reset();
-        lift.descendManual(rLift && r2);
+        // rModeFor() has already dropped the mode to INERT, and it gives way to L1 going up.
+        if (rLift && r2 && !l1Lift) scoring.reset();
+        lift.descendManual(rLift && r2 && !l1Lift);
 
         // --- Lift height presets / intake macro. Locked out while the manual override is held so a
         // tap here can never re-command the lift out from under a manual nudge. ---
@@ -364,9 +384,6 @@ void opcontrol() {
             // pin, R1 is rollers and nothing else (goToIntake() refuses a clamped claw on its own
             // account too, interlock 4; this is the same rule said out loud at the call site).
             if (r1New && !claw.isClamped()) scoring.goToIntake();
-            // L1 IS A BARE STEP UP IN DRIVER (2026-10-09) -- no ladder, no levels, no grab. The stack
-            // levels and the rung counter live on in auton (auton::stepUp(), liftTo(Level)).
-            if (l1New) scoring.stepUpPlain();
             if (l2New) scoring.score();
             if (bNew) scoring.stow();  // pivot OUT + lift to DOWN, seated
         }

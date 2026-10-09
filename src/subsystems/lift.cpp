@@ -117,6 +117,8 @@ void Lift::initState() {
     home_ = Home::IDLE;
     homeRequested_ = false;
     queuedTarget_ = false;
+    moveBoostPct_ = 0.0;
+    stepBoostRequest_ = false;
 }
 
 double Lift::getMotorPosition() const {
@@ -331,6 +333,10 @@ void Lift::setTarget(double degrees, bool precise) {
     // ...and whether it is a COARSE move (fast, overshoot allowed -- the front toggle rise).
     const bool fromCoarse = coarseRequest_;
     coarseRequest_ = false;
+    // ...and whether it is the driver's L1 step, which gets L1_STEP_SPEED_BOOST_PCT off its braking
+    // and walk-in. Consumed either way, so it cannot leak into a later move.
+    const bool fromStep = stepBoostRequest_;
+    stepBoostRequest_ = false;
     // ...and whether it is the CLAMP_GRAB_HEIGHT hop (brain: CLAMP UP). Consumed either way, so an ignored
     // or queued request can never label a later, unrelated move.
     const bool fromClampRise = clampRiseRequest_;
@@ -424,6 +430,7 @@ void Lift::setTarget(double degrees, bool precise) {
     }
 
     speedCapPct_ = 0.0;  // an ordinary move is never speed-capped; setTargetSlow() re-applies it after
+    moveBoostPct_ = fromStep ? config::L1_STEP_SPEED_BOOST_PCT : 0.0;  // ...and only the L1 step is boosted
     active_ = true;
     descendOwned_ = fromR2;
     descentFast_ = fromFast;
@@ -484,6 +491,15 @@ void Lift::setTargetFast(double degrees) {
     setTarget(degrees);
 }
 
+void Lift::setTargetStep(double degrees) {
+    stepBoostRequest_ = true;
+    setTarget(degrees);
+    // A rapid second tap RETARGETS a move already in flight (setTarget() returns early for that, which
+    // is what merges taps into one continuous rise), and that path does not reach the assignment in the
+    // fresh-move branch -- so re-assert the boost here. Harmless when the fresh branch already set it.
+    moveBoostPct_ = config::L1_STEP_SPEED_BOOST_PCT;
+}
+
 void Lift::startClampRise(double degrees) {
     clampRiseRequest_ = true;
     // PRECISE ONLY IF THE HOP IS SMALL. This used to force precise unconditionally, and the reason was
@@ -511,6 +527,8 @@ void Lift::moveTo(double degrees, int timeoutMs, bool waitUntilSettled) {
 
 void Lift::cancel() {
     ++commandSeq_;
+    moveBoostPct_ = 0.0;
+    stepBoostRequest_ = false;
     wakeMotors();
     toggleWait_ = false;
     clampRise_ = clampRiseRequest_ = false;
@@ -688,9 +706,15 @@ double Lift::speedProfile(double dist, double dir) const {
     // LIFT_STOPPED_DEG_PER_S sits above the floor so arrival still latches (see config.hpp).
     // A COARSE move brakes later and keeps a quick tail instead of the crawl: it is allowed to arrive
     // still moving and sail past (see "A COARSE move" in config.hpp).
-    const double decel = coarse_ ? config::LIFT_COARSE_DECEL_DEG_PER_S2 : config::LIFT_DECEL_DEG_PER_S2;
+    // The per-move boost (the driver's L1 step, config::L1_STEP_SPEED_BOOST_PCT) makes exactly the two
+    // slow parts of a move faster: it brakes that much harder, so full speed is held that much longer,
+    // and it walks the last degrees in that much quicker. The CRUISE CAP below is NOT boosted -- it is
+    // already the arm's free speed and a reference above that is unreachable.
+    const double boost = 1.0 + moveBoostPct_ / 100.0;
+    const double decel =
+        (coarse_ ? config::LIFT_COARSE_DECEL_DEG_PER_S2 : config::LIFT_DECEL_DEG_PER_S2) * boost;
     const double tailMin =
-        coarse_ ? config::LIFT_COARSE_MIN_DEG_PER_S : config::LIFT_APPROACH_MIN_DEG_PER_S;
+        (coarse_ ? config::LIFT_COARSE_MIN_DEG_PER_S : config::LIFT_APPROACH_MIN_DEG_PER_S) * boost;
     double cap = config::LIFT_FREE_SPEED_DEG_PER_S *
                  (dir >= 0.0 ? config::LIFT_UP_SPEED_PCT : config::LIFT_DOWN_SPEED_PCT) / 100.0;
     // A PER-MOVE CEILING, for the moves that have to be deliberately slow -- the intake descent to
@@ -701,8 +725,8 @@ double Lift::speedProfile(double dist, double dir) const {
     }
     const double curve =
         std::sqrt(2.0 * decel * std::max(dist - config::LIFT_APPROACH_ZONE_DEG, 0.0));
-    const double close = std::clamp(config::LIFT_APPROACH_KP_PER_S * dist, tailMin,
-                                    std::max(config::LIFT_APPROACH_DEG_PER_S, tailMin));
+    const double close = std::clamp(config::LIFT_APPROACH_KP_PER_S * boost * dist, tailMin,
+                                    std::max(config::LIFT_APPROACH_DEG_PER_S * boost, tailMin));
     return std::min(cap, std::max(curve, close));
 }
 

@@ -368,6 +368,14 @@ class Lift {
      * other way, including the guards, the hold and PARK.
      */
     void setTargetFast(double degrees);
+    /**
+     * THE DRIVER'S L1 STEP. An ordinary non-precise move to `degrees`, with one difference: the
+     * braking curve and the final walk-in both run config::L1_STEP_SPEED_BOOST_PCT faster, so the step
+     * spends longer at full speed and crawls in quicker. The CRUISE is untouched because it cannot be
+     * touched -- it is already at LIFT_FREE_SPEED_DEG_PER_S (see the constant's note). The boost is a
+     * one-shot: it applies to this move only and the next command clears it.
+     */
+    void setTargetStep(double degrees);
 
     /**
      * Auton-friendly wrapper: command a height, optionally blocking the CALLING task (not the lift
@@ -819,6 +827,8 @@ class Lift {
     bool faulted_ = false;
     // --- the startup unwrap and the sensor-failure guard (see config.hpp "STARTUP UNWRAP") ---
     double speedCapPct_ = 0.0;             // per-move speed ceiling, % of free speed; 0 = none
+    double moveBoostPct_ = 0.0;            // per-move braking/walk-in boost, % (the driver's L1 step)
+    bool stepBoostRequest_ = false;        // one-shot: the next setTarget() is that step
     mutable double lastGoodPosition_ = 0.0;  // held and returned while the sensor is not answering
     mutable bool sensorBad_ = false;         // PROS_ERR seen; mutable because the read path is const
 

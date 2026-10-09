@@ -155,11 +155,31 @@ class Scoring {
      *  STAY where the push ended (the lift holds there) instead of rising to a level. The jaws are
      *  closed by this class, as always; the push is Lift::startGrab(). */
     void grabHere();
-    /** L1: first tap clamps and lifts to level 1; every tap after goes up one level, staying at
-     *  STACK_LEVEL_COUNT (the top) once reached. If the claw is already CLAMPED (L2 clamped it at the
-     *  bottom, see score() below), the first tap skips CLAW_CLOSE_TIME_MS's wait and rises straight
-     *  away, since the jaws have nothing left to close. */
+    /** AUTON'S L1 (auton::stepUp()): the stack-level ladder. First tap clamps and lifts a rung; every
+     *  tap after goes up one more, stopping at L1_STEP_CEILING_DEG. If the claw is already CLAMPED (L2
+     *  clamped it at the bottom, see score() below), the first tap skips CLAW_CLOSE_TIME_MS's wait and
+     *  rises straight away, since the jaws have nothing left to close.
+     *
+     *  THE DRIVER DOES NOT USE THIS ANY MORE -- see stepUpPlain(). It is auton's alone, which is why
+     *  the ladder, the rung counter (getLevel()) and the CLAMPING/STACKING states are all still here. */
     void stepUp();
+    /**
+     * THE DRIVER'S L1 (2026-10-09): A PLAIN STEP UP, NOTHING ELSE. The driver: "i dont like our level
+     * system during driver (keep in auto), just make l1 do our r1 step up, but it always does step up".
+     *
+     * So this is L1_STEP_DEG above where the arm is heading, every press, with no ladder, no rung
+     * number, no stack levels, no claw, no pivot and no grab-at-the-handoff. It takes the macro out of
+     * the way first (reset(), which moves nothing) so nothing re-issues a height over the top of it,
+     * then commands the step through Lift::setTargetStep() -- the one move that gets
+     * L1_STEP_SPEED_BOOST_PCT off its braking and walk-in.
+     *
+     * IT CAN ONLY EVER GO UP: the goal is floored at the arm's own position, so a stale low target can
+     * never turn a press into a descent, and capped at lift_preset::MAX.
+     *
+     * IGNORED mid-sequence -- a score, the jaws closing, a grab push, and the automatic intake grab
+     * (GRAB_SETTLE / GRAB_PUSH / GRAB_RISE), which still runs to its own end at level 1.
+     */
+    void stepUpPlain();
     /** L2: at the bottom (seated, or within LIFT_BOTTOM_GOAL_DEG of it) and not mid-move -- the CLAMP
      *  TRIGGER: toggles the claw in place through the same logical API A / toggleClaw() uses, and
      *  touches neither the lift nor the pivot. Above the bottom, holding a pin -> THE SENSING SCORER
@@ -313,6 +333,7 @@ class Scoring {
      *  2026-10-07 -- at the ceiling it stays there instead of reversing. See "L1's LADDER" in
      *  config.hpp. */
     void advanceStep();
+
     /** Put the ladder back at the bottom. Only the rung NUMBER is state; advanceStep() takes its
      *  height from the lift itself, so this does not pin where the next press goes. */
     void resetStep();

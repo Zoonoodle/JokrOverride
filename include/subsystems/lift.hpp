@@ -531,6 +531,23 @@ class Lift {
      *  D-pad / manual override, a route's liftTo(), R2, B -- all of which go through setTarget() or
      *  cancel(). enterSeat() ends it on arrival. */
     bool isScoreReturn() const { return scoreReturn_; }
+    /**
+     * FORCE EVERY TRIP TO THE BOTTOM, not just the L2 score's run home. Pushed every tick by
+     * periodic::tick() from Inputs::auton, so it is a MIRROR of "are we in autonomous", never a latch
+     * (the same pattern as the autoclamp's range and enable). The driver, 2026-10-09: "ensure during
+     * auton our lift down fast or whatever when we are picking stuff off the floor (when autoclamp is
+     * on in auto) it is forcing its way down like we do in driver with l2, forces hard to get low."
+     *
+     * While it is on, every descent STARTED by setTarget() -- auton::liftDown(), liftDownFast(),
+     * liftTo(0), liftToMatchload(), stow(), scoreReturn() -- runs the same constant-voltage
+     * L2_RUN_DOWN_MV push as endScoreClear()'s run home instead of the banded DESCEND + FINAL. It is
+     * read when the descent STARTS, so a driver descent is never affected.
+     */
+    void setForcedDescent(bool on) { forcedDescent_ = on; }
+    /** True while the arm is being FORCED down at L2_RUN_DOWN_MV (either the L2 run home or an auton
+     *  descent). Scoring uses it to let the autoclamp's grab-height move take the arm over mid-descent:
+     *  the whole point of an auton floor pickup is that a grab interrupts the trip down. */
+    bool isForcedDown() const { return runDownHard_; }
     /** THE LIFT EVENT LINE. The last thing worth knowing that happened to the lift, as a short string
      *  with the height it happened at: every score phase transition ("PRESS @67.7", "REL(lag) @31.2",
      *  "RUN DOWN @31.2", "SEAT @0.3"), and every NEW COMMANDED TARGET ("TGT 67.7 <-37.5"), so a move
@@ -753,6 +770,7 @@ class Lift {
     bool runDownHard_ = false;           // THIS descent is the post-score run home: one constant
                                           // L2_RUN_DOWN_MV, no bands, no FINAL -- see updateDescent()
     std::uint32_t runDownStillSince_ = 0; // when the hard run-down first saw the arm stopped near 0
+    bool forcedDescent_ = false;         // every descent forces itself down (auton) -- see setForcedDescent()
     char note_[32] = "";                 // the lift event line, see lastNote()
     std::uint32_t commandSeq_ = 0;       // see commandSeq()
     double pressRef_ = 0.0;              // ramped press/unstick speed reference, unsigned deg/s

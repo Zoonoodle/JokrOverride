@@ -316,6 +316,11 @@ void Lift::setTarget(double degrees, bool precise) {
     // newer has been asked for, and "the driver re-asked for the height it is already going to" is
     // still newer than a grab 200 ms ago. See commandSeq().
     ++commandSeq_;
+    // A NEW COMMAND NEVER INHERITS THE LAST DESCENT'S FORCING. runDownHard_ is re-decided below (from
+    // forcedDescent_) for a descent, and must be OFF for anything else -- including the clamp-grab
+    // move that takes an auton floor descent over, which must not leave the motors shoving down.
+    runDownHard_ = false;
+    runDownStillSince_ = 0;
     // One-shot: did this call come from descendManual() (R2 in clamped mode)? Consumed either way, so
     // a queued or ignored request can't leak into a later, unrelated move.
     const bool fromR2 = descendRequest_;
@@ -458,6 +463,15 @@ void Lift::setTarget(double degrees, bool precise) {
                            : descentFast_ ? config::LIFT_FAST_DESCENT_MID_PCT
                                           : config::LIFT_DESCENT_MID_PCT;
         enterDescend(now, position, top, mid);
+        // IN AUTON, FORCE IT (see setForcedDescent()). Same mechanism as the L2 run home -- one
+        // constant L2_RUN_DOWN_MV, no slow zone, no FINAL -- but WITHOUT the score's two latches: the
+        // autoclamp is left armed and the descent stays interruptible, because the point of an auton
+        // descent is picking something up off the floor on the way down.
+        if (forcedDescent_) {
+            runDownHard_ = true;
+            runDownStillSince_ = 0;
+            note("AUTO DOWN", position);
+        }
         return;
     }
     // Already inside this goal's band: arrived, no motion at all (so a level re-tap never twitches).

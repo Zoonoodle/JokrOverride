@@ -182,6 +182,12 @@ void tick(const Inputs& in) {
     // Scoring needs the same fact, for the clamp hop's per-mode delay (0 in auton, 200 ms in driver --
     // see CLAMP_RISE_DELAY_AUTON_MS). From here rather than is_autonomous() so a brain-menu run counts.
     robot::scoring.setAutonMode(in.auton);
+    // ...AND WHETHER A TRIP TO THE BOTTOM HAS TO FORCE ITSELF DOWN. In auton every descent uses the
+    // same constant-voltage push as the L2 score's run home (the driver, 2026-10-09: "ensure during
+    // auton our lift down fast or whatever ... it is forcing its way down like we do in driver with
+    // l2"). Passed every tick like everything else here, so it is a mirror of the mode and can never
+    // be left latched on into driver control. See Lift::setForcedDescent().
+    robot::lift.setForcedDescent(in.auton);
 
     // ...AND THE ENABLE ITSELF, every tick, for the same reason all three above are passed every tick.
     // THE BUG THIS FIXES (the driver, 2026-10-08): "when I start driver (raw, without doing auton),

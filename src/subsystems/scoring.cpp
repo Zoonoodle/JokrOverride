@@ -226,7 +226,17 @@ void Scoring::serviceClampHop() {
     // Re-check what the delay may have changed. The STATE cannot have changed without enter() clearing
     // this, so only the lift's own business needs re-testing.
     if (lift_.isGrabbing() || lift_.isScoring() || lift_.isScoreCycle() || lift_.isScoredAbove()) return;
-    if (lift_.hasActiveTarget() && !lift_.isSettled() && !lift_.isBlocked() && !lift_.isFaulted()) return;
+    // A COMMANDED MOVE STILL IN FLIGHT WINS -- with one deliberate exception: an auton descent that is
+    // FORCING ITSELF DOWN at L2_RUN_DOWN_MV. That descent exists to put the claw on the floor with the
+    // autoclamp armed, so a grab part way down is not an interruption, it is the point: the hop takes
+    // over, the arm stops shoving down (setTarget() clears runDownHard_) and lifts what it caught to
+    // CLAMP_GRAB_HEIGHT. The L2 score's run home is NOT this case -- it keeps its own refusal, because
+    // there the jaws have just put a pin on a stack and the arm must finish going home.
+    const bool interruptibleDescent = lift_.isForcedDown() && !lift_.isScoreReturn();
+    if (!interruptibleDescent && lift_.hasActiveTarget() && !lift_.isSettled() && !lift_.isBlocked() &&
+        !lift_.isFaulted()) {
+        return;
+    }
     // ANYTHING NEWER WINS. enter() and reset() cancel a pending hop, which covers every input that
     // goes through them -- but not all of them do: stepUp()'s CLAMPING/STACKING case only advances the
     // ladder, and auton can command the lift without touching this class at all. So the hop also

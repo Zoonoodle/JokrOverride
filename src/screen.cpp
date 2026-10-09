@@ -232,7 +232,8 @@ void draw() {
     // REL(32) = the L2_AUTO_RELEASE_DEG travel rule, REL(floor) = too low for that), then RUN DOWN
     // (the uncancellable, constant-voltage trip to 0 -- there is no FINAL on this path any more),
     // CLAMP ARMED (L2_AUTOCLAMP_LOCKOUT_MS is up, the autoclamp is live again and the arm is still on
-    // its way down), then SEAT. If the arm ever stops above 0 after an L2 again, THIS
+    // its way down), then SEAT. In AUTON every trip to the bottom forces itself down the same way and
+    // says AUTO DOWN instead of RUN DOWN (with the autoclamp left armed, so HOP ... can follow it). If the arm ever stops above 0 after an L2 again, THIS
     // LINE SAYS WHY, with the height: RETARGET (something commanded a new height), CANCEL (the D-pad,
     // R2 or a route let go), REFUSE clamp (the autoclamp's 37.5 hop was blocked -- the arm kept
     // going), BLOCKED (physically caught, holding rather than grinding), FAULT down (the runaway

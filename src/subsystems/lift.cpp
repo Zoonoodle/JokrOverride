@@ -101,7 +101,8 @@ void Lift::initState() {
     idleStillSince_ = 0;
     score_ = returnFast_ = scoreStuck_ = releasedByTravel_ = releasedByFloor_ = false;
     scoredAbove_ = scoreCycle_ = false;
-    scoreReturn_ = pressFast_ = false;
+    scoreReturn_ = pressFast_ = runDownHard_ = false;
+    runDownStillSince_ = 0;
     scoreNote_[0] = '\0';
     grab_ = gripWanted_ = gripAcked_ = false;
     clawReleaseWanted_ = clawReleased_ = false;
@@ -346,6 +347,8 @@ void Lift::setTarget(double degrees, bool precise) {
             return;
         }
         scoreReturn_ = false;
+        runDownHard_ = false;  // ...including when the dedup guard below turns this into a no-op:
+                               // the descent then carries on as the ordinary banded one
         noteScore("RETARGET", getPosition());
     }
 
@@ -504,6 +507,7 @@ void Lift::cancel() {
     // liftStop(), or the sensor failing -- so it is allowed to end the post-score run home. It is the
     // one thing that is, besides a new height. Say so on the brain: the arm stopping above 0 after a
     // score is exactly what this diagnostic exists for.
+    runDownHard_ = false;
     if (scoreReturn_) {
         scoreReturn_ = false;
         noteScore("CANCEL", getPosition());
@@ -775,6 +779,7 @@ void Lift::enterSeat(std::uint32_t now, bool shortSeat) {
     // could re-grab: the two-press score cycle (and its autoclamp inhibit) is over.
     scoreCycle_ = false;
     // ...and so is the uncancellable post-score run home: the arm is where it was promised to end up.
+    runDownHard_ = false;
     if (scoreReturn_) {
         scoreReturn_ = false;
         noteScore(shortSeat ? "SEAT(short)" : "SEAT", getPosition());
@@ -937,6 +942,7 @@ void Lift::startScore() {
     scoredAbove_ = false;
     scoreCycle_ = true;  // ...until press 2 seats the arm: the autoclamp is inhibited throughout
     scoreReturn_ = false;  // not yet: the run home is latched by endScoreClear(), after the release
+    runDownHard_ = false;
     pressFast_ = false;    // the press always STARTS on the crush cap and earns the free cap by moving
     grab_ = gripWanted_ = gripAcked_ = false;
     releasedByTravel_ = false;
@@ -1120,8 +1126,14 @@ void Lift::endScoreClear(std::uint32_t now, double position) {
     // "It needs to go all the way down to zero no matter where it is" is a guarantee, so it is a
     // latch, not a hope: only an explicit new command (setTarget/cancel) may end it early.
     scoreReturn_ = true;
-    // Both fast bands at the SCORING speed, so the run to the bottom is the continuation of the press
-    // rather than a separate, slower move. The slow zone, FINAL and SEAT are untouched.
+    // ...AND FORCE IT DOWN, CONSTANT, ALL THE WAY (the driver, 2026-10-09: "it needs to seriously
+    // force itself down, constant, until its 0 to like -1 around"). runDownHard_ takes updateDescent()
+    // off the banded velocity loop entirely for this one path: no slow zone at 45 deg/s, no FINAL
+    // creeping in at 20 deg/s, just L2_RUN_DOWN_MV until the arm is at the bottom and then SEAT. The
+    // bands below are still set, because they are what the descent falls back onto if a retarget
+    // clears runDownHard_ half way down.
+    runDownHard_ = true;
+    runDownStillSince_ = 0;
     enterDescend(now, position, config::L2_SCORE_SPEED_PCT, config::L2_SCORE_SPEED_PCT);
     returnFast_ = true;  // enterDescend() doesn't touch it, but keep it next to the flag it belongs to
     noteScore("RUN DOWN", position);
@@ -1353,6 +1365,21 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
 void Lift::updateDescent(std::uint32_t now, double dt, double position) {
     lastError_ = goal_ - position;
 
+    // THE AUTOCLAMP COMES BACK ON PART WAY DOWN, not at the bottom (the driver, 2026-10-09: "only have
+    // it delay for like 1000ms max where auto clamp is not engaged while l2 goes down after we
+    // unclamp, then autoclamp is re engaged"). scoreCycle_ is what periodic::tick() turns into
+    // Claw::setInhibit(), so dropping it here IS re-arming the autoclamp -- mid-descent, with the arm
+    // still running home. The window is measured from the moment the jaws were told to open, so it is
+    // a second of clearance past the pin just placed rather than a second of the descent; enterSeat()
+    // ends it too, for a drop short enough to finish inside the window.
+    // The run home itself is NOT given up here: scoreReturn_ stays latched, so a cup grabbed on the way
+    // down cannot retarget the arm to CLAMP_GRAB_HEIGHT -- it is carried to 0 and seated with it held.
+    if (scoreReturn_ && scoreCycle_ && clawReleasedAt_ != 0 &&
+        now - clawReleasedAt_ >= static_cast<std::uint32_t>(config::L2_AUTOCLAMP_LOCKOUT_MS)) {
+        scoreCycle_ = false;
+        noteScore("CLAMP ARMED", position);
+    }
+
     // --- phase transitions first, so the output below always matches the phase ---
     if ((phase_ == Phase::SEAT || phase_ == Phase::REST) &&
         position > config::LIFT_FINAL_START_DEG + config::LIFT_SEAT_UNSEAT_DEG) {
@@ -1376,6 +1403,7 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
         // within ~60 ms.
         if (position > descentStart_ + config::LIFT_FAULT_DEG) {
             faulted_ = true;
+            runDownHard_ = false;
             if (scoreReturn_) {
                 scoreReturn_ = false;
                 noteScore("FAULT down", position);
@@ -1387,7 +1415,37 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
             return;
         }
     }
-    if (phase_ == Phase::DESCEND) {
+    if (phase_ == Phase::DESCEND && runDownHard_) {
+        // THE HARD RUN HOME. One voltage, no bands, no FINAL -- and three ways to be finished, so it
+        // can never grind at L2_RUN_DOWN_MV forever whatever the frame reads down there (see
+        // L2_RUN_DOWN_* in config.hpp). 1: the band the driver asked for. 2: stopped near 0 long
+        // enough, which is what fires if the stop cannot physically reach -1. 3: the time backstop.
+        const bool inBand = position <= config::L2_RUN_DOWN_TARGET_DEG;
+        const bool nearZero = position <= config::L2_RUN_DOWN_ZERO_DEG;
+        if (nearZero && std::fabs(velocity_) <= config::L2_RUN_DOWN_STILL_DEG_PER_S) {
+            if (runDownStillSince_ == 0) runDownStillSince_ = now;
+        } else {
+            runDownStillSince_ = 0;
+        }
+        const bool stoppedLow =
+            runDownStillSince_ != 0 &&
+            now - runDownStillSince_ >= static_cast<std::uint32_t>(config::L2_RUN_DOWN_STILL_MS);
+        const bool capped = now - phaseStart_ >= static_cast<std::uint32_t>(config::L2_RUN_DOWN_MAX_MS);
+        if (inBand || stoppedLow || capped) {
+            // SEAT(short) unless it really got to the bottom, so the brain says which happened.
+            const bool shortSeat = !inBand && position > config::LIFT_SEAT_ZERO_DEG;
+            runDownHard_ = false;
+            enterSeat(now, shortSeat);
+        } else if (!nearZero && stalled(now, position)) {
+            // CAUGHT ON SOMETHING WELL ABOVE THE BOTTOM -- the ordinary stall guard, kept exactly as
+            // it is for every other descent, and deliberately not applied near 0 where "stopped" is
+            // the goal rather than a jam. Hold where it stopped; never force into it.
+            blocked_ = true;
+            runDownHard_ = false;
+            noteScore("BLOCKED", position);
+            enterHold(now, position);
+        }
+    } else if (phase_ == Phase::DESCEND) {
         if (position <= config::LIFT_FINAL_START_DEG) {
             // Close enough that the arm MIGHT be on its hard stop -- but it might also be stalled a
             // few degrees short (a cup in the intake, six-bar/chain friction). Hand over to FINAL, which
@@ -1505,6 +1563,18 @@ void Lift::updateDescent(std::uint32_t now, double dt, double position) {
         lastVRef_ = -descentRef_;  // signed: down is negative
         const double mv = runVelocityLoop(lastVRef_, dt, config::LIFT_VEL_MAX_MV, config::LIFT_FINAL_MAX_MV);
         trace(now, 'Z', position, mv, true);
+        return;
+    }
+
+    // THE HARD RUN HOME's output: the constant the driver asked for, open loop, straight to the
+    // motors. No speed reference, no integral, nothing that can ease off as the arm gets near the
+    // bottom -- "seriously force itself down, constant". The phase-transition block above is what ends
+    // it; this only ever pushes.
+    if (runDownHard_) {
+        motors_.move_voltage(static_cast<int>(config::L2_RUN_DOWN_MV));
+        lastOutput_ = config::L2_RUN_DOWN_MV;
+        lastVRef_ = 0.0;
+        trace(now, 'R', position, lastOutput_, true);
         return;
     }
 

@@ -742,6 +742,9 @@ class Lift {
                                           // cancelled by anything automatic -- see isScoreReturn()
     bool pressFast_ = false;             // the press currently has L2_PRESS_FREE_MAX_MV (hysteretic,
                                           // on the measured descent speed)
+    bool runDownHard_ = false;           // THIS descent is the post-score run home: one constant
+                                          // L2_RUN_DOWN_MV, no bands, no FINAL -- see updateDescent()
+    std::uint32_t runDownStillSince_ = 0; // when the hard run-down first saw the arm stopped near 0
     char scoreNote_[32] = "";            // the score diagnostic, see scoreNote()
     double pressRef_ = 0.0;              // ramped press/unstick speed reference, unsigned deg/s
     double unstickGoal_ = 0.0;           // height the unstick hop is climbing to

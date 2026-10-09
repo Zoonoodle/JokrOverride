@@ -161,6 +161,13 @@ void tick(const Inputs& in) {
     // exactly the window the driver asked to have the autoclamp live in -- clearing the lift's own flag
     // alone would have changed nothing. It is still the right signal for the auto-outtake window above,
     // which DOES want to run through that descent, so the two uses have been split rather than merged.
+    // THE ONE-PRESS SCORE'S OWN WINDOW (2026-10-09). isScoring() covers the press itself; the descent
+    // after it is bounded by isScoreCycle(), which Lift::updateDescent() now drops
+    // config::L2_AUTOCLAMP_LOCKOUT_MS (1000 ms) after the jaws were told to open, or at the seat --
+    // whichever comes first. So the inhibit is "a second of clearance past the pin just placed", not
+    // the whole trip home, and on a long drop the autoclamp is live again while the arm is still
+    // descending. The run home cannot be retargeted by a grab in that window -- see the note on
+    // L2_AUTOCLAMP_LOCKOUT_MS -- so re-arming early costs the descent nothing.
     robot::claw.setInhibit(robot::lift.isScoring() || robot::lift.isScoreCycle());
 
     // AT THE R1 INTAKE HANDOFF the autoclamp fires on the FIRST in-range reading rather than after the

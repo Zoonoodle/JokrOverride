@@ -1139,7 +1139,25 @@ inline constexpr bool LIFT_HOME_ON_ENABLE = true;            // BACK ON, the dri
 // comfortably inside. It also shortens the trip, which matters because LIFT_HOME_TIMEOUT_MS below is
 // what decides whether a home from high up finishes at all -- a timed-out home writes NO zero and
 // leaves every height wrong, so speed here buys reliability, not just time.
-inline constexpr float LIFT_HOME_MV = -3500.0f;              // TUNE: downward drive while homing (was -2000)
+// RAISED -3500 -> -6000 (the driver, 2026-10-09: "same with drive start, needs more force/move speed
+// down at start when reset position"). Open loop, so the arm's speed tracks the voltage: ~44 deg/s at
+// 3500, ~75 deg/s at 6000, which also pulls the worst-case full-travel home (174.5 deg) from 4.0 s --
+// right on LIFT_HOME_TIMEOUT_MS -- down to 2.3 s, so a long home now has real margin instead of
+// occasionally timing out and leaving the frame RAW.
+// NOT FULL VOLTAGE, deliberately, and this is the one place that difference matters: homing ENDS by
+// stalling against the frame and then holding there for the whole LIFT_HOME_STILL_MS window before it
+// writes the zero. At 6000 that is half the available torque into the hard stop for 300 ms, every
+// program start; at 12000 it would be all of it, four times the heating, into the part the whole
+// coordinate frame is measured from.
+// THE STALL DETECTOR STILL WORKS AT THIS SPEED, and it is worth knowing why: it asks whether the RAW
+// SENSOR has moved more than LIFT_HOME_STILL_DEG (2.5 sensor deg = 0.625 arm deg) since the window
+// opened. At 75 deg/s the sensor moves 3 deg every 10 ms tick, so the window re-opens on EVERY tick
+// while the arm is moving -- it is further from "looks still" at this voltage than it was at 3500, not
+// closer. And it cannot zero on a rebound: the zero is only written after 300 ms of stillness while
+// the motors are still being driven down at this voltage, i.e. with the arm pressed onto the stop.
+//   The arm bangs into the frame too hard at startup: lower it (-5000).
+//   Homing still reports HOME FAIL / takes too long: raise it, and check LIFT_HOME_TIMEOUT_MS.
+inline constexpr float LIFT_HOME_MV = -6000.0f;              // TUNE: downward drive while homing (was -3500, -2000)
 
 // Don't start looking for "stopped" until the arm has been driving this long, so a sticky start isn't
 // mistaken for the bottom.
@@ -1603,10 +1621,66 @@ inline constexpr int CLAW_OPEN_TIME_MS = 200;                // TUNE: never meas
 // the arm cannot be driven faster than its own free speed -- a reference above 100 is unreachable and
 // only winds up the velocity integral (the same reason LIFT_FAST_DESCENT_* were pulled back to
 // 95/100). So the asked-for 1.5x is not available here: 135 -> 150 deg/s is 1.11x.
-// THIS CONSTANT ONLY GOVERNS THE RUN TO THE BOTTOM AFTER THE RELEASE, which uses full authority. The
-// press-down BEFORE the release is limited by L2_PRESS_MAX_MV instead, and that is where the 1.5x
-// actually comes from -- see the note there.
+// THIS CONSTANT NOW ONLY GOVERNS THE PRESS's speed reference. The run to the bottom after the release
+// is no longer speed-controlled at all -- see L2_RUN_DOWN_MV below -- so these bands are only the
+// fallback the descent falls back ONTO if something cancels the hard run-down half way (a retarget).
+// The press-down BEFORE the release is limited by L2_PRESS_MAX_MV / L2_PRESS_FREE_MAX_MV.
 inline constexpr double L2_SCORE_SPEED_PCT = 100.0;          // TUNE: 150 deg/s, the free-speed ceiling (was 90)
+// ===========================================================================
+// THE RUN HOME AFTER AN L2 RELEASE — one constant voltage, no bands, no easing
+// ===========================================================================
+// The driver, 2026-10-09: "l2 when its going down, it needs to seriously force itself down, constant,
+// until its 0 to like -1 around". So on THIS PATH ONLY -- the post-release trip home that
+// Lift::endScoreClear() starts -- the banded velocity loop is gone. No LIFT_DESCENT_SLOW_ZONE_DEG at
+// 45 deg/s, no FINAL creeping in at 20 deg/s: one open-loop voltage from the release height until the
+// arm is at the bottom, then straight into SEAT's continuous LIFT_DOWN_PUSH_MV push.
+//
+// NOTHING ELSE CHANGES. A D-pad/preset DOWN, auton liftTo(0)/liftDownFast(), R2's descent and B all
+// still run the banded DESCEND -> FINAL -> SEAT, because those are moves to a HEIGHT that happens to
+// be the bottom, and they arrive with the arm's own momentum controlled. This one is a "get out of the
+// way, now" after a score, and it is the only one the driver asked to force.
+//
+// WHY -10000 AND NOT THE FULL -12000. Open loop, the arm's terminal speed is proportional to the
+// voltage: -10000 is ~125 deg/s against ~150 at full. The last 2000 mV buys ~12% more speed and
+// costs ~25% more impact energy at the hard stop and ~44% more heat if it ever stalls short of it
+// (power goes as the square of the voltage). 10000 is 83% of the authority the loop has anywhere else
+// and it never eases off, which is the part the driver actually asked for.
+//   The arm bangs the hard stop too hard / the frame flexes: LOWER this (-8000, -7000).
+//   It still feels like it is holding back: raise it to -12000.
+inline constexpr float L2_RUN_DOWN_MV = -10000.0f;           // TUNE: magnitude is the push, sign is DOWN
+// ARRIVED, by any of three tests -- the point is that it can NEVER sit at the bottom grinding at
+// L2_RUN_DOWN_MV forever, whatever the frame actually reads down there:
+//   1. the band the driver asked for: position <= L2_RUN_DOWN_TARGET_DEG. Negative on purpose -- the
+//      hard stop is 0 by homing's definition and the arm compresses a little past it under this much
+//      push, so "0 to like -1" is the real resting band.
+//   2. position <= L2_RUN_DOWN_ZERO_DEG and genuinely stopped for L2_RUN_DOWN_STILL_MS. This is the
+//      test that fires when the stop physically cannot reach -1 (sensor drift, a home that zeroed a
+//      hair high). It hands over as SEAT(short) if it never made the band, so the brain says so.
+//   3. L2_RUN_DOWN_MAX_MS, the backstop, also SEAT(short). Sized for the longest trip there is
+//      (level 5, 174.5 deg, ~1.4 s at this voltage) with margin.
+// A REAL JAM higher up is still the lift's ordinary BLOCKED: the stall guard (LIFT_STALL_DEG /
+// LIFT_STALL_MS) only applies ABOVE L2_RUN_DOWN_ZERO_DEG, so "stopped at the bottom" and "caught on
+// something" can never be confused, and a jammed arm holds where it stopped instead of being forced.
+inline constexpr double L2_RUN_DOWN_TARGET_DEG = lift_preset::DOWN - 1.0;  // TUNE: the band, -1.0
+inline constexpr double L2_RUN_DOWN_ZERO_DEG = lift_preset::DOWN + 2.0;    // TUNE: "around 0", 2.0
+inline constexpr double L2_RUN_DOWN_STILL_DEG_PER_S = 8.0;   // TUNE: arm deg/s that counts as stopped
+inline constexpr int L2_RUN_DOWN_STILL_MS = 120;             // TUNE: ...for this long
+inline constexpr int L2_RUN_DOWN_MAX_MS = 2500;              // TUNE: backstop, hands over as SEAT(short)
+// HOW LONG THE AUTOCLAMP STAYS LOCKED OUT AFTER THE JAWS OPEN. The driver, 2026-10-09: "only have it
+// delay for like 1000ms max where auto clamp is not engaged while l2 goes down after we unclamp, then
+// autoclamp is re engaged". Measured from the moment the claw was told to open (Lift::clawReleasedAt_),
+// NOT from the start of the descent, so it is exactly "a second of clearance past the pin I just
+// placed" however long the rest of the trip takes. The lockout ends at whichever comes FIRST: this
+// window, or the arm seating at the bottom -- so on a long drop from level 5 the autoclamp is live
+// again while the arm is still running home, which is what was asked for.
+// WHAT CANNOT HAPPEN WHEN IT RE-ARMS MID-DESCENT: the arm being retargeted. A grab outside the intake
+// normally sends the lift to the ABSOLUTE CLAMP_GRAB_HEIGHT (37.5); during the run home that is
+// refused three times over -- Scoring::handleClampEvent()'s RELEASING case, serviceClampHop()'s
+// "a lift move is in flight" test, and Lift::setTarget()'s own scoreReturn_ refusal (brain: REFUSE
+// clamp). So a cup grabbed on the way down is simply carried to 0 and seated with it held.
+//   The pin just placed gets re-grabbed on the way past it: RAISE this (1400, 1800).
+//   A cup sitting at the bottom is not picked up soon enough: lower it (700).
+inline constexpr int L2_AUTOCLAMP_LOCKOUT_MS = 1000;         // TUNE: driver 2026-10-09
 // Most the loop may push DOWNWARD (magnitude, mV) while pressing. This is the crush limit: the
 // velocity loop has 12000 mV of authority and an integral that winds up, so without a cap it would
 // keep increasing the push until it moved -- i.e. flatten the stack. 7000 mV through the 4:1 is about

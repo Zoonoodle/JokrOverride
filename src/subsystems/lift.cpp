@@ -331,6 +331,10 @@ void Lift::setTarget(double degrees, bool precise) {
     // ...and whether it is a COARSE move (fast, overshoot allowed -- the front toggle rise).
     const bool fromCoarse = coarseRequest_;
     coarseRequest_ = false;
+    // ...and whether this one descent has been asked to FORCE itself down (descendForced()) even
+    // though forcedDescent_ -- the auton-wide mode -- is off.
+    const bool fromForceDown = forceDownRequest_;
+    forceDownRequest_ = false;
     // ...and whether it is the CLAMP_GRAB_HEIGHT hop (brain: CLAMP UP). Consumed either way, so an ignored
     // or queued request can never label a later, unrelated move.
     const bool fromClampRise = clampRiseRequest_;
@@ -467,10 +471,10 @@ void Lift::setTarget(double degrees, bool precise) {
         // constant L2_RUN_DOWN_MV, no slow zone, no FINAL -- but WITHOUT the score's two latches: the
         // autoclamp is left armed and the descent stays interruptible, because the point of an auton
         // descent is picking something up off the floor on the way down.
-        if (forcedDescent_) {
+        if (forcedDescent_ || fromForceDown) {
             runDownHard_ = true;
             runDownStillSince_ = 0;
-            note("AUTO DOWN", position);
+            note(fromForceDown ? "FORCE DOWN" : "AUTO DOWN", position);
         }
         return;
     }
@@ -638,6 +642,11 @@ void Lift::setTargetSlow(double degrees, double maxPct) {
     // is simply re-asserted, which is what a re-command of the same slow goal should do.
     setTarget(degrees, true);
     speedCapPct_ = maxPct;
+}
+
+void Lift::descendForced() {
+    forceDownRequest_ = true;
+    setTarget(config::lift_preset::DOWN);
 }
 
 void Lift::descendManual(bool held) {
@@ -809,8 +818,11 @@ void Lift::enterSeat(std::uint32_t now, bool shortSeat) {
     // could re-grab: the two-press score cycle (and its autoclamp inhibit) is over.
     scoreCycle_ = false;
     // ...and so is the uncancellable post-score run home: the arm is where it was promised to end up.
+    // Anything that FORCED its way down here says so when it arrives -- the L2 run home, an auton
+    // descent, L2's intake reset -- so brain line 10 always ends a forced trip with its outcome.
+    const bool wasForced = runDownHard_;
     runDownHard_ = false;
-    if (scoreReturn_) {
+    if (scoreReturn_ || wasForced) {
         scoreReturn_ = false;
         note(shortSeat ? "SEAT(short)" : "SEAT", getPosition());
     }

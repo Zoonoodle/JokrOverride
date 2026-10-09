@@ -272,6 +272,23 @@ inline constexpr double GRAB_PUSH_DEPTH_DEG = lift_preset::INTAKE - 2.8;
 inline constexpr int GRAB_PUSH_TIMEOUT_MS = 1200;            // TUNE: backstop for the push down
 inline constexpr double PIVOT_RELEASE_UP_DEG = lift_preset::INTAKE + 5.2;
 inline constexpr int GRAB_RISE_TIMEOUT_MS = 4000;            // TUNE: backstop for the rise to level 1
+// ===========================================================================
+// L2 DURING THE INTAKE SEQUENCE — "reset back to our bottom spot with pivot"
+// ===========================================================================
+// The driver, 2026-10-09: "we need l2 to be a reset back to our bottom spot with pivot, so it needs to
+// do our lift up pivot out, but move down instead of level one, when we hit l2 during intake position
+// active". So L2 anywhere in the intake sequence (approach / pivot wait / descent / holding the
+// handoff) abandons it and brings the arm home, by the same two moves the automatic grab's rise uses --
+// get high enough for the pivot to retract, swing it OUT -- and then straight down to the hard stop
+// instead of up to level 1. Outside those four states L2 is unchanged: the scorer, or the claw toggle
+// at the bottom. (Before this, L2 there did nothing at all: the claw is open at the handoff, so
+// Scoring::score() fell through its "nothing held" test and returned.)
+//
+// THE HEIGHT TO RISE TO. The pivot may only retract once the arm is clear of it, which is exactly what
+// PIVOT_RELEASE_UP_DEG means in the grab rise -- so this is that height plus a margin, not a number of
+// its own. It is deliberately the SMALLEST rise that works: the arm is coming straight back down.
+inline constexpr double INTAKE_RESET_CLEAR_DEG = PIVOT_RELEASE_UP_DEG + 3.0;  // TUNE: the margin
+inline constexpr int INTAKE_RESET_RISE_TIMEOUT_MS = 1500;    // TUNE: backstop; carry on down regardless
 
 // ---------------------------------------------------------------------------
 // L1's LADDER: a fixed 20 deg step, not the absolute stack levels

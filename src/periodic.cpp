@@ -168,7 +168,12 @@ void tick(const Inputs& in) {
     // the whole trip home, and on a long drop the autoclamp is live again while the arm is still
     // descending. The run home cannot be retargeted by a grab in that window -- see the note on
     // L2_AUTOCLAMP_LOCKOUT_MS -- so re-arming early costs the descent nothing.
-    robot::claw.setInhibit(robot::lift.isScoring() || robot::lift.isScoreCycle());
+    // ...AND L2'S INTAKE RESET, for all of it. That manoeuvre carries the open jaws UP past the cup
+    // that was being taken and then straight back DOWN past it again, so a time-boxed lockout would
+    // re-arm right beside it; the state is the only honest bound, and it ends when the arm is seated --
+    // where the driver wants the autoclamp live again to pick up normally.
+    robot::claw.setInhibit(robot::lift.isScoring() || robot::lift.isScoreCycle() ||
+                           robot::scoring.isIntakeReset());
 
     // AT THE R1 INTAKE HANDOFF the autoclamp fires on the FIRST in-range reading rather than after the
     // ordinary AUTOCLAMP_CONFIRM_MS debounce -- the driver wants the pin gripped "at the instant it sees

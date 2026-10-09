@@ -135,6 +135,13 @@ class Scoring {
         SCORED,     // LEGACY: unreachable since the one-press score (2026-10-07). Kept only so B's
                     // stow() path from it still compiles; nothing enters it any more.
         RETURNING,  // L2 press 2 (or B from SCORED): the fast descent that seats at 0
+        // --- L2 PRESSED DURING THE INTAKE SEQUENCE (driver, 2026-10-09): abandon it and go home.
+        // ONE state with two halves, resetDown_ telling them apart, because the second half is just
+        // "wait for the lift to seat" and does not deserve a state of its own:
+        //   up   -- rise to INTAKE_RESET_CLEAR_DEG and swing the pivot OUT once clear of it (skipped
+        //           entirely when the pivot is already out, i.e. L2 during INTAKE_APPROACH)
+        //   down -- the forced run-down to DOWN, then SEAT, then IDLE
+        INTAKE_RESET,
         MOVING,
     };
 
@@ -265,6 +272,18 @@ class Scoring {
         return state_ == State::GRAB_SETTLE || state_ == State::GRAB_PUSH ||
                state_ == State::GRAB_RISE;
     }
+    /** True anywhere in the INTAKE SEQUENCE -- the approach, the pivot wait, the slow descent, or
+     *  holding the handoff. What L2 reacts to (see score() and State::INTAKE_RESET). */
+    bool isIntakeSequenceActive() const {
+        return state_ == State::INTAKE_APPROACH || state_ == State::INTAKE_PIVOT_WAIT ||
+               state_ == State::INTAKE_DESCEND || state_ == State::INTAKE_POS;
+    }
+    /** True while L2's intake reset is running -- the rise, the pivot swing and the trip home. The
+     *  autoclamp is inhibited for all of it (periodic::tick()): the cup that was being taken is
+     *  sitting in the intake, right in front of the open jaws, the whole way up AND the whole way
+     *  back down, so a time-boxed lockout would re-arm beside it. It arms again when this ends,
+     *  which is the moment the arm is seated. */
+    bool isIntakeReset() const { return state_ == State::INTAKE_RESET; }
     /** True while an L2 score has been asked for but is still waiting for the lift to arrive. The
      *  score has NOT started yet -- nothing is pressing -- but it will. */
     bool isScorePending() const {
@@ -274,6 +293,8 @@ class Scoring {
 
   private:
     void enter(State next);
+    /** INTAKE_RESET's second half: command the forced trip home and latch resetDown_. */
+    void startIntakeResetDescent();
     void setPivot(bool out);
     static bool pivotLevelFor(bool out) { return out == config::PIVOT_OUT_IS_ADI_HIGH; }
     void openClawForPickup();
@@ -342,6 +363,7 @@ class Scoring {
     double stepGoal_ = config::lift_preset::DOWN;  // the height that ladder is currently asking for
     bool scoreToHome_ = false;            // true while RELEASING on its way to score() rather than
                                            // scoreOrMatchload()'s INTAKE_POS destination
+    bool resetDown_ = false;              // INTAKE_RESET: past the rise, now running home
     bool grabRise_ = false;               // GRABBING: rise to a stack level afterwards (L1), or stay
                                            // exactly where the push ended (auton::grab())
     // A clamp outside the intake sequence has fired and owes the arm a clamp-grab hop, once

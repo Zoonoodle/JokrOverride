@@ -61,7 +61,15 @@ screen::RMode rModeFor(bool held, bool clamped) {
  *               no rung counter, no +20 step, no grab-at-the-handoff on L1. The level system is
  *               AUTON'S -- auton::stepUp() still walks the ladder and auton::liftTo(Level::N) still
  *               goes to a measured level. Nothing about auton changed.
- *   L2          intake macro: THE SENSING SCORER, IN TWO PRESSES (above the bottom, holding a pin).
+ *   L2          DURING THE INTAKE SEQUENCE (R1's approach / pivot wait / descent / holding the
+ *               handoff) IT IS "GO HOME" (2026-10-09): rise just far enough for the pivot to retract
+ *               (INTAKE_RESET_CLEAR_DEG), swing the pivot OUT, then force straight down to 0 and SEAT.
+ *               L2 during the APPROACH, where the pivot has not engaged yet, skips the rise and simply
+ *               goes down. The autoclamp is inhibited for the whole manoeuvre -- the cup being taken
+ *               is right in front of the open jaws, going up and coming back down -- and is armed
+ *               again the moment the arm seats. Brain line 10: `INTAKE RESET` -> `SEAT`.
+ *               EVERYWHERE ELSE L2 is unchanged:
+ *               intake macro: THE SENSING SCORER, IN TWO PRESSES (above the bottom, holding a pin).
  *               PRESS 1 presses the pin
  *               DOWN onto the stack with the claw still SHUT at L2_SCORE_SPEED_PCT, watches the
  *               rotation sensor for the landing (at least two of LAG/EFFORT/SPEED must agree -- see

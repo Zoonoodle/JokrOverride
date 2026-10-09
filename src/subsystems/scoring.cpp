@@ -193,6 +193,11 @@ void Scoring::handleClampEvent() {
         case State::INTAKE_APPROACH:  // unreachable: isAtIntakeHandoff() took these above
         case State::INTAKE_PIVOT_WAIT:
         case State::INTAKE_DESCEND:
+        // L2's intake reset: the arm is deliberately on its way home past the very cup it was
+        // taking. The autoclamp is inhibited for all of it anyway (periodic::tick()), so this is
+        // belt-and-braces -- and it is what stops a clamp that fired on the tick before the inhibit
+        // landing a hop on top of the reset.
+        case State::INTAKE_RESET:
             return;
         case State::IDLE:
         case State::INTAKE_POS:      // unreachable: isAtIntakeHandoff() took it above
@@ -265,6 +270,17 @@ void Scoring::serviceClampHop() {
     const double goal = std::min(config::CLAMP_GRAB_HEIGHT, preset::MAX);
     hasCommanded_ = false;  // this class is not tracking the height any more; the hop is the lift's move
     lift_.startClampRise(goal);
+}
+
+void Scoring::startIntakeResetDescent() {
+    resetDown_ = true;
+    hasCommanded_ = false;  // this class stops tracking the height; the descent is the lift's move
+    // THE SAME FORCED RUN-DOWN AN L2 SCORE USES (Lift::descendForced() -> L2_RUN_DOWN_MV, no slow
+    // zone, no FINAL, the same three exits into SEAT's continuous push). It is an L2 action and it ends
+    // on the hard stop, which is the whole point of "reset back to our bottom spot" -- and the arm is
+    // coming down with the jaws EMPTY, so there is nothing to land gently on.
+    lift_.descendForced();
+    lift_.note("INTAKE RESET dn", lift_.getPosition());
 }
 
 void Scoring::enter(State next) {
@@ -367,6 +383,23 @@ void Scoring::enter(State next) {
             // The pivot is OUT, the default down position.
             setPivot(true);
             lift_.startScoreReturn();
+            break;
+        case State::INTAKE_RESET:
+            // L2 DURING THE INTAKE SEQUENCE: abandon it and go home (driver, 2026-10-09). Two halves,
+            // and which one starts depends on where the pivot already is.
+            //
+            // PIVOT ALREADY OUT -- which is L2 during INTAKE_APPROACH, before the pivot has ever been
+            // engaged -- means there is nothing to clear, so SKIP THE RISE and just go down. Anything
+            // else has the pivot ENGAGED underneath the arm, so the arm must get above
+            // PIVOT_RELEASE_UP_DEG before it may retract, exactly as the automatic grab's rise does.
+            resetDown_ = pivotOut_;
+            if (resetDown_) {
+                setPivot(true);  // a no-op; says out loud what the descent is relying on
+                startIntakeResetDescent();
+            } else {
+                command(config::INTAKE_RESET_CLEAR_DEG);
+                lift_.note("INTAKE RESET", lift_.getPosition());
+            }
             break;
         case State::MOVING:
             openClaw();  // jaws open for the pickup; update() places the pivot by height
@@ -471,6 +504,15 @@ void Scoring::stepUp() {
 }
 
 void Scoring::score() {
+    // L2 DURING THE INTAKE SEQUENCE IS "GO HOME" (driver, 2026-10-09: "we need l2 to be a reset back to
+    // our bottom spot with pivot ... when we hit l2 during intake position active"). It comes first,
+    // before every other test, because the arm is empty and up at the handoff -- the old code reached
+    // its "nothing held" return and did nothing at all. DRIVER ONLY: auton reaches this same function
+    // through auton::score(), and a route asking to score mid-intake means the score, not a reset.
+    if (!autonMode_ && isIntakeSequenceActive()) {
+        enter(State::INTAKE_RESET);
+        return;
+    }
     // LEGACY TWO-PRESS PATH, unreachable since the one-press score: nothing enters SCORED any more.
     // the jaws open: this L2 is the run home that seats it (see "SCORING WITH L2" in lift.hpp and the
     // L2 note in config.hpp). Nothing else about press 1 is re-run.
@@ -778,6 +820,30 @@ void Scoring::update() {
             }
             break;
 
+        case State::INTAKE_RESET:
+            if (!resetDown_) {
+                // THE RISE, with the pivot swung OUT the moment the arm is clear of it -- the same
+                // by-height rule as GRAB_RISE above, checked every tick so it happens mid-rise rather
+                // than on arrival. The descent waits for the cylinder's own PIVOT_TIME_MS on top of
+                // that (pivotDone()), because coming back down past an engaged pivot is the one thing
+                // this whole manoeuvre exists to avoid.
+                if (lift_.getPosition() > config::PIVOT_RELEASE_UP_DEG) setPivot(true);
+                const bool clear = pivotOut_ && pivotDone() &&
+                                   lift_.getPosition() > config::PIVOT_RELEASE_UP_DEG;
+                // A lift that gave up (caught on something, or faulted) still gets the pivot out and
+                // still goes home: the timeout is the backstop behind both.
+                if (clear || lift_.isBlocked() || lift_.isFaulted() ||
+                    elapsed >= static_cast<std::uint32_t>(config::INTAKE_RESET_RISE_TIMEOUT_MS)) {
+                    setPivot(true);
+                    startIntakeResetDescent();
+                }
+                break;
+            }
+            // ...and the trip home. Seated is done; BLOCKED/FAULT hand the buttons back rather than
+            // leaving the macro holding them.
+            if (lift_.isSeated() || lift_.isBlocked() || lift_.isFaulted()) enter(State::IDLE);
+            break;
+
         case State::MOVING: {
             // Pivot by height, every tick: heading to the intake it is BACK inside the handoff zone and
             // OUT above it, so on R1 it swings BACK as the arm comes down into the zone -- not only once
@@ -816,6 +882,7 @@ const char* Scoring::stateName() const {
         case State::RELEASING: return "RELEASING";
         case State::SCORED: return "SCORED UP";
         case State::RETURNING: return "RETURNING";
+        case State::INTAKE_RESET: return resetDown_ ? "IN RESETv" : "IN RESET^";
         case State::MOVING: return "MOVING";
     }
     return "?";

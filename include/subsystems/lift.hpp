@@ -392,6 +392,13 @@ class Lift {
      * the waiting happens inside this task. Brain: `TOGGLE ^`.
      */
     void descendFast();
+    /**
+     * A TRIP TO THE BOTTOM THAT FORCES ITSELF DOWN, on demand -- the same constant L2_RUN_DOWN_MV push
+     * as an L2 score's run home (no slow zone, no FINAL, the same three exits into SEAT), without
+     * needing setForcedDescent()'s auton mode to be on. For the L2 actions that end on the hard stop
+     * with the jaws empty: Scoring's intake reset uses it. One-shot, like every other request here.
+     */
+    void descendForced();
 
     /** Stop chasing whatever target is active and brake-hold right where the lift is. Does not
      *  resume any previous target later -- same "no old target" rule as releasing the manual override. */
@@ -771,6 +778,7 @@ class Lift {
                                           // L2_RUN_DOWN_MV, no bands, no FINAL -- see updateDescent()
     std::uint32_t runDownStillSince_ = 0; // when the hard run-down first saw the arm stopped near 0
     bool forcedDescent_ = false;         // every descent forces itself down (auton) -- see setForcedDescent()
+    bool forceDownRequest_ = false;      // one-shot: the next setTarget() is a forced descent
     char note_[32] = "";                 // the lift event line, see lastNote()
     std::uint32_t commandSeq_ = 0;       // see commandSeq()
     double pressRef_ = 0.0;              // ramped press/unstick speed reference, unsigned deg/s

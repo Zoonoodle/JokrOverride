@@ -1743,15 +1743,34 @@ inline constexpr int L2_AUTOCLAMP_LOCKOUT_MS = 1000;         // TUNE: driver 202
 // L2_RUN_DOWN_MV per descent, which is why it stays.
 inline constexpr double AUTON_RUN_DOWN_ZERO_DEG = lift_preset::DOWN + 0.8;  // TUNE (driver: 2.0)
 inline constexpr int AUTON_RUN_DOWN_STILL_MS = 300;          // TUNE: ms (driver: 120)
-// 2. ...AND THE SEAT KEEPS PRESSING HARDER ONCE IT IS THERE. LIFT_DOWN_PUSH_MV (-3500) holds the arm
-// on its stop, which is all the driver's bottom needs; it is not much to drive a claw down into a cup
-// with. This is the auton equivalent, applied for as long as the target stays DOWN.
-// LIFT_SEAT_TEMP_LIMIT_C still governs: the brain says SEAT(hot) and the push stops if a lift motor
-// passes it, same as ever. At -6000 continuous that guard is doing real work -- an auton is 15 s, so
-// it should never trip, but a route left seated on a bench will.
-//   The claw still rides up over floor objects: raise it (-7500).
-//   The motors are warm after a practice session, or the frame complains: lower it toward -3500.
-inline constexpr float AUTON_DOWN_PUSH_MV = -6000.0f;        // TUNE: magnitude is the push, sign is DOWN
+// 2. ...AND THE SEAT KEEPS PRESSING JUST AS HARD ONCE IT IS THERE (the driver, 2026-10-09: "in auto we
+// need to push down that much too with lift down fast and keep it there at the bottom hard"). So this
+// is L2_RUN_DOWN_MV's own value: the arm arrives at the stop under full force and then simply does not
+// let go, for as long as the target stays DOWN. The driver's bottom keeps LIFT_DOWN_PUSH_MV (-3500),
+// which is all a hold-on-the-stop needs; this is a claw being driven down into cups on the floor.
+// It is an INDEPENDENT KNOB on purpose, so the hold can be backed off without touching the descent.
+//
+// READ THIS BEFORE RAISING IT, AND KNOW WHAT IT COSTS. A stalled V5 motor turns ALL of its electrical
+// power into heat -- there is no mechanical output at zero speed. The winding looks like ~4.8 ohms
+// (12 V / the firmware's 2.5 A limit), so:
+//     -3500 mV -> ~0.73 A -> ~2.6 W per motor
+//    -10000 mV -> ~2.1 A  -> ~21 W per motor, about EIGHT TIMES the heating, times two motors
+// Taking the motor plus its housing as roughly 50 J/K with no airflow, 21 W is about 0.4 K/s of rise
+// while it is actually seated, against 0.05 K/s at -3500. Starting warm from the route's lifting, say
+// 30-35 C, that is 35-50 s of CONTINUOUS seat to reach LIFT_SEAT_TEMP_LIMIT_C.
+//   A 15 s MATCH AUTON: the arm is only seated in the gaps between pickups -- a handful of seconds in
+//     total -- so it gains two or three degrees. It will not trip.
+//   A 60 s SKILLS RUN: a dozen descents, call it 20-25 s seated, is 8-10 K. That lands close to the
+//     guard, and a second run started on a hot lift, or any route that seats the arm and then leaves
+//     it seated for the rest of the run, WILL trip it.
+// WHEN IT TRIPS, THE PUSH STOPS: Lift::updateDescent()'s SEAT branch brakes instead and the brain says
+// SEAT(hot). Nothing is damaged -- but the claw stops being held down, which is exactly the thing this
+// constant exists to do, so the failure arrives at the worst moment. If SEAT(hot) ever shows up in
+// skills, the fix in order of preference is: seat the arm later in the route (it only needs to be
+// forced down while it is collecting), then lower this to -7000, then -6000.
+//   The claw still rides up over floor objects: there is nothing left above -12000; look at the
+//     mechanism or at AUTON_RUN_DOWN_ZERO_DEG instead.
+inline constexpr float AUTON_DOWN_PUSH_MV = L2_RUN_DOWN_MV;  // TUNE: = -10000 (was -6000, -3500)
 // Most the loop may push DOWNWARD (magnitude, mV) while pressing. This is the crush limit: the
 // velocity loop has 12000 mV of authority and an integral that winds up, so without a cap it would
 // keep increasing the push until it moved -- i.e. flatten the stack. 7000 mV through the 4:1 is about

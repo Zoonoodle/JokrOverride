@@ -593,10 +593,11 @@ const char* Lift::phaseName() const {
         case Phase::PRESS: return "PRESS";
         case Phase::RELEASE:
             // Which signal fired is the first thing worth knowing when tuning, so it goes on the line.
-            // REL(32) means the detector never fired at all and L2_AUTO_RELEASE_DEG's travel rule
+            // REL(trav) means the detector never fired at all and L2_AUTO_RELEASE_DEG's travel rule
             // forced it; REL(floor) means the start was too low for that travel to ever complete and
-            // L2_RELEASE_FLOOR_DEG forced it instead.
-            if (releasedByTravel_) return "REL(32)";
+            // L2_RELEASE_FLOOR_DEG forced it instead. (It used to say REL(32) after the constant's
+            // value, which stopped being true the moment that was tuned to 48.)
+            if (releasedByTravel_) return "REL(trav)";
             if (releasedByFloor_) return "REL(floor)";
             switch (contactTrigger_) {
                 case ContactDetector::Trigger::STALL: return "REL(stall)";
@@ -1374,6 +1375,16 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
     // the crush cap, before the loop has had a chance to lean on anything. Hysteretic, so it cannot
     // flicker at the boundary; and a press that starts with the pin already resting on the stack never
     // earns the free cap at all, because the arm never gets moving.
+    // THROUGH THE RELEASE, HOLD STILL RATHER THAN LEAN ON THE CUP (config::L2_RELEASE_KEEP_PRESSING).
+    // The jaws are opening and the arm has nothing left to achieve by pushing -- it slides off on the
+    // way down, not here -- so the reference becomes a standstill for the whole
+    // CLAW_OPEN_TIME_MS + L2_RELEASE_SETTLE_MS window. pressRef_ is zeroed with it so the ramp cannot
+    // wind back up underneath; the run home builds its own reference in enterDescend() from the
+    // measured speed, so nothing downstream depends on it.
+    if (phase_ == Phase::RELEASE && !config::L2_RELEASE_KEEP_PRESSING) {
+        pressRef_ = 0.0;
+        lastVRef_ = 0.0;
+    }
     double pressCap = config::L2_PRESS_MAX_MV;
     if (phase_ == Phase::PRESS) {
         if (pressFast_) pressFast_ = descendSpeed >= config::L2_PRESS_FAST_OFF_DEG_PER_S;

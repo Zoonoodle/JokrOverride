@@ -474,7 +474,7 @@ void Lift::setTarget(double degrees, bool precise) {
         // constant L2_RUN_DOWN_MV, no slow zone, no FINAL -- but WITHOUT the score's two latches: the
         // autoclamp is left armed and the descent stays interruptible, because the point of an auton
         // descent is picking something up off the floor on the way down.
-        if (forcedDescent_ || fromForceDown) {
+        if (config::LIFT_FORCE_DOWN && (forcedDescent_ || fromForceDown)) {
             runDownHard_ = true;
             runDownStillSince_ = 0;
             note(fromForceDown ? "FORCE DOWN" : "AUTO DOWN", position);
@@ -1184,7 +1184,13 @@ void Lift::endScoreClear(std::uint32_t now, double position) {
     // creeping in at 20 deg/s, just L2_RUN_DOWN_MV until the arm is at the bottom and then SEAT. The
     // bands below are still set, because they are what the descent falls back onto if a retarget
     // clears runDownHard_ half way down.
-    runDownHard_ = true;
+    // ...OR NOT, SINCE config::LIFT_FORCE_DOWN WENT FALSE (the driver, 2026-10-09: "our lift no longer
+    // needs to be forced down at all"). With it off this is the ordinary banded descent again -- the
+    // bands below, LIFT_DESCENT_SLOW_ZONE_DEG, then FINAL's creep and SEAT -- which is what the run
+    // home was before 736b166. Everything else about the post-release trip is unchanged: it is still
+    // uncancellable (scoreReturn_), still keeps the autoclamp inhibited for L2_AUTOCLAMP_LOCKOUT_MS,
+    // and still ends SEATED on the stop.
+    runDownHard_ = config::LIFT_FORCE_DOWN;
     runDownStillSince_ = 0;
     enterDescend(now, position, config::L2_SCORE_SPEED_PCT, config::L2_SCORE_SPEED_PCT);
     returnFast_ = true;  // enterDescend() doesn't touch it, but keep it next to the flag it belongs to

@@ -99,7 +99,9 @@ void Lift::initState() {
     parkTimeout_ = false;
     holdSettleSince_ = 0;
     idleStillSince_ = 0;
-    score_ = returnFast_ = scoreStuck_ = releasedByTravel_ = releasedByFloor_ = false;
+    score_ = returnFast_ = scoreStuck_ = releasedByTravel_ = releasedByFloor_ = releasedByStop_ = false;
+    pressProgressPos_ = 0.0;
+    pressProgressSince_ = 0;
     scoredAbove_ = scoreCycle_ = false;
     scoreReturn_ = pressFast_ = runDownHard_ = false;
     runDownStillSince_ = 0;
@@ -401,6 +403,7 @@ void Lift::setTarget(double degrees, bool precise) {
     scoreStuck_ = false;
     releasedByTravel_ = false;
     releasedByFloor_ = false;
+    releasedByStop_ = false;
     returnFast_ = false;
     // A grab push is a command like any other: a new height replaces it.
     grab_ = gripWanted_ = gripAcked_ = false;
@@ -601,6 +604,7 @@ const char* Lift::phaseName() const {
             // forced it; REL(floor) means the start was too low for that travel to ever complete and
             // L2_RELEASE_FLOOR_DEG forced it instead. (It used to say REL(32) after the constant's
             // value, which stopped being true the moment that was tuned to 48.)
+            if (releasedByStop_) return "REL(stop)";
             if (releasedByTravel_) return "REL(trav)";
             if (releasedByFloor_) return "REL(floor)";
             switch (contactTrigger_) {
@@ -990,6 +994,7 @@ void Lift::startScore() {
     grab_ = gripWanted_ = gripAcked_ = false;
     releasedByTravel_ = false;
     releasedByFloor_ = false;
+    releasedByStop_ = false;
     clawReleaseWanted_ = false;
     clawReleased_ = false;
     contact_.reset();
@@ -1003,6 +1008,8 @@ void Lift::startScore() {
     phaseStart_ = pros::millis();
     stallStart_ = 0;
     descentStart_ = getPosition();  // the runaway guard's reference for the whole sequence
+    pressProgressPos_ = descentStart_;  // ...and the position-progress window's first reference
+    pressProgressSince_ = phaseStart_;
     scoreStartPos_ = descentStart_;  // FIXED for the whole score -- the origin for L2_AUTO_RELEASE_DEG's
                                      // relative travel rule. Unlike descentStart_, UNSTICK never moves it.
     note("PRESS", descentStart_);
@@ -1137,6 +1144,7 @@ void Lift::endScoreClear(std::uint32_t now, double position) {
     // have decided, nothing can be deduplicated away, and the phase is entered on this tick.
     score_ = false;
     clawReleaseWanted_ = false;
+    pressProgressSince_ = 0;
     scoredAbove_ = false;  // nothing is held above a stack any more
     descendRequest_ = false;
     descendOwned_ = false;
@@ -1304,21 +1312,40 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             fired == ContactDetector::Trigger::NONE && traveled >= config::L2_AUTO_RELEASE_DEG;
         const bool floorRelease = fired == ContactDetector::Trigger::NONE && !travelRelease &&
                                   position <= config::L2_RELEASE_FLOOR_DEG;
-        if (fired != ContactDetector::Trigger::NONE || travelRelease || floorRelease) {
+
+        // "RELEASE AFTER IT NOTICES POSITION CHANGE IS NOT CHANGING" (see L2_PRESS_PROGRESS_DEG in
+        // config.hpp). The one test here that uses NO baseline, NO filter and NO velocity estimate:
+        // the arm must cover L2_PRESS_PROGRESS_DEG of real position every L2_PRESS_PROGRESS_MS. Any
+        // progress that size restarts the window, so a healthy descent resets it several times over;
+        // failing it means the pin has landed even if the detector's learned baseline has quietly
+        // followed the arm down, which is what a stack of compressing cups does to it.
+        if (pressProgressPos_ - position >= config::L2_PRESS_PROGRESS_DEG) {
+            pressProgressPos_ = position;      // real progress: the window starts again from here
+            pressProgressSince_ = now;
+        }
+        const bool stopRelease =
+            fired == ContactDetector::Trigger::NONE && !travelRelease && !floorRelease &&
+            now - phaseStart_ >= static_cast<std::uint32_t>(config::L2_CONTACT_IGNORE_MS) &&
+            pressProgressSince_ != 0 &&
+            now - pressProgressSince_ >= static_cast<std::uint32_t>(config::L2_PRESS_PROGRESS_MS);
+
+        if (fired != ContactDetector::Trigger::NONE || travelRelease || floorRelease || stopRelease) {
             // CONTACT (detected, or forced by travel/floor) this tick. Ask Scoring for the jaws (it
             // owns the claw) and keep pushing down so they slide off. Scoring polls needsClawRelease()
             // in the same 10 ms driver loop, so the cylinder is commanded within a tick -- no handshake
             // to wait on.
             clawReleaseWanted_ = true;
             clawReleased_ = false;
-            contactTrigger_ = fired;  // NONE for either forced path; see releasedByTravel_/releasedByFloor_
+            contactTrigger_ = fired;  // NONE for every forced path; see releasedBy*_ below
             releasedByTravel_ = travelRelease;
             releasedByFloor_ = floorRelease;
+            releasedByStop_ = stopRelease;
             phase_ = Phase::RELEASE;
             phaseStart_ = now;
             freeSince_ = 0;
             stuckSince_ = 0;
-            aux.trigger = travelRelease ? 5 : (floorRelease ? 6 : ContactDetector::triggerCode(fired));
+            aux.trigger = travelRelease ? 5 : (floorRelease ? 6 : (stopRelease ? 7 :
+                                                 ContactDetector::triggerCode(fired)));
             note(phaseName(), position);  // REL(lag) / REL(spd) / REL(32) / REL(floor) ...
         }
     } else {  // Phase::RELEASE
@@ -1326,7 +1353,8 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
         aux.ratioPct = static_cast<int>(contact_.speedRatio() * 100.0);
         aux.lag10 = static_cast<int>(contact_.lagDeg() * 10.0);
         aux.effortMv = static_cast<int>(contact_.effortMv());
-        aux.trigger = releasedByTravel_ ? 5 : (releasedByFloor_ ? 6 : ContactDetector::triggerCode(contactTrigger_));
+        aux.trigger = releasedByTravel_ ? 5 : (releasedByFloor_ ? 6 : (releasedByStop_ ? 7 :
+                          ContactDetector::triggerCode(contactTrigger_)));
 
 
         // Don't judge anything until the jaws have actually had time to open. If nobody ever
@@ -1987,7 +2015,7 @@ void Lift::startTask() {
                             "V=descend R=return Z=final S=seat P=press r=release p=postpush U=unstick "
                             "G=grab M=manual h=homing F=fault I=idle) "
                             "pos*10 goal*10 vel(deg/s) out(mV) | L2 only: v/base%% lag*10 effort(mV) "
-                            "trg(0=- 1=stall 2=lag 3=effort 4=speed 5=height)\n");
+                            "trg(0=- 1=stall 2=lag 3=effort 4=speed 5=travel 6=floor 7=stop)\n");
                 while (true) {
                     traceDrain();
                     pros::delay(20);

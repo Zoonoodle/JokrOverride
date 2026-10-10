@@ -1966,7 +1966,16 @@ inline constexpr double L2_CONTACT_OUTPUT_TAU_MS = 50.0;     // TUNE: low-pass o
 // swing's continuation as an ever-growing shortfall. See AGREEMENT in contact_detector.hpp -- this and
 // the threshold changes above are parts of the same false-fire fix, and AGREEMENT is the one doing
 // most of the work; this just gives the baseline a little more rope first.
-inline constexpr double L2_CONTACT_FREEZE_FRAC = 0.82;       // TUNE: loose gate -- stops LEARNING, never fires (was 0.90)
+// 0.82 -> 0.92. THIS IS HALF OF WHY A SOFT LANDING WAS MISSED. Learning continues while the measured
+// speed is at least this fraction of the baseline, so at 0.82 the baseline would happily FOLLOW an arm
+// that was slowing gradually -- which is exactly what pressing a pin into a stack of cups looks like,
+// because the cups compress. Both relative signals are measured against that baseline, so if it tracks
+// the slowdown, neither LAG nor SPEED ever sees a shortfall and the press runs on to the
+// L2_AUTO_RELEASE_DEG backstop. Freezing at 0.92 means the baseline stops following as soon as the arm
+// is 8% down rather than 18% down, and the shortfall becomes visible. It cannot cause a false fire on
+// its own: freezing only stops LEARNING, and firing still needs AGREEMENT, i.e. SPEED under
+// L2_CONTACT_SPEED_FRAC (55%) as well.
+inline constexpr double L2_CONTACT_FREEZE_FRAC = 0.92;       // TUNE: stops LEARNING, never fires (was 0.82, 0.90)
 // Dead time at the very start of the press before any trigger may fire. Longer than before (60 -> 80)
 // now that AGREEMENT does most of the false-fire rejection -- this just gives the baseline's own
 // settle time (above) a little more cushion against a rough handover from HOLD.
@@ -2027,6 +2036,38 @@ inline constexpr int L2_MAX_UNSTICK_TRIES = 2;               // TUNE
 //   Height rule fires before a real landing that the detector should have caught: that is a tuning
 //     problem in the CONTACT_* block above, not this constant -- the detector is supposed to win first.
 inline constexpr double L2_AUTO_RELEASE_DEG = 48.0;          // TUNE: arm deg, RELATIVE; 1.5x, driver 2026-10-07 (was 32)
+// ===========================================================================
+// "RELEASE AFTER IT NOTICES POSITION CHANGE IS NOT CHANGING" — the progress test
+// ===========================================================================
+// The driver, 2026-10-09: "its holding too long still the clamp when we l2, needs to be more sensitive
+// and release after it notices position change is not changing". That is a different question from the
+// one subsystems::ContactDetector asks, and the difference is the whole point of adding this.
+//
+// THE DETECTOR'S BLIND SPOT. Every signal it has except the absolute STALL floor is measured against a
+// baseline it LEARNS from the descent itself, and it keeps learning while the arm is within
+// L2_CONTACT_FREEZE_FRAC of that baseline. So a landing that slows the arm GRADUALLY -- a pin pressed
+// into a stack of cups, which compress -- can be tracked by the baseline the whole way down: measured
+// stays near "normal", the shortfall never appears, LAG and SPEED never trip, and the press runs on to
+// the L2_AUTO_RELEASE_DEG travel backstop with the claw still shut. On the brain that shows up as
+// REL(trav) instead of REL(lag)/REL(spd)/REL(stall) -- which is the thing to check if this ever feels
+// slow again. The absolute STALL floor (L2_CONTACT_STALL_DEG_PER_S, 6 deg/s) does not save it either,
+// because a compressing stack lets the arm creep at 10-20 deg/s rather than stopping dead.
+//
+// THIS TEST ASKS THE DRIVER'S QUESTION INSTEAD, and it is immune to all of that because it uses no
+// baseline, no filter and no velocity estimate -- just the POSITION: has the arm covered
+// L2_PRESS_PROGRESS_DEG in the last L2_PRESS_PROGRESS_MS? Any progress of that size restarts the
+// window, so a healthy descent resets it constantly; failing it means the pin has landed, whatever the
+// detector thinks. Brain: REL(stop).
+// THE MARGIN, in the units that matter: 1.0 deg per 60 ms is 16.7 deg/s, and the press runs at about
+// 112 deg/s (L2_PRESS_FREE_MAX_MV), so a free descent has over 6x the progress it needs. Even a heavily
+// loaded press that could only manage 30 deg/s keeps a 1.8x margin. It is held off for
+// L2_CONTACT_IGNORE_MS from the start of the press so the velocity ramp (1200 deg/s^2, i.e. 72 deg/s
+// within 60 ms) cannot be read as a stall.
+//   Releasing early, mid-descent, with nothing under the claw: raise the degrees or shorten the window.
+//   Still holding too long on a soft stack: lower the degrees (0.6) before shortening the window --
+//     the window is already close to the 30-40 ms it takes to be sure of anything.
+inline constexpr double L2_PRESS_PROGRESS_DEG = 1.0;         // TUNE: arm deg of progress required...
+inline constexpr int L2_PRESS_PROGRESS_MS = 60;              // TUNE: ...within this window, or it has landed
 // TWO JOBS, both "we're close enough to the bottom, stop being delicate about it", at the same height
 // on purpose:
 //   1. PRESS fallback for a start too low for L2_AUTO_RELEASE_DEG's travel to ever complete before the

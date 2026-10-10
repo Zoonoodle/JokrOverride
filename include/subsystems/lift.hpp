@@ -765,6 +765,9 @@ class Lift {
                                           // NOT the same as descentStart_, which UNSTICK re-baselines.
     bool releasedByTravel_ = false;      // this RELEASE was forced by L2_AUTO_RELEASE_DEG's travel rule
     bool releasedByFloor_ = false;       // this RELEASE was forced by L2_RELEASE_FLOOR_DEG (low start)
+    bool releasedByStop_ = false;        // ...by the POSITION-PROGRESS test (see L2_PRESS_PROGRESS_DEG)
+    double pressProgressPos_ = 0.0;      // position at the start of the current progress window
+    std::uint32_t pressProgressSince_ = 0;  // when that window opened (0 = not open yet)
     bool scoredAbove_ = false;           // legacy: never set since the one-press score (2026-10-07)
     bool scoreCycle_ = false;            // press 1 + the hold above the stack (autoclamp inhibit). It
                                           // ENDS when press 2 starts, not when the arm seats -- see

@@ -958,9 +958,18 @@ inline constexpr int L1_GRAB_MAX_MS = 1000;                  // TUNE
 // AN ABSOLUTE HEIGHT, NOT A RISE (the driver, 2026-10-07: "make it 37.5 height, not a rise"). After a
 // non-intake autoclamp grab the arm goes TO 37.5 in the zero-at-the-bottom frame, wherever it grabbed
 // from. Grabs happen at the bottom (0), so in practice this is a ~37.5 deg lift.
-// FOLLOW THE CONSEQUENCE: a grab with the arm ALREADY ABOVE 37.5 moves it DOWN to 37.5. That is what
-// "go to 37.5" means and it is deliberate; the old relative version could only ever go up.
-inline constexpr double CLAMP_GRAB_HEIGHT = 37.5;            // TUNE: arm degrees, ABSOLUTE
+// FOLLOW THE CONSEQUENCE: a grab with the arm ALREADY ABOVE this height would mean moving DOWN to it,
+// which is what "go to 37.6" literally means -- but Scoring::serviceClampHop() refuses that case
+// outright now (brain: HOP skip hi), so the hop can only ever lift.
+// 37.5 -> 37.6 (the driver, 2026-10-09: "can you make the lift go up 0.1 more after clamping than it
+// already is?"). WORTH KNOWING WHAT 0.1 DEG BUYS, because it is almost certainly less than expected:
+// the hop is a NON-PRECISE move (startClampRise() picks by distance, and from the floor the distance is
+// far outside LIFT_TOLERANCE_DEG), so the arm latches "arrived" anywhere within 5 deg of this number.
+// 0.1 is inside the arm's own arrival band and inside the hold's deadband -- it moves the GOAL, and the
+// resting height will not reliably follow it.
+// TO ACTUALLY RAISE WHERE THE ARM ENDS UP: raise this by something bigger than LIFT_TOLERANCE_DEG, or
+// make the hop precise (startClampRise() has the one test that decides).
+inline constexpr double CLAMP_GRAB_HEIGHT = 37.6;            // TUNE: arm degrees, ABSOLUTE (was 37.5)
 inline constexpr int CLAMP_RISE_DELAY_AUTON_MS = 0;          // TUNE: 0 = same tick as the clamp
 inline constexpr int CLAMP_RISE_DELAY_DRIVER_MS = 200;       // TUNE: driver 2026-10-07 (was 400 both)
 

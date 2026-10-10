@@ -1251,21 +1251,27 @@ inline constexpr bool LIFT_HOME_ON_ENABLE = true;            // BACK ON, the dri
 // comfortably inside. It also shortens the trip, which matters because LIFT_HOME_TIMEOUT_MS below is
 // what decides whether a home from high up finishes at all -- a timed-out home writes NO zero and
 // leaves every height wrong, so speed here buys reliability, not just time.
-// -3500 -> -6000 -> -2000: BACK TO A LIGHT DESCENT (the driver, 2026-10-09: "when resetting its
-// position, its a light descent until rotation stops moving, then resets that there as the 0"). That
-// is exactly what updateHoming() does and has always done -- drive down, watch the RAW SENSOR, and the
-// moment it stops moving for LIFT_HOME_STILL_MS, write the zero there -- so the only thing that needed
-// changing was how hard it leans on the frame while doing it. -2000 is 16.7% of the volts, about
-// 25 deg/s, and is the value this robot homed at originally.
-// WHY LIGHT IS RIGHT HERE, and it is not just about force: homing ENDS by stalling against the frame
-// and then HOLDING there for the whole still window before it writes the zero, every program start --
-// and that frame is what the entire coordinate system is measured from. At -2000 that is ~0.4 A and
-// under a watt per motor into the stop; at -6000 it was ~19 W, nine times the heating, into the one
-// part of the robot that must not move.
-// THE TIMEOUT HAD TO GROW WITH IT: at 25 deg/s a worst-case full-travel home (174.5 deg) takes 7 s, so
-// LIFT_HOME_TIMEOUT_MS is 8000 now. It only bounds the FAILURE path -- a home that reaches the stop
-// ends on the stall detector, usually in well under a second from a parked arm -- so the only cost of
-// the longer window is that a genuinely jammed arm pushes at this gentle voltage for longer.
+// -3500 -> -6000 -> -2000 -> -7000 (the driver, 2026-10-10: "can you make it reset move down with like
+// 5 more volts of power, it is not going all the way down rn" -- 2 V plus 5 V). The LIGHT descent asked
+// for the day before could not finish the job, and the way it fails is the worst way anything here can
+// fail, which is why this number gets a long note:
+//
+// HOMING IS WHERE THE COORDINATE SYSTEM COMES FROM. updateHoming() drives down, watches the RAW SENSOR
+// and the moment it stops moving for LIFT_HOME_STILL_MS declares THAT the hard stop and writes zero
+// there. It cannot tell "the arm reached the frame" from "the arm stopped early on friction, a cup, or
+// the rubber bands" -- both look identical to a stall detector. So a drive too light to push through
+// the last of the travel does not fail loudly: it ZEROES HIGH, and then every preset in the program is
+// off by that much for the rest of the match, SEAT can never reach 0, and the heights all read wrong.
+// That is what "it is not going all the way down" is, and it is why the right side of this number to
+// err on is TOO MUCH, not too little.
+// -7000 is 58% of the volts, about 73 deg/s. The cost is bounded and small: homing ends by stalling
+// against the frame for the LIFT_HOME_STILL_MS window (300 ms) before it writes the zero, which at
+// -7000 is ~1.5 A and ~10 W per motor for a third of a second -- about 3 joules, once per program run.
+// LIFT_HOME_TIMEOUT_MS stays at 8000: it only bounds the FAILURE path, and at 73 deg/s even a
+// full-travel home (174.5 deg) finishes in ~2.4 s, so the window is now generous rather than tight.
+//   It bangs into the frame hard enough to shift something: lower it, but check the LIFT0 line's `pos`
+//     after homing before trusting a lighter value -- that number IS the zero it chose.
+//   The brain says HOME FAIL, or heights read low: it is still not reaching the stop. Raise it.
 // THE STALL DETECTOR STILL WORKS AT THIS SPEED, and it is worth knowing why: it asks whether the RAW
 // SENSOR has moved more than LIFT_HOME_STILL_DEG (2.5 sensor deg = 0.625 arm deg) since the window
 // opened. At 75 deg/s the sensor moves 3 deg every 10 ms tick, so the window re-opens on EVERY tick
@@ -1274,7 +1280,7 @@ inline constexpr bool LIFT_HOME_ON_ENABLE = true;            // BACK ON, the dri
 // the motors are still being driven down at this voltage, i.e. with the arm pressed onto the stop.
 //   The arm bangs into the frame too hard at startup: lower it (-5000).
 //   Homing still reports HOME FAIL / takes too long: raise it, and check LIFT_HOME_TIMEOUT_MS.
-inline constexpr float LIFT_HOME_MV = -2000.0f;              // TUNE: downward drive while homing (was -6000, -3500)
+inline constexpr float LIFT_HOME_MV = -7000.0f;              // TUNE: downward drive while homing (was -2000, -6000, -3500)
 
 // Don't start looking for "stopped" until the arm has been driving this long, so a sticky start isn't
 // mistaken for the bottom.

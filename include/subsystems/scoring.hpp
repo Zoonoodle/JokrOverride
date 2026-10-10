@@ -142,6 +142,10 @@ class Scoring {
         //           entirely when the pivot is already out, i.e. L2 during INTAKE_APPROACH)
         //   down -- the forced run-down to DOWN, then SEAT, then IDLE
         INTAKE_RESET,
+        // --- A PRESSED TO OPEN THE JAWS, above the bottom (driver, 2026-10-10): the jaws are already
+        // open by the time this is entered; it waits config::A_RELEASE_DESCEND_MS and then sends the
+        // arm home. One state, because "wait then descend then wait to be seated" needs no more.
+        A_RELEASE,
         MOVING,
     };
 
@@ -284,6 +288,10 @@ class Scoring {
      *  back down, so a time-boxed lockout would re-arm beside it. It arms again when this ends,
      *  which is the moment the arm is seated. */
     bool isIntakeReset() const { return state_ == State::INTAKE_RESET; }
+    /** True while A's "drop it and go home" is running -- the pause after the jaws open and the trip
+     *  to the bottom after it. The autoclamp is inhibited for all of it (periodic::tick()): the arm is
+     *  descending straight past whatever was just let go of. */
+    bool isARelease() const { return state_ == State::A_RELEASE; }
     /** True while an L2 score has been asked for but is still waiting for the lift to arrive. The
      *  score has NOT started yet -- nothing is pressing -- but it will. */
     bool isScorePending() const {
@@ -364,6 +372,7 @@ class Scoring {
     bool scoreToHome_ = false;            // true while RELEASING on its way to score() rather than
                                            // scoreOrMatchload()'s INTAKE_POS destination
     bool resetDown_ = false;              // INTAKE_RESET: past the rise, now running home
+    bool aReleaseDown_ = false;           // A_RELEASE: the delay is over, the descent is commanded
     bool grabRise_ = false;               // GRABBING: rise to a stack level afterwards (L1), or stay
                                            // exactly where the push ended (auton::grab())
     // A clamp outside the intake sequence has fired and owes the arm a clamp-grab hop, once

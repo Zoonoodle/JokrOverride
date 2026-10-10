@@ -185,28 +185,17 @@ inline constexpr double FIRST_SCORE = 48.0;                  // PROVISIONAL -- R
 // The old photo-measured set was 26.6 / 54.4 / 72.8 / 116.3 / 128.3, taken before the frame was
 // defined by homing, so they carried whatever offset the arm was sitting at that session. The values
 // above are driver-measured in the current homed frame, where the hard stop is 0.
-// IT MUST MATCH THE NUMBER OF ENTRIES BELOW. It briefly read 52 (2026-10-10, a slip while retuning the
-// heights), and the way that fails is quiet and nasty rather than loud: the extra 47 entries
-// zero-fill, so L1_STEP_CEILING_DEG -- which is STACK_LEVELS[STACK_LEVEL_COUNT - 1] -- became 0.0, and
-// advanceStep() clamps every rung of auton's L1 ladder to the ceiling. auton::stepUp() would have
-// commanded the arm to the BOTTOM instead of up a level, with nothing on the brain to explain it.
 inline constexpr int STACK_LEVEL_COUNT = 5;
 inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
-     ,  // TUNE: level 1 (116.2 in the old frame)
-     85,  // TUNE: level 2 (144.0)
+     75,  // TUNE: level 1 (116.2 in the old frame)
+     90,  // TUNE: level 2 (144.0)
      110,  // TUNE: level 3 (160.0)
      135.0,  // TUNE: level 4 (181.5)
      160.5,  // TUNE: level 5, the top (223.0) -- THERE IS NO LEVEL 6
 };
-// LEVEL 0 (driver, 2026-10-10: "add a level 0 that goes to height 35") -- auton::Level::ZERO, reached
-// with auton::liftTo(auton::Level::ZERO) like any other level.
-// IT IS DELIBERATELY NOT AN ENTRY IN THE ARRAY ABOVE. Prepending it would renumber every index, and
-// those indices are load-bearing all over the program: STACK_LEVELS[0] is what the automatic intake
-// grab rises to (Scoring's GRAB_RISE) and what L1's ladder seeds itself from, STACK_LEVELS[4] is
-// L1_STEP_CEILING_DEG, and autons.cpp's PID tuning table addresses all five by index. A sixth entry at
-// the FRONT would have silently moved the grab rise to 35 and shifted every tuning point by one.
-// So the array stays "the five measured stack heights" and this is its own constant, with
-// auton::heightOf() mapping Level::ZERO to it.
+// LEVEL 0 (auton::Level::ZERO). NOT an array entry on purpose: a sixth entry at the front would
+// renumber STACK_LEVELS[0] (the grab rise, L1's ladder seed) and [4] (L1_STEP_CEILING_DEG), and
+// autons.cpp's tuning table addresses all five by index. auton::heightOf() maps ZERO to this.
 inline constexpr double STACK_LEVEL_ZERO = 35.0;             // TUNE: driver 2026-10-10
 // Software hard stop: top level (132.7) + 5 deg of margin -- raised with the levels, 2026-10-07
 // (111.9 -> 137.7). It is the ONLY ceiling that needed changing: L1_STEP_CEILING_DEG is derived from
@@ -364,6 +353,26 @@ inline constexpr int GRAB_RISE_TIMEOUT_MS = 4000;            // TUNE: backstop f
 inline constexpr double INTAKE_RESET_PIVOT_UP_DEG = INTAKE_PIVOT_TRIGGER_DEG - INTAKE_PIVOT_REACH_DEG;
 inline constexpr double INTAKE_RESET_CLEAR_DEG = INTAKE_PIVOT_TRIGGER_DEG + 3.0;  // TUNE: the margin
 inline constexpr int INTAKE_RESET_RISE_TIMEOUT_MS = 1500;    // TUNE: backstop; carry on down regardless
+
+// ===========================================================================
+// A (PRESSED) — drop it and go home
+// ===========================================================================
+// The driver, 2026-10-10: "PRESSING a ... needs to go down like how we do with l2, except its an
+// immediate clamp off and delay the descend by 500ms". So A keeps being the claw toggle it always was,
+// and the OPENING half of it now also sends the arm home -- the same trip to the bottom L2's score ends
+// with, just without the press and the sensing in front of it:
+//   the jaws open on the press, with NO delay and no contact detection at all (that is the whole
+//   difference from L2: the driver has decided, so there is nothing to sense);
+//   then A_RELEASE_DESCEND_MS of nothing, so whatever was in the jaws is clear of them before the arm
+//   moves;
+//   then the ordinary trip to lift_preset::DOWN, ending SEATED on the hard stop.
+// A PRESSED AT THE BOTTOM IS JUST THE TOGGLE, as it has always been -- there is nowhere to descend to.
+// So is A pressed to CLOSE the jaws: only opening them starts this.
+// DRIVER ONLY. auton::clawOpen() goes through the same Scoring::toggleClaw() ("the exact A path"), and
+// a route that opens the claw has its own next move in mind, so autonMode_ gates this out.
+//   The arm starts down before the pin is clear: raise the delay.
+//   It feels sluggish: lower it. Zero is legal and means "descend on the same tick as the jaws open".
+inline constexpr int A_RELEASE_DESCEND_MS = 500;             // TUNE: driver 2026-10-10
 
 // ---------------------------------------------------------------------------
 // L1's LADDER: a fixed 20 deg step, not the absolute stack levels

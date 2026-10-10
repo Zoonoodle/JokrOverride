@@ -181,7 +181,7 @@ void tick(const Inputs& in) {
     // re-arm right beside it; the state is the only honest bound, and it ends when the arm is seated --
     // where the driver wants the autoclamp live again to pick up normally.
     robot::claw.setInhibit(robot::lift.isScoring() || robot::lift.isScoreCycle() ||
-                           robot::scoring.isIntakeReset());
+                           robot::scoring.isIntakeReset() || robot::scoring.isARelease());
 
     // AT THE R1 INTAKE HANDOFF the autoclamp fires on the FIRST in-range reading rather than after the
     // ordinary AUTOCLAMP_CONFIRM_MS debounce -- the driver wants the pin gripped "at the instant it sees

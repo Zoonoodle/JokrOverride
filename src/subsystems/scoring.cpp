@@ -198,6 +198,10 @@ void Scoring::handleClampEvent() {
         // belt-and-braces -- and it is what stops a clamp that fired on the tick before the inhibit
         // landing a hop on top of the reset.
         case State::INTAKE_RESET:
+        // A's "drop it and go home": the arm is on its way down past the thing just released, and the
+        // autoclamp is inhibited for all of it anyway (periodic::tick()). Belt-and-braces, and it
+        // catches a clamp that fired on the tick before the inhibit landed.
+        case State::A_RELEASE:
             return;
         case State::IDLE:
         case State::INTAKE_POS:      // unreachable: isAtIntakeHandoff() took it above
@@ -401,6 +405,13 @@ void Scoring::enter(State next) {
                 lift_.note("INTAKE RESET", lift_.getPosition());
             }
             break;
+        case State::A_RELEASE:
+            // THE JAWS ARE ALREADY OPEN -- toggleClaw() opened them on the press, with no delay and no
+            // sensing, which is the whole difference from an L2 score. All this state does is wait
+            // A_RELEASE_DESCEND_MS so the pin is clear of the jaws, then send the arm home.
+            aReleaseDown_ = false;
+            lift_.note("A RELEASE", lift_.getPosition());
+            break;
         case State::MOVING:
             openClaw();  // jaws open for the pickup; update() places the pivot by height
             break;
@@ -581,8 +592,39 @@ void Scoring::resetLevel() {
 
 void Scoring::toggleClaw() {
     // Shut (CLAMPED, or CLOSED since power-on) -> open; open -> clamp.
-    if (!claw_.isClosed()) claw_.clamp();
-    else openClaw();  // opening by hand must not switch the autoclamp off -- see openClaw()
+    if (!claw_.isClosed()) {
+        claw_.clamp();
+        return;
+    }
+    openClaw();  // opening by hand must not switch the autoclamp off -- see openClaw()
+    // ...AND THEN GO HOME (config::A_RELEASE_DESCEND_MS; driver, 2026-10-10: "PRESSING a ... needs to
+    // go down like how we do with l2, except its an immediate clamp off and delay the descend by
+    // 500ms"). The jaws are already open -- that happened on the line above, immediately, with no
+    // sensing, which is the whole difference from L2's press. A_RELEASE does the pause and the descent.
+    // NOT AT THE BOTTOM: there is nowhere to go, so A stays a bare toggle exactly as it was -- the same
+    // test L2's score() uses to decide it is a clamp toggle rather than a score.
+    // NOT IN AUTON: auton::clawOpen() comes through here too ("the exact A path"), and a route that
+    // opens the claw has its own next move in mind.
+    // NOT MID-SEQUENCE: a score, a grab or the intake reset owns the arm, and the driver opening the
+    // jaws by hand during one must not also command a height underneath it.
+    if (autonMode_) return;
+    if (lift_.getPosition() <= config::LIFT_BOTTOM_GOAL_DEG || lift_.isSeated()) return;
+    switch (state_) {
+        case State::RELEASING:
+        case State::CLAMPING:
+        case State::GRABBING:
+        case State::LIFT_SETTLE:
+        case State::RETURNING:
+        case State::GRAB_SETTLE:
+        case State::GRAB_PUSH:
+        case State::GRAB_RISE:
+        case State::INTAKE_RESET:
+        case State::A_RELEASE:
+            return;
+        default:
+            break;
+    }
+    enter(State::A_RELEASE);
 }
 
 void Scoring::setAutoclamp(bool on) {
@@ -857,6 +899,23 @@ void Scoring::update() {
             if (lift_.isSeated() || lift_.isBlocked() || lift_.isFaulted()) enter(State::IDLE);
             break;
 
+        case State::A_RELEASE:
+            if (!aReleaseDown_) {
+                if (elapsed < static_cast<std::uint32_t>(config::A_RELEASE_DESCEND_MS)) break;
+                aReleaseDown_ = true;
+                hasCommanded_ = false;  // the descent is the lift's move, not a tracked height
+                setPivot(true);         // OUT is the default down position, same as stow()
+                // THE SAME TRIP HOME AN L2 SCORE ENDS WITH: a plain command to the bottom, which
+                // lift_preset::DOWN makes the banded DESCEND -> FINAL -> SEAT (or the forced run-down,
+                // if config::LIFT_FORCE_DOWN is ever switched back on -- either way A and L2 agree,
+                // which is what "go down like how we do with l2" asks for).
+                lift_.setTarget(preset::DOWN);
+                break;
+            }
+            // Seated is done. BLOCKED / FAULT hand the buttons back rather than holding them.
+            if (lift_.isSeated() || lift_.isBlocked() || lift_.isFaulted()) enter(State::IDLE);
+            break;
+
         case State::MOVING: {
             // Pivot by height, every tick: heading to the intake it is BACK inside the handoff zone and
             // OUT above it, so on R1 it swings BACK as the arm comes down into the zone -- not only once
@@ -896,6 +955,7 @@ const char* Scoring::stateName() const {
         case State::SCORED: return "SCORED UP";
         case State::RETURNING: return "RETURNING";
         case State::INTAKE_RESET: return resetDown_ ? "IN RESETv" : "IN RESET^";
+        case State::A_RELEASE: return aReleaseDown_ ? "A DROPv" : "A DROP";
         case State::MOVING: return "MOVING";
     }
     return "?";

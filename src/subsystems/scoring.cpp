@@ -832,14 +832,17 @@ void Scoring::update() {
 
         case State::INTAKE_RESET:
             if (!resetDown_) {
-                // THE RISE, with the pivot swung OUT the moment the arm is clear of it -- the same
-                // by-height rule as GRAB_RISE above, checked every tick so it happens mid-rise rather
-                // than on arrival. The descent waits for the cylinder's own PIVOT_TIME_MS on top of
-                // that (pivotDone()), because coming back down past an engaged pivot is the one thing
-                // this whole manoeuvre exists to avoid.
-                if (lift_.getPosition() > config::PIVOT_RELEASE_UP_DEG) setPivot(true);
+                // THE RISE, with the pivot swung OUT only once the arm is properly clear of it --
+                // INTAKE_RESET_PIVOT_UP_DEG, which is the height the pivot swings IN at less the same
+                // reach margin step (a) uses. It used to borrow PIVOT_RELEASE_UP_DEG and retract with
+                // the arm barely five degrees off the handoff, which is what caught (driver,
+                // 2026-10-10). Checked every tick, so it happens mid-rise rather than on arrival. The
+                // descent then waits for the cylinder's own PIVOT_TIME_MS as well (pivotDone()),
+                // because coming back DOWN past an engaged pivot is what this manoeuvre exists to
+                // avoid.
+                if (lift_.getPosition() >= config::INTAKE_RESET_PIVOT_UP_DEG) setPivot(true);
                 const bool clear = pivotOut_ && pivotDone() &&
-                                   lift_.getPosition() > config::PIVOT_RELEASE_UP_DEG;
+                                   lift_.getPosition() >= config::INTAKE_RESET_PIVOT_UP_DEG;
                 // A lift that gave up (caught on something, or faulted) still gets the pivot out and
                 // still goes home: the timeout is the backstop behind both.
                 if (clear || lift_.isBlocked() || lift_.isFaulted() ||

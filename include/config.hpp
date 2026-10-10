@@ -332,10 +332,22 @@ inline constexpr int GRAB_RISE_TIMEOUT_MS = 4000;            // TUNE: backstop f
 // at the bottom. (Before this, L2 there did nothing at all: the claw is open at the handoff, so
 // Scoring::score() fell through its "nothing held" test and returned.)
 //
-// THE HEIGHT TO RISE TO. The pivot may only retract once the arm is clear of it, which is exactly what
-// PIVOT_RELEASE_UP_DEG means in the grab rise -- so this is that height plus a margin, not a number of
-// its own. It is deliberately the SMALLEST rise that works: the arm is coming straight back down.
-inline constexpr double INTAKE_RESET_CLEAR_DEG = PIVOT_RELEASE_UP_DEG + 3.0;  // TUNE: the margin
+// THE HEIGHT TO RISE TO, AND THE HEIGHT THE PIVOT MAY SWING OUT AT (the driver, 2026-10-10: "when
+// we're resetting the lift (L2) from the intaking position, make sure it lifts a little bit before
+// deactivating the pivot so it doesn't contact").
+// IT USED TO BORROW PIVOT_RELEASE_UP_DEG, which is lift_preset::INTAKE + 5.2 -- so the pivot retracted
+// with the arm barely five degrees off the handoff, and caught on the way past. THE RIGHT NUMBER WAS
+// ALREADY IN THE FILE: INTAKE_PIVOT_TRIGGER_DEG is the height the pivot swings IN at, i.e. the height
+// at which the pivot and the claw are KNOWN to clear each other, measured on this mechanism. Swinging
+// OUT needs the same room, so the reset now uses the same height in both directions rather than a
+// number of its own -- and it follows the pivot trigger automatically if that is ever re-tuned.
+//   _PIVOT_UP_DEG  the arm must be at least this high before the pivot may deactivate. The same
+//                  INTAKE_PIVOT_REACH_DEG margin step (a) uses, for the same reason: a bare arrival
+//                  test latches anywhere inside LIFT_TOLERANCE_DEG and would swing the pivot 5 deg low.
+//   _CLEAR_DEG     what the rise is actually COMMANDED to -- above the gate, so the arm reliably
+//                  crosses it rather than settling just under it inside the arrival tolerance.
+inline constexpr double INTAKE_RESET_PIVOT_UP_DEG = INTAKE_PIVOT_TRIGGER_DEG - INTAKE_PIVOT_REACH_DEG;
+inline constexpr double INTAKE_RESET_CLEAR_DEG = INTAKE_PIVOT_TRIGGER_DEG + 3.0;  // TUNE: the margin
 inline constexpr int INTAKE_RESET_RISE_TIMEOUT_MS = 1500;    // TUNE: backstop; carry on down regardless
 
 // ---------------------------------------------------------------------------

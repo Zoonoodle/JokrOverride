@@ -636,18 +636,28 @@ void Scoring::update() {
             break;
 
         // --- THE INTAKE SEQUENCE ----------------------------------------------------------------
-        case State::INTAKE_APPROACH:
-            // (a) running to 13.5 with the pivot disengaged. (b) THE TRIGGER: the tick the lift
-            // arrives -- from above OR below, liftArrived() is a distance test, not a direction one --
-            // move on, and INTAKE_DESCEND's entry engages the pivot immediately.
-            // The timeout is a backstop so a blocked arm cannot sit here forever; carrying on is safe
-            // because the next step is also downward.
-            if (liftArrived(config::INTAKE_PIVOT_TRIGGER_DEG) || lift_.isBlocked() ||
+        case State::INTAKE_APPROACH: {
+            // (a) running UP to INTAKE_PIVOT_TRIGGER_DEG with the pivot disengaged. (b) THE TRIGGER:
+            // move on, and INTAKE_PIVOT_WAIT's entry engages the pivot immediately.
+            //
+            // THE ARM HAS TO REALLY BE UP THERE, not merely "arrived" (driver, 2026-10-09: "it needs
+            // to go higher before pivoting and going back down"). liftArrived() is the lift's own
+            // arrival latch, and for a non-precise move that latches anywhere inside
+            // LIFT_TOLERANCE_DEG -- 5 deg -- so this used to let the pivot swing in with the claw up
+            // to a whole tolerance band BELOW the trigger. However high the trigger was tuned, the
+            // height the pivot actually engaged at was a 5 deg range under it. The position test is
+            // the fix; the arrival latch is kept as well, so a move that settles high still counts.
+            const bool highEnough =
+                lift_.getPosition() >= config::INTAKE_PIVOT_TRIGGER_DEG - config::INTAKE_PIVOT_REACH_DEG;
+            // The timeout is the backstop so a blocked or short-stopping arm cannot sit here forever;
+            // carrying on is safe because the next step is also downward.
+            if ((highEnough && liftArrived(config::INTAKE_PIVOT_TRIGGER_DEG)) || lift_.isBlocked() ||
                 lift_.isFaulted() ||
                 elapsed >= static_cast<std::uint32_t>(config::INTAKE_APPROACH_TIMEOUT_MS)) {
                 enter(State::INTAKE_PIVOT_WAIT);
             }
             break;
+        }
 
         case State::INTAKE_PIVOT_WAIT:
             // (b) holding 13.5 with the pivot engaged. The only exit is the timer: the pivot has no

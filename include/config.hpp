@@ -232,15 +232,28 @@ inline constexpr double MAX = 179.5;
 // toward the intake to receive a cup = pivot BACK = setPivot(false) = pivotOut_ false, and with
 // PIVOT_OUT_IS_ADI_HIGH false that is the ADI pin HIGH. Disengaged = setPivot(true) = OUT = pin LOW.
 // STEP (a)/(b)'s HEIGHT: how high the arm goes, pivot DISENGAGED, before the pivot is engaged and the
-// slow walk down to lift_preset::INTAKE begins. 51.5 -> 30 -> 46.5 (driver, 2026-10-09: "go back to
-// old pivot height, but like 5 degrees below that" -- the old height was 51.5). It only has to be high
-// enough to give the pivot room to swing in under the claw, so it is tuned by eye against the
-// mechanism, not derived from anything.
+// slow walk down to lift_preset::INTAKE begins. 51.5 -> 30 -> 46.5 -> 51.5: the "5 degrees below the
+// old height" experiment is reverted, because the driver, 2026-10-09: "when going into the intaking
+// phase (like when pressing r1), the lift resets and lifts up to pivot. It needs to go higher before
+// pivoting and going back down". It only has to be high enough to give the pivot room to swing in
+// under the claw -- an ABSOLUTE clearance over the intake, not a gap above the handoff -- so it is
+// tuned by eye against the mechanism and derived from nothing.
+// AND IT IS NOW ACTUALLY REACHED. See INTAKE_PIVOT_REACH_DEG: step (a) used to hand over on
+// liftArrived(), which latches anywhere inside LIFT_TOLERANCE_DEG (5 deg), so the pivot could engage
+// with the arm 5 deg SHORT of this number -- i.e. the effective pivot height was anywhere in a 5 deg
+// band below it, which is most of why it looked too low however this was tuned.
 // IT MUST STAY ABOVE lift_preset::INTAKE -- the sequence RISES to here and then DESCENDS to the
 // handoff, and the driver's rule is "pivot is above that" -- and the gap between the two is what step
 // (c) walks down at INTAKE_DESCEND_SPEED_PCT: 46.5 -> 31 is 15.5 deg, about 0.6 s at ~27 deg/s plus
 // the precise walk-in, comfortably inside INTAKE_DESCEND_TIMEOUT_MS.
-inline constexpr double INTAKE_PIVOT_TRIGGER_DEG = 46.5;     // TUNE: driver 2026-10-09 (was 30, 51.5)
+inline constexpr double INTAKE_PIVOT_TRIGGER_DEG = 51.5;     // TUNE: driver 2026-10-09 (was 46.5, 30)
+// HOW CLOSE TO INTAKE_PIVOT_TRIGGER_DEG COUNTS AS "UP THERE" before the pivot may engage. The arm must
+// be within this of the trigger -- measured on the POSITION, not on the lift's own arrival latch --
+// which is what stops the pivot swinging in while the claw is still LIFT_TOLERANCE_DEG short.
+// INTAKE_APPROACH_TIMEOUT_MS remains the backstop behind it, so a blocked or short-stopping arm still
+// moves the sequence on rather than waiting at step (a) forever; it just no longer happens as a matter
+// of routine. Keep it well under LIFT_TOLERANCE_DEG or it changes nothing.
+inline constexpr double INTAKE_PIVOT_REACH_DEG = 1.5;        // TUNE: driver 2026-10-09
 // How long step (b) holds 13.5 after engaging the pivot, so the cylinder is fully retracted in
 // before the descent starts. Raise it if the claw is still swinging in as the arm starts down.
 inline constexpr int INTAKE_PIVOT_SETTLE_MS = 500;           // TUNE: driver 2026-10-07

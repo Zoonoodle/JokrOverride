@@ -1330,6 +1330,7 @@ void Lift::updateScore(std::uint32_t now, double dt, double position) {
             pressProgressSince_ = now;
         }
         const bool stopRelease =
+            config::L2_PRESS_PROGRESS_MS > 0 &&  // 0 disables the test entirely -- see config.hpp
             fired == ContactDetector::Trigger::NONE && !travelRelease && !floorRelease &&
             now - phaseStart_ >= static_cast<std::uint32_t>(config::L2_CONTACT_IGNORE_MS) &&
             pressProgressSince_ != 0 &&

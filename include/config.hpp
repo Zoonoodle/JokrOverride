@@ -740,25 +740,25 @@ inline constexpr float LIFT_SEAT_MV = -800.0f;               // LEGACY: supersed
 // INDEPENDENT OF LIFT_HOME_MV, on purpose. It STARTS equal to it (-3500), which is "the same speed it
 // does when it resets lift position at the first", but they are two separate knobs: lower THIS one on
 // its own if SEAT(hot) shows up or the motors run warm, without slowing homing back down.
-// THE WHOLE SWEEP, IN ONE AFTERNOON: -3500 -> -10000 -> -5400 -> -9600 -> -6000 -> -5400 -> -1800,
-// and -1800 is 15% of LIFT_MAX_MV -- where it rests (the driver, 2026-10-09: "our lift no longer needs
-// to be forced down at all. it just needs to hold steady at like 15% speed"). Everything from 45% up
-// was pressing harder than the job needs: the arm is resting on its own hard stop down here and the
-// FRAME is what holds it. This is only enough to keep it there and take the rubber bands' pull-up out,
-// not to drive anything into the floor. It is shared with AUTON_DOWN_PUSH_MV, which is now equal to it.
+// THE WHOLE SWEEP, IN ONE AFTERNOON: -3500 -> -10000 -> -5400 -> -9600 -> -6000 -> -5400 -> -1800 ->
+// -2400, i.e. 20% of LIFT_MAX_MV (the driver, 2026-10-09: "use 10 more power than 10 for our bottom
+// height"). Everything from 45% up was pressing harder than the job needs -- the arm is resting on its
+// own hard stop down here and the FRAME is what holds it, so this only has to keep it there and take
+// the rubber bands' pull-up out -- but 15% was a little under what it took to do that reliably, so 20%
+// is where it sits. Shared with AUTON_DOWN_PUSH_MV, which is equal to it.
 // THE TRIP DOWN IS A DIFFERENT THING ENTIRELY and is no longer forced at all -- see LIFT_FORCE_DOWN --
 // so if the arm does not get low enough, look at the descent, not at this.
 // The DESCENT is untouched: L2_RUN_DOWN_MV still forces its way to the stop at -10000, and homing
 // still drives down at LIFT_HOME_MV. This is only what happens once the arm is THERE.
 // HEAT, for scale. A stalled V5 motor turns ALL of its electrical power into heat -- no mechanical
 // output at zero speed -- and the winding looks like ~4.8 ohms (12 V over the firmware's 2.5 A limit),
-// so -1800 is ~0.38 A and ~0.7 W per motor: a quarter of the original -3500's ~2.6 W and a
-// twenty-seventh of the ~19 W that 80% cost. At roughly 50 J/K that is ~0.014 K/s while seated -- about
-// a degree over a MINUTE of continuous seat, so heat is simply not a consideration at this value any
-// more. The guard still applies: over the limit the SEAT branch brake-HOLDS
+// so -2400 is ~0.5 A and ~1.2 W per motor: under half the original -3500's ~2.6 W and a sixteenth of
+// the ~19 W that 80% cost. At roughly 50 J/K that is ~0.024 K/s while seated -- a degree per 40 s of
+// continuous seat, so heat is not a consideration at this value. The guard still applies: over the
+// limit the SEAT branch brake-HOLDS
 // (firmware position hold, not a coast -- the arm cannot fall), the brain says SEAT(hot), and the push
 // resumes by itself once the motor cools, because seatHot_ is re-read twice a second and never latched.
-inline constexpr float LIFT_DOWN_PUSH_MV = -1800.0f;         // TUNE: 15% of LIFT_MAX_MV (was -5400, -9600, -10000, -3500)
+inline constexpr float LIFT_DOWN_PUSH_MV = -2400.0f;         // TUNE: 20% of LIFT_MAX_MV (was -1800/15%, -5400, -10000)
 // HEAT. This is a genuine stall, so the motors dissipate V^2/R with no back-EMF: at 3.5 V into a V5
 // motor's ~4.8 ohm that is ~0.73 A and ~2.6 W each, ~5 W across the pair, versus ~0.14 W at the old
 // -800 mV. Low in absolute terms but ~19x more, and it now runs for the whole time the arm is parked
@@ -1787,15 +1787,15 @@ inline constexpr int L2_AUTOCLAMP_LOCKOUT_MS = 1000;         // TUNE: driver 202
 // L2_RUN_DOWN_MV per descent, which is why it stays.
 inline constexpr double AUTON_RUN_DOWN_ZERO_DEG = lift_preset::DOWN + 0.8;  // TUNE (driver: 2.0)
 inline constexpr int AUTON_RUN_DOWN_STILL_MS = 300;          // TUNE: ms (driver: 120)
-// 2. THE SEAT AT THE BOTTOM IS THE SAME 15% THE DRIVER'S IS. It tracked L2_RUN_DOWN_MV (-10000) for an
-// afternoon, then 80%, 50% and 45%, all of which were pressing harder than the job needs; the driver's
-// answer in the end was that the lift "just needs to hold steady at like 15% speed". It stays a
+// 2. THE SEAT AT THE BOTTOM IS THE SAME 20% THE DRIVER'S IS. It tracked L2_RUN_DOWN_MV (-10000) for an
+// afternoon, then 80%, 50% and 45%, all of which pressed harder than the job needs, then 15%, which was
+// a little light; 20% is where it sits ("use 10 more power than 10 for our bottom height"). It stays a
 // SEPARATE KNOB from the driver's even though the two are equal today, because they are different jobs
 // -- this one is the auton bottom, where a route may be driving the robot into floor objects.
 //   The claw rides up over floor objects: raise this first, and see the heat note on
 //   LIFT_DOWN_PUSH_MV. The trip down is no longer forced at all (LIFT_FORCE_DOWN), so check whether
 //   the DESCENT is what is leaving the arm high before reaching for the hold.
-inline constexpr float AUTON_DOWN_PUSH_MV = -1800.0f;        // TUNE: 15% of LIFT_MAX_MV (was -5400, -9600, -10000)
+inline constexpr float AUTON_DOWN_PUSH_MV = -2400.0f;        // TUNE: 20% of LIFT_MAX_MV (was -1800/15%, -5400, -10000)
 // Most the loop may push DOWNWARD (magnitude, mV) while pressing. This is the crush limit: the
 // velocity loop has 12000 mV of authority and an integral that winds up, so without a cap it would
 // keep increasing the push until it moved -- i.e. flatten the stack. 7000 mV through the 4:1 is about

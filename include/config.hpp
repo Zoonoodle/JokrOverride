@@ -132,14 +132,21 @@ namespace lift_preset {
 // still read 0 makes the lift declare SEAT about 32 deg ABOVE the stop and start FINAL's forcing push
 // from there, so the two go together or not at all.
 inline constexpr double DOWN = 0.0;                          // THE HARD STOP, and homing zeroes the sensor here
-// THE INTAKE RESTING HEIGHT -- the bottom of the new intake sequence (driver, 2026-10-07). History:
-// 1.1 -> 6.1 -> -3.3 -> 23.0 -> -2.2. It is no longer a single "go here and park" handoff: R1 and every
-// auton intake call now run a FOUR-STEP sequence, and this constant is only the height step (c) ends
-// at and step (d) bounces from. The whole sequence lives in "THE INTAKE SEQUENCE" below.
-// Everything that keys off the handoff still keys off THIS number: the pivot handoff zone is
-// INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG = -2.2 .. 7.8, Scoring::heightOf(INTAKE_POS) is this, and
-// setTarget() still auto-promotes any goal within half a degree of it to PRECISE.
-inline constexpr double INTAKE = 22.0;                       // TUNE: 70.5 in the old frame
+// THE INTAKE RESTING HEIGHT -- where the four-step intake sequence ends and waits for a cup. R1 and
+// every auton intake call run that sequence; this constant is the height step (c) walks down to and
+// step (d) holds. The sequence itself is in "THE INTAKE SEQUENCE" below.
+// History: 1.1 -> 6.1 -> -3.3 -> 23.0 -> -2.2 -> 22 -> 42 -> 40 -> 10 (driver, 2026-10-09: "stay at
+// 10 degrees height for intake now").
+// FIVE THINGS ARE DERIVED FROM THIS NUMBER, so it is the one place to change the handoff and they all
+// follow: GRAB_PUSH_DEPTH_DEG (INTAKE - 2.8 = 7.2), PIVOT_RELEASE_UP_DEG (INTAKE + 5.2 = 15.2),
+// L1_AUTO_INTAKE_UNTIL_DEG (INTAKE + 20 = 30), the pivot handoff zone
+// (INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG = 10 .. 20), and INTAKE_RESET_CLEAR_DEG by way of
+// PIVOT_RELEASE_UP_DEG (18.2). Scoring::heightOf(INTAKE_POS) is this, and setTarget() auto-promotes
+// any goal within half a degree of it to PRECISE.
+// KEEP IT ABOVE LIFT_BOTTOM_GOAL_DEG (5). Below that, setTarget() stops treating it as a position move
+// and runs it as the BANDED DESCENT TO THE HARD STOP instead -- the handoff would stop being a height
+// the arm holds and become a trip into the frame.
+inline constexpr double INTAKE = 10.0;                       // TUNE: driver 2026-10-09 (was 40, 42, 22)
 inline constexpr double MATCHLOAD = DOWN;                    // the matchload height IS the bottom (2026-10-07)
 // FRONT TOGGLE: the height the arm goes to at the start of the match route to flip the front toggle,
 // then comes straight back down from (fast -- see auton::liftDownFast()). Deliberately its OWN
@@ -224,7 +231,15 @@ inline constexpr double MAX = 179.5;
 // travel / scoring position)", which is the OPPOSITE of the driver's "engaged". Engaged = pulled IN
 // toward the intake to receive a cup = pivot BACK = setPivot(false) = pivotOut_ false, and with
 // PIVOT_OUT_IS_ADI_HIGH false that is the ADI pin HIGH. Disengaged = setPivot(true) = OUT = pin LOW.
-inline constexpr double INTAKE_PIVOT_TRIGGER_DEG = 51.5;     // TUNE: 100.0 in the old frame
+// STEP (a)/(b)'s HEIGHT: how high the arm goes, pivot DISENGAGED, before the pivot is engaged and the
+// slow walk down to lift_preset::INTAKE begins (driver, 2026-10-09: "intake needs to go up to 30 for
+// that pivot area"). It only has to be high enough to give the pivot room to swing in under the claw,
+// so it is tuned by eye against the mechanism, not derived from anything.
+// IT MUST STAY ABOVE lift_preset::INTAKE -- the sequence RISES to here and then DESCENDS to the
+// handoff -- and the gap between the two is what step (c) walks down at INTAKE_DESCEND_SPEED_PCT:
+// 30 -> 10 is 20 deg, about 0.74 s at ~27 deg/s plus the precise walk-in, comfortably inside
+// INTAKE_DESCEND_TIMEOUT_MS.
+inline constexpr double INTAKE_PIVOT_TRIGGER_DEG = 30.0;     // TUNE: driver 2026-10-09 (was 51.5)
 // How long step (b) holds 13.5 after engaging the pivot, so the cylinder is fully retracted in
 // before the descent starts. Raise it if the claw is still swinging in as the arm starts down.
 inline constexpr int INTAKE_PIVOT_SETTLE_MS = 500;           // TUNE: driver 2026-10-07

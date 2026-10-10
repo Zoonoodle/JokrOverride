@@ -725,26 +725,23 @@ inline constexpr float LIFT_SEAT_MV = -800.0f;               // LEGACY: supersed
 // INDEPENDENT OF LIFT_HOME_MV, on purpose. It STARTS equal to it (-3500), which is "the same speed it
 // does when it resets lift position at the first", but they are two separate knobs: lower THIS one on
 // its own if SEAT(hot) shows up or the motors run warm, without slowing homing back down.
-// -3500 -> -10000 -> -5400 -> -9600, settled at 80% of LIFT_MAX_MV (the driver, 2026-10-09, after
-// trying all of them on the robot: "change it back to the old faster speed holding down, do 80%
-// instead of 45%"). 45% held the arm on its stop but was not enough to drive a claw down onto what it
-// is collecting; the full -10000 was too much. 80% is the number that stuck, and it is shared by every
-// HOLD-DOWN on the robot: this, AUTON_DOWN_PUSH_MV and AUTON_LIFT_PUSH_PCT all mean the same force.
+// -3500 -> -10000 -> -5400 -> -9600 -> -6000: SETTLED AT 50% of LIFT_MAX_MV (the driver, 2026-10-09,
+// after trying the whole range on the robot in one afternoon -- "do 50%"). The full -10000 was too
+// much, 45% held the arm on its stop but would not press a claw down onto what it is collecting, 80%
+// went too far the other way, and 50% is the number that stuck. It is shared by every HOLD-DOWN on the
+// robot: this, AUTON_DOWN_PUSH_MV and AUTON_LIFT_PUSH_PCT all mean the same force.
 // The DESCENT is untouched: L2_RUN_DOWN_MV still forces its way to the stop at -10000, and homing
 // still drives down at LIFT_HOME_MV. This is only what happens once the arm is THERE.
-// HEAT, AND IT MATTERS AT THIS VALUE. A stalled V5 motor turns ALL of its electrical power into heat
-// -- no mechanical output at zero speed -- and the winding looks like ~4.8 ohms (12 V over the
-// firmware's 2.5 A limit), so -9600 is ~2.0 A and ~19 W per motor, on each of two. That is seven times
-// the old -3500's ~2.6 W and within a tenth of the -10000 that was measured as too much. Taking motor
-// plus housing as roughly 50 J/K with no airflow it is ~0.37 K/s WHILE ACTUALLY SEATED, so from the
-// 30-35 C a route's lifting leaves behind, LIFT_SEAT_TEMP_LIMIT_C is 40-55 s of CONTINUOUS seat away.
-// A 15 s match auton only seats in the gaps and gains two or three degrees; a 60 s skills run with
-// 20-25 s seated gains 8-10 K and lands close to the guard, and a route that seats the arm and then
-// leaves it seated for the rest of the run will trip it. When it does, the SEAT branch brake-HOLDS
+// HEAT, for scale. A stalled V5 motor turns ALL of its electrical power into heat -- no mechanical
+// output at zero speed -- and the winding looks like ~4.8 ohms (12 V over the firmware's 2.5 A limit),
+// so -6000 is ~1.25 A and ~7.5 W per motor, on each of two: about three times the original -3500's
+// ~2.6 W, and well under half the ~19 W that 80% cost. At roughly 50 J/K with no airflow that is
+// ~0.15 K/s WHILE ACTUALLY SEATED, so a 15 s match auton gains about a degree and a 60 s skills run
+// with 20-25 s seated gains three or four -- comfortably clear of LIFT_SEAT_TEMP_LIMIT_C from any
+// sensible starting temperature. The guard still applies: over the limit the SEAT branch brake-HOLDS
 // (firmware position hold, not a coast -- the arm cannot fall), the brain says SEAT(hot), and the push
-// resumes by itself once the motor cools: seatHot_ is re-read twice a second, never latched.
-//   SEAT(hot) in skills: seat the arm later in the route first, then lower this.
-inline constexpr float LIFT_DOWN_PUSH_MV = -9600.0f;         // TUNE: 80% of LIFT_MAX_MV (was -5400, -10000, -3500)
+// resumes by itself once the motor cools, because seatHot_ is re-read twice a second and never latched.
+inline constexpr float LIFT_DOWN_PUSH_MV = -6000.0f;         // TUNE: 50% of LIFT_MAX_MV (was -9600, -5400, -10000, -3500)
 // HEAT. This is a genuine stall, so the motors dissipate V^2/R with no back-EMF: at 3.5 V into a V5
 // motor's ~4.8 ohm that is ~0.73 A and ~2.6 W each, ~5 W across the pair, versus ~0.14 W at the old
 // -800 mV. Low in absolute terms but ~19x more, and it now runs for the whole time the arm is parked
@@ -971,14 +968,13 @@ inline constexpr double LIFT_MANUAL_DOWN_PCT = 50.0;         // TUNE: D-pad Down
 //   It does not press hard enough to seat the pin, or does not move at all: raise it.
 //   It lifts the back of the robot / slams the pin down / stalls the motors warm: LOWER it -- but see
 //     the band floor above before going far below 40.
-// 45 -> 85 -> 45 -> 80, all on 2026-10-09 and all on the robot. A timed liftPushFor() IS a hold-down,
-// so it tracks LIFT_DOWN_PUSH_MV and AUTON_DOWN_PUSH_MV rather than the descent that gets the arm
-// there: 85 (matching the descent) was too much, 45 was not enough to press the claw down, and 80 is
-// where the driver settled -- "change it back to the old faster speed holding down, do 80% instead of
-// 45%". IT IS OPEN LOOP, with no cap and no closed loop behind it (Lift::driverPower()), so a long
-// push at this percentage is real heat; see the note on LIFT_DOWN_PUSH_MV. A single call can still ask
-// for something different: liftPushFor(400, 45).
-inline constexpr double AUTON_LIFT_PUSH_PCT = 80.0;          // TUNE: % of LIFT_MAX_MV, downward (45 -> 85 -> 45 -> 80)
+// 45 -> 85 -> 45 -> 80 -> 50, all on 2026-10-09 and all on the robot. A timed liftPushFor() IS a
+// hold-down, so it tracks LIFT_DOWN_PUSH_MV and AUTON_DOWN_PUSH_MV rather than the descent that gets
+// the arm there: 85 (matching the descent) was too much, 45 was not enough to press the claw down, 80
+// was too much again, and 50 is where the driver settled. IT IS OPEN LOOP, with no cap and no closed
+// loop behind it (Lift::driverPower()), so a long push at this percentage is real heat; see the note
+// on LIFT_DOWN_PUSH_MV. A single call can still ask for something different: liftPushFor(400, 45).
+inline constexpr double AUTON_LIFT_PUSH_PCT = 50.0;          // TUNE: % of LIFT_MAX_MV, downward (45 -> 85 -> 45 -> 80 -> 50)
 // ...and the same thing UPWARD (auton::liftPushUp() / liftPushUpFor()), for the driver's first-pin nudge.
 // THIS IS THE TRANSLATION OF THEIR OLD-LIBRARY LINES, which were:
 //     liftMotors.move(50);  pros::delay(300);  liftMotors.move(0);
@@ -1758,17 +1754,15 @@ inline constexpr int L2_AUTOCLAMP_LOCKOUT_MS = 1000;         // TUNE: driver 202
 // L2_RUN_DOWN_MV per descent, which is why it stays.
 inline constexpr double AUTON_RUN_DOWN_ZERO_DEG = lift_preset::DOWN + 0.8;  // TUNE (driver: 2.0)
 inline constexpr int AUTON_RUN_DOWN_STILL_MS = 300;          // TUNE: ms (driver: 120)
-// 2. THE SEAT AT THE BOTTOM IS THE SAME 80% THE DRIVER'S IS. This tracked L2_RUN_DOWN_MV (-10000) for
-// an afternoon, which was too much, then 45%, which did not hold the claw down on the floor; 80% is
-// where the driver landed ("change it back to the old faster speed holding down, do 80% instead of
-// 45%"). It is NO LONGER TIED TO THE RUN-DOWN -- the descent still forces itself onto the stop at
-// L2_RUN_DOWN_MV and only the hold is tuned here -- and it stays a SEPARATE KNOB from the driver's
-// even though the two are equal today, because they are different jobs: this one holds a claw down on
-// the floor while the robot drives into things.
-//   READ THE HEAT NOTE ON LIFT_DOWN_PUSH_MV BEFORE RAISING IT. At 80% a stalled lift motor is ~19 W,
-//   and a long skills run can reach LIFT_SEAT_TEMP_LIMIT_C; the guard brake-holds and self-clears, but
-//   while it is tripped the claw is not being pressed down, which is what this constant is for.
-inline constexpr float AUTON_DOWN_PUSH_MV = -9600.0f;        // TUNE: 80% of LIFT_MAX_MV (was -5400, -10000)
+// 2. THE SEAT AT THE BOTTOM IS THE SAME 50% THE DRIVER'S IS. This tracked L2_RUN_DOWN_MV (-10000) for
+// an afternoon, which was too much, then 45% (would not hold the claw down on the floor), then 80%
+// (too much again); 50% is where the driver landed. It is NO LONGER TIED TO THE RUN-DOWN -- the descent
+// still forces itself onto the stop at L2_RUN_DOWN_MV and only the hold is tuned here -- and it stays
+// a SEPARATE KNOB from the driver's even though the two are equal today, because they are different
+// jobs: this one holds a claw down on the floor while the robot drives into things.
+//   READ THE HEAT NOTE ON LIFT_DOWN_PUSH_MV BEFORE RAISING IT. 50% is ~7.5 W per stalled motor and a
+//   skills run stays clear of LIFT_SEAT_TEMP_LIMIT_C; 80% was ~19 W and did not.
+inline constexpr float AUTON_DOWN_PUSH_MV = -6000.0f;        // TUNE: 50% of LIFT_MAX_MV (was -9600, -5400, -10000)
 // Most the loop may push DOWNWARD (magnitude, mV) while pressing. This is the crush limit: the
 // velocity loop has 12000 mV of authority and an integral that winds up, so without a cap it would
 // keep increasing the push until it moved -- i.e. flatten the stack. 7000 mV through the 4:1 is about

@@ -135,18 +135,18 @@ inline constexpr double DOWN = 0.0;                          // THE HARD STOP, a
 // THE INTAKE RESTING HEIGHT -- where the four-step intake sequence ends and waits for a cup. R1 and
 // every auton intake call run that sequence; this constant is the height step (c) walks down to and
 // step (d) holds. The sequence itself is in "THE INTAKE SEQUENCE" below.
-// History: 1.1 -> 6.1 -> -3.3 -> 23.0 -> -2.2 -> 22 -> 42 -> 40 -> 10 (driver, 2026-10-09: "stay at
-// 10 degrees height for intake now").
+// History: 1.1 -> 6.1 -> -3.3 -> 23.0 -> -2.2 -> 22 -> 42 -> 40 -> 10 -> 31 (driver, 2026-10-09: "i
+// was wrong about intake being like 10 height and pivot at 30 ... intake needs to stay at 31 height").
 // FIVE THINGS ARE DERIVED FROM THIS NUMBER, so it is the one place to change the handoff and they all
-// follow: GRAB_PUSH_DEPTH_DEG (INTAKE - 2.8 = 7.2), PIVOT_RELEASE_UP_DEG (INTAKE + 5.2 = 15.2),
-// L1_AUTO_INTAKE_UNTIL_DEG (INTAKE + 20 = 30), the pivot handoff zone
-// (INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG = 10 .. 20), and INTAKE_RESET_CLEAR_DEG by way of
-// PIVOT_RELEASE_UP_DEG (18.2). Scoring::heightOf(INTAKE_POS) is this, and setTarget() auto-promotes
+// follow: GRAB_PUSH_DEPTH_DEG (INTAKE - 2.8 = 28.2), PIVOT_RELEASE_UP_DEG (INTAKE + 5.2 = 36.2),
+// L1_AUTO_INTAKE_UNTIL_DEG (INTAKE + 20 = 51), the pivot handoff zone
+// (INTAKE .. INTAKE + PIVOT_HANDOFF_ZONE_DEG = 31 .. 41), and INTAKE_RESET_CLEAR_DEG by way of
+// PIVOT_RELEASE_UP_DEG (39.2). Scoring::heightOf(INTAKE_POS) is this, and setTarget() auto-promotes
 // any goal within half a degree of it to PRECISE.
 // KEEP IT ABOVE LIFT_BOTTOM_GOAL_DEG (5). Below that, setTarget() stops treating it as a position move
 // and runs it as the BANDED DESCENT TO THE HARD STOP instead -- the handoff would stop being a height
 // the arm holds and become a trip into the frame.
-inline constexpr double INTAKE = 10.0;                       // TUNE: driver 2026-10-09 (was 40, 42, 22)
+inline constexpr double INTAKE = 31.0;                       // TUNE: driver 2026-10-09 (was 10, 40, 42, 22)
 inline constexpr double MATCHLOAD = DOWN;                    // the matchload height IS the bottom (2026-10-07)
 // FRONT TOGGLE: the height the arm goes to at the start of the match route to flip the front toggle,
 // then comes straight back down from (fast -- see auton::liftDownFast()). Deliberately its OWN
@@ -232,17 +232,37 @@ inline constexpr double MAX = 179.5;
 // toward the intake to receive a cup = pivot BACK = setPivot(false) = pivotOut_ false, and with
 // PIVOT_OUT_IS_ADI_HIGH false that is the ADI pin HIGH. Disengaged = setPivot(true) = OUT = pin LOW.
 // STEP (a)/(b)'s HEIGHT: how high the arm goes, pivot DISENGAGED, before the pivot is engaged and the
-// slow walk down to lift_preset::INTAKE begins (driver, 2026-10-09: "intake needs to go up to 30 for
-// that pivot area"). It only has to be high enough to give the pivot room to swing in under the claw,
-// so it is tuned by eye against the mechanism, not derived from anything.
+// slow walk down to lift_preset::INTAKE begins. 51.5 -> 30 -> 46.5 (driver, 2026-10-09: "go back to
+// old pivot height, but like 5 degrees below that" -- the old height was 51.5). It only has to be high
+// enough to give the pivot room to swing in under the claw, so it is tuned by eye against the
+// mechanism, not derived from anything.
 // IT MUST STAY ABOVE lift_preset::INTAKE -- the sequence RISES to here and then DESCENDS to the
-// handoff -- and the gap between the two is what step (c) walks down at INTAKE_DESCEND_SPEED_PCT:
-// 30 -> 10 is 20 deg, about 0.74 s at ~27 deg/s plus the precise walk-in, comfortably inside
-// INTAKE_DESCEND_TIMEOUT_MS.
-inline constexpr double INTAKE_PIVOT_TRIGGER_DEG = 30.0;     // TUNE: driver 2026-10-09 (was 51.5)
+// handoff, and the driver's rule is "pivot is above that" -- and the gap between the two is what step
+// (c) walks down at INTAKE_DESCEND_SPEED_PCT: 46.5 -> 31 is 15.5 deg, about 0.6 s at ~27 deg/s plus
+// the precise walk-in, comfortably inside INTAKE_DESCEND_TIMEOUT_MS.
+inline constexpr double INTAKE_PIVOT_TRIGGER_DEG = 46.5;     // TUNE: driver 2026-10-09 (was 30, 51.5)
 // How long step (b) holds 13.5 after engaging the pivot, so the cylinder is fully retracted in
 // before the descent starts. Raise it if the claw is still swinging in as the arm starts down.
 inline constexpr int INTAKE_PIVOT_SETTLE_MS = 500;           // TUNE: driver 2026-10-07
+// THE HANDOFF HOLD MUST NOT PUSH THE ARM UP (the driver, 2026-10-09: "the lift pid during intake,
+// lifts it up too much opposed to keeping it down").
+// WHY IT DID. Lift::gravityMv_ -- the hold loop's integral, the learned voltage this arm costs to hold
+// a height -- is deliberately KEPT BETWEEN MOVES, because re-learning it from zero every time is what
+// used to make the arm sag and then catch up. That is right when the next hold is near the last one,
+// and wrong for the handoff: it is usually arrived at from a STACK LEVEL, where the hold had learned a
+// large UPWARD voltage, and enterHold() then starts the handoff's hold with it. The arm gets pushed up,
+// and PARK can freeze that voltage after only LIFT_PARK_CONFIRM_MS (100 ms) -- before the integral has
+// unlearned it -- leaving the claw parked ABOVE the handoff with a cup arriving under it. enterHold()'s
+// arrival seed makes it worse rather than better: it adds -kv * velocity, and the approach to the
+// handoff is a DESCENT, so that term is POSITIVE, i.e. yet more upward bias.
+// WHAT THIS DOES. With it true, a hold that starts on the INTAKE height starts with gravityMv_ at ZERO
+// and learns its support from nothing. The hold can then only ever come at the height from BELOW --
+// adding just enough voltage to stop the arm sinking, which is exactly "keep it down" -- and it cannot
+// inherit a stack level's worth of lift. The cost is a little sag on arrival while the integral winds
+// up, which at this height is a fraction of a degree, and the handoff is a PRECISE hold whose position
+// term closes that anyway.
+// Set false to carry the learned voltage into the handoff like every other height.
+inline constexpr bool INTAKE_HOLD_FROM_ZERO = true;          // TUNE: driver 2026-10-09
 // STEP (c)'s SPEED. "it has to go down very slowly to this height and stay there" (driver,
 // 2026-10-07). This caps the descent to 70.5 at a fraction of LIFT_FREE_SPEED_DEG_PER_S, on top of
 // the ordinary precise approach -- Lift::setTargetSlow() applies it as a ceiling in speedProfile(),

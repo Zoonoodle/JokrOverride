@@ -787,6 +787,19 @@ void Lift::enterHold(std::uint32_t now, double holdAt) {
                                 static_cast<double>(config::LIFT_HOLD_MAX_MV));
     }
     velI_ = 0.0;
+    // ...EXCEPT AT THE INTAKE HANDOFF, WHICH MUST NOT BE PUSHED UP (config::INTAKE_HOLD_FROM_ZERO;
+    // the driver, 2026-10-09: "the lift pid during intake, lifts it up too much opposed to keeping it
+    // down"). Everything above is built on CARRYING the learned hold voltage between moves, which is
+    // right when the next height is near the last one -- and wrong here, because the handoff is
+    // normally arrived at from a stack level whose hold had learned a large upward voltage, and the
+    // seed above then ADDS to it (the approach is a descent, so -kv * velocity is positive). The arm
+    // gets pushed up and PARK can freeze that before the integral unlearns it. Starting from zero
+    // makes the hold come at the height from BELOW: it can only add the support the arm actually
+    // needs. The test is the same one setTarget() uses to decide a goal IS the handoff.
+    if (config::INTAKE_HOLD_FROM_ZERO &&
+        std::fabs(holdAt - config::lift_preset::INTAKE) < 0.5) {
+        gravityMv_ = 0.0;
+    }
 }
 
 void Lift::enterDescend(std::uint32_t now, double position, double topPct, double midPct) {

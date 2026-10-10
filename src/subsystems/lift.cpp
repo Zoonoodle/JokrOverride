@@ -559,6 +559,7 @@ const char* Lift::activePresetName() const {
     if (goal_ == preset::FRONT_TOGGLE) return "FRONT TOGGLE";
     if (goal_ == preset::FIRST_SCORE) return "FIRST SCORE";
     if (goal_ == preset::MAX) return "MAX";
+    if (goal_ == preset::STACK_LEVEL_ZERO) return "STACK 0";
     static const char* const kLevelNames[preset::STACK_LEVEL_COUNT] = {"STACK 1", "STACK 2", "STACK 3", "STACK 4",
                                                                         "STACK 5"};
     for (int i = 0; i < preset::STACK_LEVEL_COUNT; ++i)

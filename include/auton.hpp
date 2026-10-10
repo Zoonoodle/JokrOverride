@@ -89,8 +89,11 @@ void wait(int ms);
 // Lift — presets, arbitrary angles, and the waits
 // ---------------------------------------------------------------------------
 /** The five pin-stack heights, config::lift_preset::STACK_LEVELS[0..4]. */
-enum class Level { ONE = 1, TWO = 2, THREE = 3, FOUR = 4, FIVE = 5 };
-/** The arm degrees a Level means. */
+// ZERO is not a stack height: it is config::lift_preset::STACK_LEVEL_ZERO, a sixth named height below
+// level 1 (driver, 2026-10-10). It lives outside the STACK_LEVELS array on purpose -- see the note on
+// that constant -- so adding it renumbered nothing.
+enum class Level { ZERO = 0, ONE = 1, TWO = 2, THREE = 3, FOUR = 4, FIVE = 5 };
+/** The arm degrees a Level means. ZERO is STACK_LEVEL_ZERO; ONE..FIVE index STACK_LEVELS. */
 double heightOf(Level level);
 
 /**

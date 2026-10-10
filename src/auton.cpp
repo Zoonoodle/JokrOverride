@@ -144,6 +144,9 @@ void wait(int ms) {
 // Lift
 // ---------------------------------------------------------------------------
 double heightOf(Level level) {
+    // ZERO is its own constant, not an array entry -- checked BEFORE the clamp below, which would
+    // otherwise fold it onto level 1 (its index is -1).
+    if (level == Level::ZERO) return config::lift_preset::STACK_LEVEL_ZERO;
     int i = static_cast<int>(level) - 1;
     if (i < 0) i = 0;
     if (i >= preset::STACK_LEVEL_COUNT) i = preset::STACK_LEVEL_COUNT - 1;

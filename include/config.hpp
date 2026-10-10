@@ -185,14 +185,29 @@ inline constexpr double FIRST_SCORE = 48.0;                  // PROVISIONAL -- R
 // The old photo-measured set was 26.6 / 54.4 / 72.8 / 116.3 / 128.3, taken before the frame was
 // defined by homing, so they carried whatever offset the arm was sitting at that session. The values
 // above are driver-measured in the current homed frame, where the hard stop is 0.
+// IT MUST MATCH THE NUMBER OF ENTRIES BELOW. It briefly read 52 (2026-10-10, a slip while retuning the
+// heights), and the way that fails is quiet and nasty rather than loud: the extra 47 entries
+// zero-fill, so L1_STEP_CEILING_DEG -- which is STACK_LEVELS[STACK_LEVEL_COUNT - 1] -- became 0.0, and
+// advanceStep() clamps every rung of auton's L1 ladder to the ceiling. auton::stepUp() would have
+// commanded the arm to the BOTTOM instead of up a level, with nothing on the brain to explain it.
 inline constexpr int STACK_LEVEL_COUNT = 5;
 inline constexpr double STACK_LEVELS[STACK_LEVEL_COUNT] = {
-     67.7,  // TUNE: level 1 (116.2 in the old frame)
-     95.5,  // TUNE: level 2 (144.0)
-    111.5,  // TUNE: level 3 (160.0)
-    133.0,  // TUNE: level 4 (181.5)
-    174.5,  // TUNE: level 5, the top (223.0) -- THERE IS NO LEVEL 6
+     ,  // TUNE: level 1 (116.2 in the old frame)
+     85,  // TUNE: level 2 (144.0)
+     110,  // TUNE: level 3 (160.0)
+     135.0,  // TUNE: level 4 (181.5)
+     160.5,  // TUNE: level 5, the top (223.0) -- THERE IS NO LEVEL 6
 };
+// LEVEL 0 (driver, 2026-10-10: "add a level 0 that goes to height 35") -- auton::Level::ZERO, reached
+// with auton::liftTo(auton::Level::ZERO) like any other level.
+// IT IS DELIBERATELY NOT AN ENTRY IN THE ARRAY ABOVE. Prepending it would renumber every index, and
+// those indices are load-bearing all over the program: STACK_LEVELS[0] is what the automatic intake
+// grab rises to (Scoring's GRAB_RISE) and what L1's ladder seeds itself from, STACK_LEVELS[4] is
+// L1_STEP_CEILING_DEG, and autons.cpp's PID tuning table addresses all five by index. A sixth entry at
+// the FRONT would have silently moved the grab rise to 35 and shifted every tuning point by one.
+// So the array stays "the five measured stack heights" and this is its own constant, with
+// auton::heightOf() mapping Level::ZERO to it.
+inline constexpr double STACK_LEVEL_ZERO = 35.0;             // TUNE: driver 2026-10-10
 // Software hard stop: top level (132.7) + 5 deg of margin -- raised with the levels, 2026-10-07
 // (111.9 -> 137.7). It is the ONLY ceiling that needed changing: L1_STEP_CEILING_DEG is derived from
 // STACK_LEVELS' last entry, and the runaway guard (LIFT_FAULT_DEG) is relative to a move's start. setTarget()/moveTo() clamp to this, so it

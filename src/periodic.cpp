@@ -78,7 +78,15 @@ void tick(const Inputs& in) {
         // Done once the arm reaches the stop height. Cancelled by anything that would otherwise fight
         // it -- the manual override, B, a stuck score, or a lift that gave up on the move entirely
         // (BLOCKED/FAULT).
-        const bool done = liftPos <= config::L2_OUTTAKE_STOP_DEG;
+        // DONE = the arm is at the bottom. Two ways of saying that, and BOTH are needed: the height
+        // test is the tuned one (L2_OUTTAKE_STOP_DEG, tied to where FINAL takes over the forcing), and
+        // isSeated() is the robust one. The height test alone depends on the frame's zero being right
+        // -- if homing zeroed a degree or two high the arm NEVER reads at or under the stop height, and
+        // then the only exits left are the score ending or L2_OUTTAKE_MAX_MS, so the rollers run the
+        // full three seconds. That is the "sometimes it doesn't stop outtaking" the driver saw
+        // (2026-10-10). SEAT means the lift itself believes it is on the stop, whatever the number
+        // says, so it catches exactly the case the height test misses.
+        const bool done = liftPos <= config::L2_OUTTAKE_STOP_DEG || robot::lift.isSeated();
         // ...and the moment the descent it belongs to is over. With the two-press L2 that is the end
         // of the one-press score (the arm carries on to the bottom at the scoring speed,
         // so the stop-height test below would never be met), and the end of press 2's run home.
